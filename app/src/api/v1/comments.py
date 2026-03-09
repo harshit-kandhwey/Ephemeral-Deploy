@@ -1,9 +1,9 @@
 from flask import request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from . import api_v1
-from app.src.extensions import db
-from app.src.models.comment import Comment
-from app.src.models.task import Task
+from ...extensions import db
+from ...models.comment import Comment
+from ...models.task import Task
 
 
 @api_v1.route('/tasks/<int:task_id>/comments', methods=['GET'])
@@ -64,7 +64,7 @@ def create_comment(task_id):
 
     # Notify task assignee
     if task.assignee_id and task.assignee_id != user_id:
-        from app.src.tasks.email_tasks import send_comment_notification
+        from ...tasks.email_tasks import send_comment_notification
         send_comment_notification.delay(comment.id, task.assignee_id)
 
     return jsonify(comment.to_dict()), 201

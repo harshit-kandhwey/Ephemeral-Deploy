@@ -1,6 +1,10 @@
 from flask import Blueprint
-from . import auth, users, teams, projects, tasks, comments
 
+# CREATE the blueprint FIRST
 api_v1 = Blueprint('api_v1', __name__)
 
-# Import routes to register them
+# THEN import the routes (they will register themselves on api_v1)
+# Import AFTER blueprint creation to avoid circular imports
+from . import auth, users, teams, projects, tasks, comments
+
+# This allows other modules to do: from app.src.api.v1 import api_v1

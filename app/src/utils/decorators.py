@@ -1,7 +1,27 @@
 from functools import wraps
 from flask import jsonify
 from flask_jwt_extended import get_jwt_identity
-from app.src.models.user import User
+from ..models.user import User
+
+
+def get_current_user_or_401():
+    """
+    Fetch current user from JWT identity or return a 401 error response.
+    Returns:
+        tuple: (user, error_response) where one is None
+        - On success: (User, None)
+        - On failure: (None, (error_json, 401))
+    """
+    try:
+        user_id = int(get_jwt_identity())
+    except (ValueError, TypeError):
+        return None, (jsonify({'error': 'Invalid authentication'}), 401)
+
+    user = User.query.get(user_id)
+    if not user:
+        return None, (jsonify({'error': 'User not found'}), 401)
+
+    return user, None
 
 
 def role_required(roles):

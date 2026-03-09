@@ -1,13 +1,13 @@
 from flask import request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from . import api_v1
-from app.src.extensions import db
-from app.src.models.task import Task
-from app.src.models.user import User
-from app.src.models.audit_log import AuditLog
 from datetime import datetime
-from app.src.utils.decorators import role_required
-from app.src.utils.pagination import paginate
+from . import api_v1
+from ...extensions import db
+from ...models.task import Task
+from ...models.user import User
+from ...models.audit_log import AuditLog
+from ...utils.decorators import role_required, get_current_user_or_401
+from ...utils.pagination import paginate
 
 
 @api_v1.route('/tasks', methods=['GET'])
@@ -47,6 +47,9 @@ def get_tasks():
     """
     user_id = get_jwt_identity()
     user = User.query.get(user_id)
+
+    if not user:
+        return jsonify({'error': 'User not found'}), 401
 
     # Base query
     query = Task.query
@@ -151,7 +154,11 @@ def create_task():
       400:
         description: Validation error
     """
-    user_id = get_jwt_identity()
+    user, error_response = get_current_user_or_401()
+    if error_response:
+        return error_response
+
+    user_id = user.id
     data = request.get_json()
 
     if not data or 'title' not in data or 'project_id' not in data:
@@ -186,7 +193,8 @@ def create_task():
 
     # Send notification (async)
     if task.assignee_id:
-        from app.src.tasks.email_tasks import send_task_assignment_email
+        # BUG FIX: same hardcoded absolute import issue as comments.py
+        from ...tasks.email_tasks import send_task_assignment_email
         send_task_assignment_email.delay(task.id, task.assignee_id)
 
     return jsonify(task.to_dict()), 201
@@ -226,7 +234,11 @@ def update_task(task_id):
       200:
         description: Task updated
     """
-    user_id = get_jwt_identity()
+    user, error_response = get_current_user_or_401()
+    if error_response:
+        return error_response
+
+    user_id = user.id
     task = Task.query.get_or_404(task_id)
     data = request.get_json()
 
@@ -259,7 +271,8 @@ def update_task(task_id):
 
         # Notify new assignee
         if data['assignee_id'] and data['assignee_id'] != old_assignee:
-            from app.src.tasks.email_tasks import send_task_assignment_email
+            # BUG FIX: same hardcoded absolute import issue
+            from ...tasks.email_tasks import send_task_assignment_email
             send_task_assignment_email.delay(task.id, data['assignee_id'])
 
     db.session.commit()
@@ -299,7 +312,11 @@ def delete_task(task_id):
       200:
         description: Task deleted
     """
-    user_id = get_jwt_identity()
+    user, error_response = get_current_user_or_401()
+    if error_response:
+        return error_response
+
+    user_id = user.id
     task = Task.query.get_or_404(task_id)
 
     # Audit log before deletion

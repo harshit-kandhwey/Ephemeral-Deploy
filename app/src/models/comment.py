@@ -1,5 +1,5 @@
-from app.src.extensions import db
 from datetime import datetime
+from ..extensions import db
 
 
 class Comment(db.Model):

@@ -1,11 +1,11 @@
 from flask import request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from . import api_v1
-from app.src.extensions import db
-from app.src.models.project import Project
-from app.src.models.user import User
-from app.src.models.audit_log import AuditLog
-from app.src.utils.decorators import role_required
+from ...extensions import db
+from ...models.project import Project
+from ...models.user import User
+from ...models.audit_log import AuditLog
+from ...utils.decorators import role_required
 
 
 @api_v1.route('/projects', methods=['GET'])
@@ -24,6 +24,9 @@ def get_projects():
     """
     user_id = get_jwt_identity()
     user = User.query.get(user_id)
+
+    if not user:
+        return jsonify({'error': 'User not found'}), 401
 
     if user.role == 'admin':
         projects = Project.query.all()

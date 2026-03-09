@@ -1,13 +1,12 @@
-from app.src.models.team import Team
-from app.src.models.user import User
-from app.src.extensions import db
-from app.src import create_app
+from src import create_app
+from src.extensions import db
+from src.models.user import User
+from src.models.team import Team
 import pytest
 import sys
 import os
 
-# Add src directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 
 @pytest.fixture
@@ -30,8 +29,7 @@ def client(app):
 
 @pytest.fixture
 def auth_headers(client):
-    """Get JWT token for testing"""
-    # Create test user
+    """Create a developer user and return auth headers"""
     with client.application.app_context():
         team = Team(name='Test Team')
         db.session.add(team)
@@ -47,11 +45,57 @@ def auth_headers(client):
         db.session.add(user)
         db.session.commit()
 
-    # Login
     response = client.post('/api/v1/auth/login', json={
         'username': 'testuser',
         'password': 'password123'
     })
-
     token = response.json['access_token']
     return {'Authorization': f'Bearer {token}'}
+
+
+@pytest.fixture
+def admin_headers(client, auth_headers):
+    """Create an admin user and return auth headers.
+    Depends on auth_headers so the team already exists in the DB."""
+    with client.application.app_context():
+        team = Team.query.first()
+        admin = User(
+            email='admin@test.com',
+            username='adminuser',
+            full_name='Admin',
+            role='admin',
+            team_id=team.id
+        )
+        admin.set_password('admin123')
+        db.session.add(admin)
+        db.session.commit()
+
+    login = client.post('/api/v1/auth/login', json={
+        'username': 'adminuser',
+        'password': 'admin123'
+    })
+    return {'Authorization': f'Bearer {login.json["access_token"]}'}
+
+
+@pytest.fixture
+def manager_headers(client, auth_headers):
+    """Create a manager user and return auth headers.
+    Depends on auth_headers so the team already exists in the DB."""
+    with client.application.app_context():
+        team = Team.query.first()
+        manager = User(
+            email='manager@test.com',
+            username='manageruser',
+            full_name='Manager',
+            role='manager',
+            team_id=team.id
+        )
+        manager.set_password('manager123')
+        db.session.add(manager)
+        db.session.commit()
+
+    login = client.post('/api/v1/auth/login', json={
+        'username': 'manageruser',
+        'password': 'manager123'
+    })
+    return {'Authorization': f'Bearer {login.json["access_token"]}'}

@@ -15,7 +15,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the ENTIRE app directory structure
+# Copy EVERYTHING to preserve directory structure
 COPY . /app/
 
 # Fix permissions
@@ -24,7 +24,7 @@ RUN chown -R celeryuser:celeryuser /app
 # Switch to non-root user
 USER celeryuser
 
-# Run Celery worker - correct path: app.src.celery_worker:celery
-CMD ["celery", "-A", "app.src.celery_worker:celery", "worker", \
+# Run Celery worker
+CMD ["celery", "-A", "src.celery_worker:celery", "worker", \
     "--loglevel=info", \
     "--concurrency=2"]

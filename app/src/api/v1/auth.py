@@ -2,9 +2,9 @@ from flask import request, jsonify
 from flask_jwt_extended import create_access_token, create_refresh_token, jwt_required, get_jwt_identity
 from flasgger import swag_from
 from . import api_v1
-from app.src.extensions import db, limiter
-from app.src.models.user import User
-from app.src.models.audit_log import AuditLog
+from ...extensions import db, limiter
+from ...models.user import User
+from ...models.audit_log import AuditLog
 
 
 @api_v1.route('/auth/register', methods=['POST'])
@@ -124,8 +124,8 @@ def login():
         return jsonify({'error': 'Account is disabled'}), 403
 
     # Create tokens
-    access_token = create_access_token(identity=user.id)
-    refresh_token = create_refresh_token(identity=user.id)
+    access_token = create_access_token(identity=str(user.id))
+    refresh_token = create_refresh_token(identity=str(user.id))
 
     # Audit log
     audit = AuditLog(
@@ -160,7 +160,7 @@ def refresh():
       200:
         description: Token refreshed
     """
-    user_id = get_jwt_identity()
+    user_id = int(get_jwt_identity())
     access_token = create_access_token(identity=user_id)
     return jsonify({'access_token': access_token}), 200
 
@@ -179,6 +179,6 @@ def get_current_user():
       200:
         description: Current user details
     """
-    user_id = get_jwt_identity()
+    user_id = int(get_jwt_identity())
     user = User.query.get_or_404(user_id)
     return jsonify(user.to_dict(include_email=True)), 200

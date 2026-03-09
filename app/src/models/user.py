@@ -1,6 +1,6 @@
-from app.src.extensions import db
 from datetime import datetime
 import bcrypt
+from ..extensions import db
 
 
 class User(db.Model):

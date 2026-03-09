@@ -1,18 +1,14 @@
 """
 Initialize database with sample data
 Run this script to populate the database with test data
+Usage: python -m app.src.init_db (from project root)
 """
-import sys
-import os
 from app.src.models.task import Task
 from app.src.models.project import Project
 from app.src.models.team import Team
 from app.src.models.user import User
 from app.src.extensions import db
 from app.src import create_app
-
-# Add parent directory to path so we can import our modules
-sys.path.insert(0, os.path.dirname(__file__))
 
 
 def init_database():

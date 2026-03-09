@@ -1,6 +1,6 @@
-from app.src.extensions import redis_client
 from flask import current_app
 import json
+from ..extensions import redis_client
 
 
 class CacheService:

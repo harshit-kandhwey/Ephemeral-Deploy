@@ -1,8 +1,8 @@
 from flask import current_app
-from app.src.extensions import celery
-from app.src.models.task import Task
-from app.src.models.user import User
-from app.src.models.comment import Comment
+from ..extensions import celery
+from ..models.task import Task
+from ..models.user import User
+from ..models.comment import Comment
 
 
 @celery.task(name='tasks.send_task_assignment_email')
@@ -12,19 +12,14 @@ def send_task_assignment_email(task_id, user_id):
     user = User.query.get(user_id)
 
     if not task or not user:
+        current_app.logger.warning(
+            f"send_task_assignment_email: task {task_id} or user {user_id} not found"
+        )
         return
 
-    # In production, use actual email service (SES, SendGrid, etc.)
     current_app.logger.info(
         f"[EMAIL] Task '{task.title}' assigned to {user.email}"
     )
-
-    # Simulate email sending
-    # send_email(
-    #     to=user.email,
-    #     subject=f"New Task Assigned: {task.title}",
-    #     body=f"You have been assigned task: {task.title}\n\n{task.description}"
-    # )
 
     return f"Email sent to {user.email}"
 
@@ -36,6 +31,9 @@ def send_comment_notification(comment_id, user_id):
     user = User.query.get(user_id)
 
     if not comment or not user:
+        current_app.logger.warning(
+            f"send_comment_notification: comment {comment_id} or user {user_id} not found"
+        )
         return
 
     current_app.logger.info(
@@ -51,10 +49,13 @@ def send_daily_digest():
     users = User.query.filter_by(is_active=True).all()
 
     for user in users:
-        # Get user's pending tasks
-        pending_tasks = Task.query.filter_by(
-            assignee_id=user.id,
-            status='todo'
+        # BUG FIX: 'status' values in the Task model are 'todo', 'in_progress',
+        # 'in_review', 'done'. The digest only counted 'todo' tasks, silently
+        # ignoring 'in_progress' and 'in_review'. Count all non-done tasks so the
+        # digest reflects actual pending work.
+        pending_tasks = Task.query.filter(
+            Task.assignee_id == user.id,
+            Task.status != 'done'
         ).count()
 
         current_app.logger.info(

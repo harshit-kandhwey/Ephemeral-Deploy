@@ -16,7 +16,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the ENTIRE app directory structure (preserves app/src hierarchy)
+# Copy EVERYTHING to preserve directory structure
 COPY . /app/
 
 # Fix permissions
@@ -31,7 +31,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
 
 EXPOSE 5000
 
-# Run with Gunicorn - now the path is correct: app.src.wsgi:app
+# Run with Gunicorn
 CMD ["gunicorn", \
     "--bind", "0.0.0.0:5000", \
     "--workers", "4", \
@@ -40,4 +40,4 @@ CMD ["gunicorn", \
     "--access-logfile", "-", \
     "--error-logfile", "-", \
     "--log-level", "info", \
-    "app.src.wsgi:app"]
+    "src.wsgi:app"]

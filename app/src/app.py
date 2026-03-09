@@ -1,9 +1,11 @@
 import logging
 import time
+import os
 from flask import Flask, jsonify
+from sqlalchemy import text
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
-from app.src.config import config
-from app.src.extensions import db, migrate, jwt, limiter, cors, init_redis, init_celery, swagger
+from .config import config
+from .extensions import db, migrate, jwt, limiter, cors, init_redis, init_celery, swagger
 
 # Metrics
 REQUEST_COUNT = Counter('app_requests_total', 'Total requests', [
@@ -16,6 +18,28 @@ def create_app(config_name='default'):
     """Application factory"""
     app = Flask(__name__)
     app.config.from_object(config[config_name])
+
+    # Validate production secrets with clear error messages
+    if config_name == 'production':
+        if not app.config.get('SECRET_KEY'):
+            app.logger.critical(
+                'STARTUP FAILED: ENV is set to "production" but SECRET_KEY '
+                'environment variable is not set. Set SECRET_KEY before starting.'
+            )
+            raise RuntimeError(
+                'SECRET_KEY environment variable is required in production. '
+                'Set SECRET_KEY before starting the application.'
+            )
+        if not app.config.get('JWT_SECRET_KEY'):
+            app.logger.critical(
+                'STARTUP FAILED: ENV is set to "production" but JWT_SECRET_KEY '
+                'environment variable is not set. Set JWT_SECRET_KEY or SECRET_KEY '
+                'before starting.'
+            )
+            raise RuntimeError(
+                'JWT_SECRET_KEY or SECRET_KEY environment variable is required in production. '
+                'Set at least one before starting the application.'
+            )
 
     # Initialize extensions
     db.init_app(app)
@@ -43,7 +67,7 @@ def create_app(config_name='default'):
     )
 
     # Register blueprints
-    from app.src.api.v1 import api_v1
+    from .api.v1 import api_v1
     app.register_blueprint(api_v1, url_prefix='/api/v1')
 
     # Metrics middleware
@@ -69,10 +93,9 @@ def create_app(config_name='default'):
     # Health checks
     @app.route('/health')
     def health():
-        from app.src.extensions import redis_client
+        from .extensions import redis_client
         try:
-            # Database check
-            db.session.execute('SELECT 1')
+            db.session.execute(text('SELECT 1'))
             db_status = 'healthy'
         except Exception as e:
             app.logger.error(f"Database health check failed: {e}")
@@ -84,20 +107,22 @@ def create_app(config_name='default'):
             }), 503
 
         try:
-            # Redis check
             redis_client.ping()
             redis_status = 'healthy'
         except Exception as e:
             app.logger.error(f"Redis health check failed: {e}")
             redis_status = 'unhealthy'
 
+        overall_status = 'healthy' if redis_status == 'healthy' else 'unhealthy'
+        http_code = 200 if overall_status == 'healthy' else 503
+
         return jsonify({
-            'status': 'healthy',
+            'status': overall_status,
             'database': db_status,
             'redis': redis_status,
             'version': app.config['VERSION'],
             'environment': app.config['ENV']
-        }), 200
+        }), http_code
 
     @app.route('/ready')
     def ready():
@@ -116,7 +141,6 @@ def create_app(config_name='default'):
             'documentation': '/apidocs'
         }), 200
 
-    # Error handlers
     @app.errorhandler(404)
     def not_found(error):
         return jsonify({'error': 'Not found'}), 404

@@ -40,8 +40,8 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - ENV=development
       - VERSION=local-dev
-      - SECRET_KEY=dev-secret-key
-      - JWT_SECRET_KEY=jwt-secret-key
+      - SECRET_KEY=dev-secret-key-DO-NOT-USE-IN-PROD-32b
+      - JWT_SECRET_KEY=dev-secret-key-DO-NOT-USE-IN-PROD-32b
       - AWS_REGION=us-east-1
       - S3_BUCKET=nexusdeploy-attachments-local
     depends_on:
@@ -67,11 +67,15 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - ENV=development
+      - SECRET_KEY=dev-secret-key-DO-NOT-USE-IN-PROD-32b
+      - JWT_SECRET_KEY=dev-secret-key-DO-NOT-USE-IN-PROD-32b
       - AWS_REGION=us-east-1
       - S3_BUCKET=nexusdeploy-attachments-local
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - ./app:/app
 
@@ -79,14 +83,18 @@ services:
     build:
       context: ./app
       dockerfile: Dockerfile.worker
-    command: celery -A app.src.celery_worker:celery beat --loglevel=info
+    command: celery -A src.celery_worker:celery beat --loglevel=info
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/nexusdeploy
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - ENV=development
+      - SECRET_KEY=dev-secret-key-DO-NOT-USE-IN-PROD-32b
+      - JWT_SECRET_KEY=dev-secret-key-DO-NOT-USE-IN-PROD-32b
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy 
 
   redis-commander:
     image: rediscommander/redis-commander:latest

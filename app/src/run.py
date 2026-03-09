@@ -1,8 +1,8 @@
 """
 Run the application locally for development
-Usage: python run.py
+Usage: python -m app.src.run (from project root)
 """
-from app.src import create_app
+from . import create_app
 
 if __name__ == '__main__':
     app = create_app('development')

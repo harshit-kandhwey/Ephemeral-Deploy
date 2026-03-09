@@ -3,7 +3,7 @@ WSGI entry point for the application
 This is what Gunicorn will run
 """
 import os
-from app.src import create_app
+from . import create_app
 
 # Get environment from ENV variable, default to production
 config_name = os.getenv('ENV', 'production')
