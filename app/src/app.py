@@ -1,7 +1,7 @@
 import logging
 import time
 import os
-from flask import Flask, jsonify
+from flask import Flask, app, jsonify
 from sqlalchemy import text
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from .config import config
@@ -56,7 +56,20 @@ def create_app(config_name='default'):
         'version': app.config['VERSION'],
         'description': 'Production-grade project management API',
         'termsOfService': '',
-        'hide_top_bar': False
+        'hide_top_bar': False,
+        'securityDefinitions': {
+            'Bearer': {
+                'type': 'apiKey',
+                'name': 'Authorization',
+                'in': 'header',
+                'description': 'JWT Authorization header. Example: "Bearer {token}"'
+            }
+        },
+        'security': [
+            {
+                'Bearer': []
+            }
+        ]
     }
     swagger.init_app(app)
 

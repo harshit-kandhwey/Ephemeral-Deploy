@@ -3,12 +3,12 @@ Initialize database with sample data
 Run this script to populate the database with test data
 Usage: python -m app.src.init_db (from project root)
 """
-from app.src.models.task import Task
-from app.src.models.project import Project
-from app.src.models.team import Team
-from app.src.models.user import User
-from app.src.extensions import db
-from app.src import create_app
+from src.models.task import Task
+from src.models.project import Project
+from src.models.team import Team
+from src.models.user import User
+from src.extensions import db
+from src import create_app
 
 
 def init_database():
