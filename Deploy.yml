@@ -1,0 +1,431 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - dev    # → dev environment (auto-destroys in 30 min)
+      - main   # → prod environment (blue-green, manual destroy)
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options: [ dev, prod ]
+      action:
+        description: 'Action'
+        required: true
+        type: choice
+        options: [ plan, apply ]
+        default: plan
+
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: 1.7.0
+  TF_STATE_BUCKET: nexusdeploy-terraform-state
+  # DynamoDB locking - commented intentionally (single-dev, no concurrency risk)
+  # TF_LOCK_TABLE: nexusdeploy-terraform-locks
+
+jobs:
+  # ─────────────────────────────────────────────
+  # Determine context
+  # ─────────────────────────────────────────────
+  setup:
+    name: Setup Context
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.ctx.outputs.environment }}
+      tf_action:   ${{ steps.ctx.outputs.tf_action }}
+      image_tag:   ${{ github.sha }}
+
+    steps:
+      - name: Determine context
+        id: ctx
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+            echo "tf_action=${{ github.event.inputs.action }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref_name }}" == "main" ]]; then
+            echo "environment=prod" >> $GITHUB_OUTPUT
+            echo "tf_action=apply" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref_name }}" == "dev" ]]; then
+            echo "environment=dev" >> $GITHUB_OUTPUT
+            echo "tf_action=apply" >> $GITHUB_OUTPUT
+          else
+            echo "Unsupported trigger: event_name=${{ github.event_name }}, ref_name=${{ github.ref_name }}" >&2
+            exit 1
+          fi
+
+  # ─────────────────────────────────────────────
+  # Build and push Docker images to ECR
+  # ─────────────────────────────────────────────
+  build:
+    name: Build & Push (${{ needs.setup.outputs.environment }})
+    runs-on: ubuntu-latest
+    needs: setup
+    environment: ${{ needs.setup.outputs.environment }}
+
+    permissions:
+      id-token: write
+      contents: read
+
+    outputs:
+      api_image:    ${{ steps.push.outputs.api_image }}
+      worker_image: ${{ steps.push.outputs.worker_image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: Deploy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & push images
+        id: push
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          ENV: ${{ needs.setup.outputs.environment }}
+          TAG: ${{ github.sha }}
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --cache-from type=gha --cache-to type=gha,mode=max \
+            --build-arg GIT_COMMIT=$TAG \
+            --tag $REGISTRY/nexusdeploy-api-$ENV:$TAG \
+            --tag $REGISTRY/nexusdeploy-api-$ENV:latest \
+            --push ./app
+
+          docker buildx build \
+            --platform linux/amd64 \
+            --file ./app/Dockerfile.worker \
+            --tag $REGISTRY/nexusdeploy-worker-$ENV:$TAG \
+            --tag $REGISTRY/nexusdeploy-worker-$ENV:latest \
+            --push ./app
+
+          echo "api_image=$REGISTRY/nexusdeploy-api-$ENV:$TAG"       >> $GITHUB_OUTPUT
+          echo "worker_image=$REGISTRY/nexusdeploy-worker-$ENV:$TAG" >> $GITHUB_OUTPUT
+
+  # ─────────────────────────────────────────────
+  # DEV DEPLOYMENT (branch: dev)
+  # Straightforward: plan → apply → schedule cleanup
+  # ─────────────────────────────────────────────
+  deploy-dev:
+    name: Deploy → dev
+    runs-on: ubuntu-latest
+    needs: [setup, build]
+    if: needs.setup.outputs.environment == 'dev' && needs.setup.outputs.tf_action == 'apply'
+    environment: dev
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: DeployDev-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: terraform/environments/dev
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
+            -backend-config="key=dev/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true"
+          # Note: no dynamodb_table - see backend comment in main.tf
+
+      - name: Terraform Apply
+        working-directory: terraform/environments/dev
+        env:
+          TF_VAR_api_image:    ${{ needs.build.outputs.api_image }}
+          TF_VAR_worker_image: ${{ needs.build.outputs.worker_image }}
+          TF_VAR_git_commit:   ${{ github.sha }}
+        run: terraform apply -var-file=terraform.tfvars -auto-approve
+
+      - name: Get outputs
+        id: outputs
+        working-directory: terraform/environments/dev
+        run: |
+          echo "grafana_url=$(terraform output -raw grafana_url 2>/dev/null || echo 'deploying...')"    >> $GITHUB_OUTPUT
+          echo "prometheus_url=$(terraform output -raw prometheus_url 2>/dev/null || echo 'deploying...')" >> $GITHUB_OUTPUT
+
+      - name: Deployment summary
+        run: |
+          echo "## ✅ Dev Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Grafana | ${{ steps.outputs.outputs.grafana_url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Prometheus | ${{ steps.outputs.outputs.prometheus_url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| ⚠️ Auto-destroy in | 30 minutes |" >> $GITHUB_STEP_SUMMARY
+
+      # Schedule auto-cleanup after 30 minutes
+      - name: Schedule auto-cleanup
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'cleanup.yml',
+              ref: 'dev',
+              inputs: {
+                environment: 'dev',
+                delay_minutes: '30',
+                reason: 'Auto-cleanup: dev TTL (30 min) expired'
+              }
+            });
+            console.log('⏳ Cleanup scheduled in 30 minutes');
+
+  # ─────────────────────────────────────────────
+  # PROD DEPLOYMENT — Blue-Green (branch: main)
+  #
+  # Flow:
+  #   1. Read active slot from SSM (blue or green)
+  #   2. Deploy new image to INACTIVE slot
+  #   3. Wait 24h for health checks
+  #   4. Scale down OLD slot on success
+  #   5. On failure: revert (scale up old, scale down new)
+  # ─────────────────────────────────────────────
+  deploy-prod:
+    name: Deploy → prod (blue-green)
+    runs-on: ubuntu-latest
+    needs: [setup, build]
+    if: needs.setup.outputs.environment == 'prod' && needs.setup.outputs.tf_action == 'apply'
+    environment: prod   # Requires manual approval in GitHub Environments settings
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: DeployProd-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ── Step 1: Read current active slot ──
+      - name: Read active deployment slot from SSM
+        id: slot
+        run: |
+          CURRENT=$(aws ssm get-parameter \
+            --name "/nexusdeploy/prod/deployment/active_slot" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Parameter.Value' \
+            --output text 2>/dev/null || echo "blue")
+
+          # New deployment goes to the OPPOSITE slot
+          if [[ "$CURRENT" == "blue" ]]; then
+            NEW_SLOT="green"
+          else
+            NEW_SLOT="blue"
+          fi
+
+          echo "current_slot=$CURRENT" >> $GITHUB_OUTPUT
+          echo "new_slot=$NEW_SLOT"    >> $GITHUB_OUTPUT
+          echo "🔵 Current active: $CURRENT → 🟢 Deploying to: $NEW_SLOT"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: terraform/environments/prod
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
+            -backend-config="key=prod/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true"
+
+      # ── Step 1c: Read previous images from SSM ──
+      - name: Read previous images from SSM
+        id: prev_images
+        run: |
+          PREV_API=$(aws ssm get-parameter \
+            --name "/nexusdeploy/prod/deployment/prev_api_image" \
+            --query 'Parameter.Value' --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+          echo "api=${PREV_API}" >> $GITHUB_OUTPUT
+          
+          PREV_WORKER=$(aws ssm get-parameter \
+            --name "/nexusdeploy/prod/deployment/prev_worker_image" \
+            --query 'Parameter.Value' --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+          echo "worker=${PREV_WORKER}" >> $GITHUB_OUTPUT
+
+      # ── Step 2: Deploy to new (inactive) slot ──
+      - name: Terraform Apply → new slot
+        id: tf_apply
+        working-directory: terraform/environments/prod
+        env:
+          TF_VAR_api_image:    ${{ needs.build.outputs.api_image }}
+          TF_VAR_worker_image: ${{ needs.build.outputs.worker_image }}
+          TF_VAR_git_commit:   ${{ github.sha }}
+          # The NEW slot becomes active in this apply
+          TF_VAR_deployment_slot: ${{ steps.slot.outputs.new_slot }}
+          # Previous images stay on old slot (already running)
+          TF_VAR_previous_api_image:    ${{ steps.prev_images.outputs.api }}
+          TF_VAR_previous_worker_image: ${{ steps.prev_images.outputs.worker }}
+        run: |
+          terraform apply -var-file=terraform.tfvars -auto-approve
+        continue-on-error: true
+
+      # ── Step 3: Health check new slot (24 hours) ──
+      - name: Health check new slot
+        id: health
+        if: steps.tf_apply.outcome == 'success'
+        run: |
+          NEW_SLOT="${{ steps.slot.outputs.new_slot }}"
+          CLUSTER="nexusdeploy-prod-$NEW_SLOT"
+          SERVICE="nexusdeploy-prod-$NEW_SLOT-api"
+          MAX_WAIT=300   # 5 min check here; prod monitors for 24h via scheduled check
+          INTERVAL=30
+          ELAPSED=0
+          HEALTH_OK=false
+
+          # Set default failure state
+          echo "health_ok=false" >> $GITHUB_OUTPUT
+
+          echo "⏳ Waiting for $SERVICE to reach RUNNING state..."
+
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            RUNNING=$(aws ecs describe-services \
+              --cluster $CLUSTER \
+              --services $SERVICE \
+              --region ${{ env.AWS_REGION }} \
+              --query 'services[0].runningCount' \
+              --output text 2>/dev/null || echo "0")
+
+            DESIRED=$(aws ecs describe-services \
+              --cluster $CLUSTER \
+              --services $SERVICE \
+              --region ${{ env.AWS_REGION }} \
+              --query 'services[0].desiredCount' \
+              --output text 2>/dev/null || echo "1")
+
+            echo "  Running: $RUNNING / Desired: $DESIRED (${ELAPSED}s elapsed)"
+
+            if [[ "$RUNNING" == "$DESIRED" && "$RUNNING" != "0" ]]; then
+              HEALTH_OK=true
+              echo "health_ok=true" >> $GITHUB_OUTPUT
+              echo "✅ New slot is healthy!"
+              exit 0
+            fi
+
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          # Loop completed without success
+          if [[ "$HEALTH_OK" != "true" ]]; then
+            echo "health_ok=false" >> $GITHUB_OUTPUT
+            echo "❌ New slot failed to become healthy"
+          fi
+
+      # ── Step 4a: SUCCESS — update SSM + scale down old slot ──
+      - name: Promote new slot (update SSM active_slot)
+        if: steps.health.outputs.health_ok == 'true'
+        run: |
+          aws ssm put-parameter \
+            --name "/nexusdeploy/prod/deployment/active_slot" \
+            --value "${{ steps.slot.outputs.new_slot }}" \
+            --type String \
+            --overwrite \
+            --region ${{ env.AWS_REGION }}
+          echo "✅ SSM active_slot updated to ${{ steps.slot.outputs.new_slot }}"
+
+      - name: Store current images as 'previous' for next deploy
+        if: steps.health.outputs.health_ok == 'true'
+        run: |
+          # These become TF_VAR_previous_* in the NEXT deployment
+          # Store in SSM so the next workflow run can read them
+          aws ssm put-parameter \
+            --name "/nexusdeploy/prod/deployment/prev_api_image" \
+            --value "${{ needs.build.outputs.api_image }}" \
+            --type String --overwrite --region ${{ env.AWS_REGION }}
+          aws ssm put-parameter \
+            --name "/nexusdeploy/prod/deployment/prev_worker_image" \
+            --value "${{ needs.build.outputs.worker_image }}" \
+            --type String --overwrite --region ${{ env.AWS_REGION }}
+
+      # Schedule old slot scale-down after 24 hours (gives time for monitoring)
+      - name: Schedule old slot cleanup (24h)
+        if: steps.health.outputs.health_ok == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'cleanup.yml',
+              ref: 'main',
+              inputs: {
+                environment: 'prod',
+                action: 'drain_old_slot',
+                old_slot: '${{ steps.slot.outputs.current_slot }}',
+                delay_minutes: '1440',  // 24 hours
+                reason: 'Blue-green: draining old slot after 24h'
+              }
+            });
+
+      # ── Step 4b: FAILURE — rollback ──────────────
+      - name: Rollback - revert to old slot
+        if: steps.tf_apply.outcome == 'failure' || steps.health.outputs.health_ok != 'true'
+        run: |
+          echo "⚠️ Deployment failed - rolling back to ${{ steps.slot.outputs.current_slot }}"
+
+          # Scale new (failed) slot back to 0
+          FAILED_CLUSTER="nexusdeploy-prod-${{ steps.slot.outputs.new_slot }}"
+          for svc in api worker beat; do
+            aws ecs update-service \
+              --cluster $FAILED_CLUSTER \
+              --service "nexusdeploy-prod-${{ steps.slot.outputs.new_slot }}-$svc" \
+              --desired-count 0 \
+              --region ${{ env.AWS_REGION }} 2>/dev/null || true
+          done
+
+          # SSM unchanged - old slot remains active
+          echo "✅ Rollback complete - ${{ steps.slot.outputs.current_slot }} remains active"
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          if [[ "${{ steps.health.outputs.health_ok }}" == "true" ]]; then
+            echo "## ✅ Prod Blue-Green Deployment Complete" >> $GITHUB_STEP_SUMMARY
+            echo "| | |" >> $GITHUB_STEP_SUMMARY
+            echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+            echo "| Previous slot | ${{ steps.slot.outputs.current_slot }} (draining in 24h) |" >> $GITHUB_STEP_SUMMARY
+            echo "| Active slot   | ${{ steps.slot.outputs.new_slot }} ✅ |" >> $GITHUB_STEP_SUMMARY
+            echo "| Image         | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ Prod Deployment Failed - Rolled Back" >> $GITHUB_STEP_SUMMARY
+            echo "Active slot remains: ${{ steps.slot.outputs.current_slot }}" >> $GITHUB_STEP_SUMMARY
+          fi
