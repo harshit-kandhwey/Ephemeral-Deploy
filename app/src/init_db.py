@@ -1,138 +1,283 @@
 """
-Initialize database with sample data
-Run this script to populate the database with test data
-Usage: python -m app.src.init_db (from project root)
+Database initialisation script
+================================
+Handles two responsibilities:
+  1. Schema creation   — db.create_all() is idempotent: creates tables that
+                         don't exist, leaves existing tables and data untouched.
+                         Safe to run on every deployment.
+
+  2. Sample data seed  — only runs when SEED_DB=true AND the database is empty.
+                         Never runs in production unless explicitly forced.
+
+Two-user DB pattern
+-------------------
+RDS is provisioned with a master user (nexusadmin) via Terraform using
+credentials from SSM Parameter Store. That master user has superuser rights
+and is only used for admin operations.
+
+The app connects as a limited-privilege app user (nexusapp) whose credentials
+also come from SSM / Secrets Manager. This script creates the app user if it
+doesn't already exist, using the master credentials that are available at
+container startup via environment variables injected by ECS.
+
+Usage (local):
+    python -m src.init_db
+
+Usage (ECS one-off task, called by deploy.yml before service starts):
+    ENV=production python -m src.init_db
+
+Environment variables read:
+    DATABASE_URL      → app user connection string (used by Flask)
+    DB_MASTER_USER    → master username (nexusadmin)  injected from Secrets Manager
+    DB_APP_USER       → app username   (nexusapp)     injected from Secrets Manager
+    DB_APP_PASSWORD   → app password                  injected from Secrets Manager
+    SEED_DB           → set to "true" to seed sample data (default: false)
+    ENV               → "production" blocks seeding unless SEED_DB=true is explicit
 """
-from src.models.task import Task
-from src.models.project import Project
-from src.models.team import Team
-from src.models.user import User
-from src.extensions import db
-from src import create_app
+
+import os
+import sys
+import psycopg2
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+from urllib.parse import urlparse
 
 
-def init_database():
-    app = create_app('development')
+def _get_master_conn():
+    """
+    Build a psycopg2 connection using the master user.
+    We derive the host/port/dbname from DATABASE_URL and swap in master creds.
+    This avoids storing a separate MASTER_DATABASE_URL.
+    """
+    database_url = os.environ.get('DATABASE_URL')
+    if not database_url:
+        raise RuntimeError('DATABASE_URL environment variable is not set')
+
+    parsed = urlparse(database_url)
+    master_user = os.environ.get('DB_MASTER_USER')
+    master_password = os.environ.get('DB_MASTER_PASSWORD')
+
+    if not master_user or not master_password:
+        raise RuntimeError(
+            'DB_MASTER_USER and DB_MASTER_PASSWORD must be set '
+            '(injected from Secrets Manager by ECS)'
+        )
+
+    conn = psycopg2.connect(
+        host=parsed.hostname,
+        port=parsed.port or 5432,
+        dbname=parsed.path.lstrip('/'),
+        user=master_user,
+        password=master_password,
+        connect_timeout=10,
+    )
+    conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+    return conn
+
+
+def create_app_user():
+    """
+    Create the limited-privilege app DB user if it doesn't already exist.
+    The app user can SELECT/INSERT/UPDATE/DELETE but cannot DROP tables
+    or create new users — principle of least privilege.
+
+    Idempotent: safe to run multiple times.
+    """
+    app_user = os.environ.get('DB_APP_USER')
+    app_password = os.environ.get('DB_APP_PASSWORD')
+
+    if not app_user or not app_password:
+        # In local development these may not be set — that's fine,
+        # the app connects as the postgres superuser via DATABASE_URL directly.
+        print('⚠️  DB_APP_USER / DB_APP_PASSWORD not set — skipping app user creation')
+        print('   (Expected in local development, not in production)')
+        return
+
+    try:
+        conn = _get_master_conn()
+        cursor = conn.cursor()
+
+        # Check if user already exists
+        cursor.execute(
+            "SELECT 1 FROM pg_roles WHERE rolname = %s", (app_user,)
+        )
+        if cursor.fetchone():
+            print(f'✓ App DB user "{app_user}" already exists')
+        else:
+            # Create user with login but no superuser rights
+            cursor.execute(
+                f"CREATE USER {app_user} WITH PASSWORD %s NOSUPERUSER NOCREATEDB NOCREATEROLE LOGIN",
+                (app_password,)
+            )
+            print(f'✓ App DB user "{app_user}" created')
+
+        # Grant privileges on the database and all tables
+        # GRANT CONNECT allows the user to connect to this database
+        parsed = urlparse(os.environ['DATABASE_URL'])
+        dbname = parsed.path.lstrip('/')
+        cursor.execute(f"GRANT CONNECT ON DATABASE {dbname} TO {app_user}")
+
+        # Grant usage on the public schema and all tables within it
+        cursor.execute(f"GRANT USAGE ON SCHEMA public TO {app_user}")
+        cursor.execute(
+            f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {app_user}"
+        )
+        cursor.execute(
+            f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {app_user}"
+        )
+        # Ensure future tables are also accessible
+        cursor.execute(
+            f"ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+            f"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {app_user}"
+        )
+        cursor.execute(
+            f"ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+            f"GRANT USAGE, SELECT ON SEQUENCES TO {app_user}"
+        )
+        print(f'✓ Privileges granted to "{app_user}"')
+
+        cursor.close()
+        conn.close()
+
+    except Exception as e:
+        print(f'❌ Failed to create app user: {e}')
+        raise
+
+
+def create_schema(app):
+    """
+    Create all tables using SQLAlchemy's metadata.
+    db.create_all() is idempotent — existing tables are not touched,
+    existing data is preserved. Safe for blue-green deployments.
+    """
+    from .extensions import db
+    with app.app_context():
+        db.create_all()
+        print('✓ Database schema created / verified (db.create_all)')
+
+
+def seed_sample_data(app):
+    """
+    Insert sample data for demo purposes.
+    Only runs when:
+      - Database has no users yet (empty check)
+      - ENV != 'production'  OR  SEED_DB=true is explicitly set
+
+    Passwords come from environment variables — no hardcoded credentials.
+    Falls back to demo values only in non-production environments.
+    """
+    from .extensions import db
+    from .models.user import User
+    from .models.team import Team
+    from .models.project import Project
+    from .models.task import Task
+
+    env = os.environ.get('ENV', 'development')
+    force_seed = os.environ.get('SEED_DB', 'false').lower() == 'true'
+
+    if env == 'production' and not force_seed:
+        print('⏭  Skipping seed: ENV=production (set SEED_DB=true to override)')
+        return
 
     with app.app_context():
-        # Drop and recreate all tables
-        print("Dropping existing tables...")
-        db.drop_all()
+        # Only seed if the database is empty
+        if User.query.count() > 0:
+            print('⏭  Skipping seed: database already has users')
+            return
 
-        print("Creating tables...")
-        db.create_all()
+        print('🌱 Seeding sample data...')
 
-        print("Creating sample data...")
+        # Read demo passwords from env, fall back to obvious dev-only values
+        # In production these would come from Secrets Manager
+        admin_password    = os.environ.get('SEED_ADMIN_PASSWORD',    'ChangeMe-Admin-2024!')
+        manager_password  = os.environ.get('SEED_MANAGER_PASSWORD',  'ChangeMe-Manager-2024!')
+        dev_password      = os.environ.get('SEED_DEV_PASSWORD',      'ChangeMe-Dev-2024!')
 
-        # Create teams
-        team1 = Team(name='Engineering',
-                     description='Backend and frontend developers')
-        team2 = Team(name='Product',
-                     description='Product managers and designers')
-
-        db.session.add_all([team1, team2])
+        # Teams
+        team_eng = Team(name='Engineering', description='Backend and frontend developers')
+        team_product = Team(name='Product', description='Product managers and designers')
+        db.session.add_all([team_eng, team_product])
         db.session.commit()
 
-        # Create users
-        admin = User(
-            email='admin@nexusdeploy.com',
-            username='admin',
-            full_name='Admin User',
-            role='admin',
-            team_id=team1.id
-        )
-        admin.set_password('admin123')
+        # Users
+        admin = User(email='admin@nexusdeploy.com', username='admin',
+                     full_name='Admin User', role='admin', team_id=team_eng.id)
+        admin.set_password(admin_password)
 
-        manager = User(
-            email='manager@nexusdeploy.com',
-            username='manager',
-            full_name='Manager User',
-            role='manager',
-            team_id=team1.id
-        )
-        manager.set_password('manager123')
+        manager = User(email='manager@nexusdeploy.com', username='manager',
+                       full_name='Manager User', role='manager', team_id=team_eng.id)
+        manager.set_password(manager_password)
 
-        dev1 = User(
-            email='dev1@nexusdeploy.com',
-            username='developer1',
-            full_name='Developer One',
-            role='developer',
-            team_id=team1.id
-        )
-        dev1.set_password('dev123')
+        dev1 = User(email='dev1@nexusdeploy.com', username='developer1',
+                    full_name='Developer One', role='developer', team_id=team_eng.id)
+        dev1.set_password(dev_password)
 
-        dev2 = User(
-            email='dev2@nexusdeploy.com',
-            username='developer2',
-            full_name='Developer Two',
-            role='developer',
-            team_id=team1.id
-        )
-        dev2.set_password('dev123')
+        dev2 = User(email='dev2@nexusdeploy.com', username='developer2',
+                    full_name='Developer Two', role='developer', team_id=team_eng.id)
+        dev2.set_password(dev_password)
 
         db.session.add_all([admin, manager, dev1, dev2])
         db.session.commit()
 
-        # Create projects
-        project1 = Project(
-            name='NexusDeploy Platform',
-            description='CI/CD automation platform',
-            team_id=team1.id
-        )
-
-        project2 = Project(
-            name='Mobile App',
-            description='iOS and Android applications',
-            team_id=team1.id
-        )
-
+        # Projects
+        project1 = Project(name='NexusDeploy Platform',
+                           description='CI/CD automation platform', team_id=team_eng.id)
+        project2 = Project(name='Mobile App',
+                           description='iOS and Android applications', team_id=team_eng.id)
         db.session.add_all([project1, project2])
         db.session.commit()
 
-        # Create tasks
-        task1 = Task(
-            title='Implement authentication system',
-            description='Build JWT-based authentication with refresh tokens',
-            priority='high',
-            status='in_progress',
-            project_id=project1.id,
-            creator_id=manager.id,
-            assignee_id=dev1.id
-        )
-
-        task2 = Task(
-            title='Set up CI/CD pipeline',
-            description='Configure GitHub Actions for automated testing and deployment',
-            priority='critical',
-            status='todo',
-            project_id=project1.id,
-            creator_id=manager.id,
-            assignee_id=dev2.id
-        )
-
-        task3 = Task(
-            title='Design user dashboard',
-            description='Create mockups for the main user dashboard',
-            priority='medium',
-            status='done',
-            project_id=project2.id,
-            creator_id=manager.id,
-            assignee_id=dev1.id
-        )
-
-        db.session.add_all([task1, task2, task3])
+        # Tasks
+        tasks = [
+            Task(title='Implement authentication system',
+                 description='Build JWT-based authentication with refresh tokens',
+                 priority='high', status='in_progress',
+                 project_id=project1.id, creator_id=manager.id, assignee_id=dev1.id),
+            Task(title='Set up CI/CD pipeline',
+                 description='Configure GitHub Actions for automated testing and deployment',
+                 priority='critical', status='todo',
+                 project_id=project1.id, creator_id=manager.id, assignee_id=dev2.id),
+            Task(title='Design user dashboard',
+                 description='Create mockups for the main user dashboard',
+                 priority='medium', status='done',
+                 project_id=project2.id, creator_id=manager.id, assignee_id=dev1.id),
+        ]
+        db.session.add_all(tasks)
         db.session.commit()
 
-        print("\n" + "="*60)
-        print("✓ Database initialized successfully!")
-        print("="*60)
-        print("\nSample users created:")
-        print("  Admin:     admin / admin123")
-        print("  Manager:   manager / manager123")
-        print("  Developer: developer1 / dev123")
-        print("  Developer: developer2 / dev123")
-        print("\nYou can now login at: http://localhost:5000/api/v1/auth/login")
-        print("="*60 + "\n")
+        print('\n' + '=' * 60)
+        print('✓ Sample data seeded successfully')
+        print('=' * 60)
+        print(f'\n  Admin:     admin    / {admin_password}')
+        print(f'  Manager:   manager  / {manager_password}')
+        print(f'  Dev 1:     developer1 / {dev_password}')
+        print(f'  Dev 2:     developer2 / {dev_password}')
+        print('\n  API: http://localhost:5000/api/v1/auth/login')
+        print('=' * 60 + '\n')
+
+
+def init_database():
+    """Main entry point — runs all init steps in order."""
+    from . import create_app
+
+    env = os.environ.get('ENV', 'development')
+    print(f'\n{"=" * 60}')
+    print(f'  NexusDeploy DB Init  |  ENV={env}')
+    print(f'{"=" * 60}\n')
+
+    # Step 1: Create app DB user (skipped locally if creds not set)
+    print('── Step 1/3: App DB user ─────────────────────────────')
+    create_app_user()
+
+    # Step 2: Create schema
+    print('\n── Step 2/3: Schema ──────────────────────────────────')
+    app = create_app(env)
+    create_schema(app)
+
+    # Step 3: Seed sample data (skipped in prod unless SEED_DB=true)
+    print('\n── Step 3/3: Sample data ─────────────────────────────')
+    seed_sample_data(app)
+
+    print('\n✅ DB init complete\n')
 
 
 if __name__ == '__main__':

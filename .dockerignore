@@ -1,3 +1,65 @@
+# ── Python ────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+pip-wheel-metadata/
+
+# ── Virtual environments ──────────────────────
 .venv/
+venv/
+env/
+ENV/
+
+# ── Testing & Coverage ────────────────────────
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+*.cover
+
+# ── Local development ─────────────────────────
+.env
+.env.local
+*.db
+*.sqlite
+*.sqlite3
+
+# ── IDE / Editor ──────────────────────────────
 .vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Git ───────────────────────────────────────
+.git/
 .gitignore
+.gitattributes
+
+# ── Docker ────────────────────────────────────
+# Don't include other Dockerfiles or compose files in the build context
+docker-compose.yml
+docker-compose.*.yml
+.dockerignore
+
+# ── Infrastructure (never belongs in app image) ──
+terraform/
+scripts/
+.github/
+docs/
+Makefile
+
+# ── Docs & markdown ───────────────────────────
+*.md
+LICENSE
+
+# ── Logs ──────────────────────────────────────
+*.log
+logs/

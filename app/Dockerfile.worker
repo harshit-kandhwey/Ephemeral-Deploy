@@ -1,9 +1,11 @@
 FROM python:3.11-slim
 
 # Install system dependencies
+# curl added: useful for health checks and debugging in ECS Exec sessions
 RUN apt-get update && apt-get install -y \
     gcc \
     postgresql-client \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -11,20 +13,29 @@ RUN useradd -m -u 1000 celeryuser
 
 WORKDIR /app
 
-# Install Python dependencies
+# Install Python dependencies first (layer cache)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy EVERYTHING to preserve directory structure
+# Copy application source
 COPY . /app/
 
 # Fix permissions
 RUN chown -R celeryuser:celeryuser /app
 
-# Switch to non-root user
 USER celeryuser
 
-# Run Celery worker
+# ── Entry point explanation ───────────────────────────────────────────────────
+# src.celery_worker:celery  → Celery needs the full dotted path from WORKDIR.
+#                             WORKDIR is /app, so src.celery_worker resolves
+#                             to /app/src/celery_worker.py. This works correctly
+#                             in both local docker-compose and ECS (unlike wsgi
+#                             which needed --chdir because Gunicorn imports differ).
+#
+# --concurrency 2           → 2 worker processes per container. Matches the
+#                             256 CPU / 512 MB Fargate task size. Higher values
+#                             would cause memory pressure.
+# ─────────────────────────────────────────────────────────────────────────────
 CMD ["celery", "-A", "src.celery_worker:celery", "worker", \
     "--loglevel=info", \
     "--concurrency=2"]
