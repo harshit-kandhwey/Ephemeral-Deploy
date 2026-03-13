@@ -36,8 +36,8 @@ Environment variables read:
 """
 
 import os
-import sys
 import psycopg2
+from psycopg2 import sql
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from urllib.parse import urlparse
 
@@ -92,6 +92,7 @@ def create_app_user():
         print('   (Expected in local development, not in production)')
         return
 
+    conn = None
     try:
         conn = _get_master_conn()
         cursor = conn.cursor()
@@ -103,44 +104,72 @@ def create_app_user():
         if cursor.fetchone():
             print(f'✓ App DB user "{app_user}" already exists')
         else:
-            # Create user with login but no superuser rights
+            # Create user with login but no superuser rights.
+            # psycopg2.sql.Identifier safely quotes the username as a
+            # PostgreSQL identifier, preventing SQL injection via env vars.
             cursor.execute(
-                f"CREATE USER {app_user} WITH PASSWORD %s NOSUPERUSER NOCREATEDB NOCREATEROLE LOGIN",
+                sql.SQL(
+                    "CREATE USER {} WITH PASSWORD %s "
+                    "NOSUPERUSER NOCREATEDB NOCREATEROLE LOGIN"
+                ).format(sql.Identifier(app_user)),
                 (app_password,)
             )
             print(f'✓ App DB user "{app_user}" created')
 
-        # Grant privileges on the database and all tables
-        # GRANT CONNECT allows the user to connect to this database
+        # Grant privileges on the database and all tables.
+        # All identifiers (dbname, app_user) go through sql.Identifier.
         parsed = urlparse(os.environ['DATABASE_URL'])
         dbname = parsed.path.lstrip('/')
-        cursor.execute(f"GRANT CONNECT ON DATABASE {dbname} TO {app_user}")
+
+        cursor.execute(
+            sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
+                sql.Identifier(dbname), sql.Identifier(app_user)
+            )
+        )
 
         # Grant usage on the public schema and all tables within it
-        cursor.execute(f"GRANT USAGE ON SCHEMA public TO {app_user}")
         cursor.execute(
-            f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {app_user}"
+            sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(
+                sql.Identifier(app_user)
+            )
         )
         cursor.execute(
-            f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {app_user}"
-        )
-        # Ensure future tables are also accessible
-        cursor.execute(
-            f"ALTER DEFAULT PRIVILEGES IN SCHEMA public "
-            f"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {app_user}"
+            sql.SQL(
+                "GRANT SELECT, INSERT, UPDATE, DELETE "
+                "ON ALL TABLES IN SCHEMA public TO {}"
+            ).format(sql.Identifier(app_user))
         )
         cursor.execute(
-            f"ALTER DEFAULT PRIVILEGES IN SCHEMA public "
-            f"GRANT USAGE, SELECT ON SEQUENCES TO {app_user}"
+            sql.SQL(
+                "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {}"
+            ).format(sql.Identifier(app_user))
+        )
+
+        # Ensure future tables created by migrations are also accessible
+        cursor.execute(
+            sql.SQL(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {}"
+            ).format(sql.Identifier(app_user))
+        )
+        cursor.execute(
+            sql.SQL(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+                "GRANT USAGE, SELECT ON SEQUENCES TO {}"
+            ).format(sql.Identifier(app_user))
         )
         print(f'✓ Privileges granted to "{app_user}"')
 
         cursor.close()
-        conn.close()
 
     except Exception as e:
         print(f'❌ Failed to create app user: {e}')
         raise
+    finally:
+        # Guaranteed to run even if an exception is raised mid-way,
+        # preventing a connection leak on the RDS master user connection.
+        if conn is not None:
+            conn.close()
 
 
 def create_schema(app):
@@ -247,11 +276,16 @@ def seed_sample_data(app):
         print('\n' + '=' * 60)
         print('✓ Sample data seeded successfully')
         print('=' * 60)
-        print(f'\n  Admin:     admin    / {admin_password}')
-        print(f'  Manager:   manager  / {manager_password}')
-        print(f'  Dev 1:     developer1 / {dev_password}')
-        print(f'  Dev 2:     developer2 / {dev_password}')
-        print('\n  API: http://localhost:5000/api/v1/auth/login')
+        if env != 'production':
+            print('\n  Demo credentials (dev only):')
+            print(f'    Admin:     admin      / {admin_password}')
+            print(f'    Manager:   manager    / {manager_password}')
+            print(f'    Dev 1:     developer1 / {dev_password}')
+            print(f'    Dev 2:     developer2 / {dev_password}')
+            print('\n  API: http://localhost:5000/api/v1/auth/login')
+        else:
+            print('\n  Users created: admin, manager, developer1, developer2')
+            print('  (credentials sourced from SEED_*_PASSWORD env vars)')
         print('=' * 60 + '\n')
 
 

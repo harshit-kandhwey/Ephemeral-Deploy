@@ -16,6 +16,12 @@
 
 set -euo pipefail
 
+# Temp file for passing JSON to AWS CLI (e.g. ECR image IDs).
+# mktemp avoids the fixed /tmp path race condition when multiple instances run.
+# The EXIT trap guarantees cleanup regardless of how the script terminates.
+TMPFILE=$(mktemp)
+trap 'rm -f "$TMPFILE"' EXIT
+
 # ── Parse arguments ───────────────────────────
 ENV=""
 REGION="us-east-1"
@@ -47,12 +53,14 @@ log_success() { echo -e "${GREEN}[OK]${NC}    $1"; }
 log_warn()    { echo -e "${YELLOW}[WARN]${NC}  $1"; }
 log_delete()  { echo -e "${RED}[DEL]${NC}   $1"; }
 
-# Wrapper: execute or just print in dry-run
+# Wrapper: execute or just print in dry-run.
+# Uses "$@" directly — no eval — to avoid shell re-parsing of arguments,
+# which could interpret metacharacters in resource IDs or tag values.
 run() {
   if [[ "$DRY_RUN" == "true" ]]; then
     echo -e "${YELLOW}[DRY-RUN]${NC} Would run: $*"
   else
-    eval "$@"
+    "$@"
   fi
 }
 
@@ -148,9 +156,12 @@ for repo_suffix in "api" "worker"; do
 
     if [[ "$IMAGE_IDS" != "[]" && -n "$IMAGE_IDS" ]]; then
       log_delete "Deleting images from $REPO_NAME..."
+      # Write JSON to a temp file and pass via file:// — the AWS CLI's inline
+      # JSON argument parsing is fragile with arrays; file:// is reliable.
+      echo "$IMAGE_IDS" > "$TMPFILE"
       run aws ecr batch-delete-image \
         --repository-name "$REPO_NAME" \
-        --image-ids "$IMAGE_IDS" \
+        --image-ids "file://$TMPFILE" \
         --region "$REGION" \
         --output none
     fi
@@ -265,7 +276,10 @@ if [[ "$VPC_ID" != "None" && -n "$VPC_ID" ]]; then
     --output text)
   for sg in $SG_IDS; do
     log_delete "Deleting security group: $sg"
-    run aws ec2 delete-security-group --group-id "$sg" --region "$REGION" 2>/dev/null || log_warn "Could not delete SG $sg (may have dependencies)"
+    run aws ec2 delete-security-group --group-id "$sg" --region "$REGION" 2>/dev/null || {
+      log_warn "Could not delete SG $sg (may have dependencies)"
+      ((ERRORS++)) || true
+    }
   done
 
   # Release and delete NAT Gateways
@@ -278,6 +292,18 @@ if [[ "$VPC_ID" != "None" && -n "$VPC_ID" ]]; then
     log_delete "Deleting NAT Gateway: $nat"
     run aws ec2 delete-nat-gateway --nat-gateway-id "$nat" --region "$REGION" --output none
   done
+
+  # NAT Gateways take 60–90 s to fully delete. Subnets and the VPC cannot be
+  # removed while a NAT GW is still in 'deleting' state, so we wait here.
+  if [[ -n "$NAT_GWS" && "$DRY_RUN" != "true" ]]; then
+    log_info "Waiting for NAT Gateways to finish deleting..."
+    for nat in $NAT_GWS; do
+      aws ec2 wait nat-gateway-deleted \
+        --nat-gateway-ids "$nat" \
+        --region "$REGION" 2>/dev/null || true
+    done
+    log_success "NAT Gateways deleted"
+  fi
 
   # Detach and delete Internet Gateways
   IGW_IDS=$(aws ec2 describe-internet-gateways \

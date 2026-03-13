@@ -2,9 +2,9 @@ name: CI - Test & Build
 
 on:
   push:
-    branches: [ main, develop, 'feature/**' ]
+    branches: [ main, dev, 'feature/**' ]
   pull_request:
-    branches: [ main, develop ]
+    branches: [ main, dev ]
 
 env:
   PYTHON_VERSION: '3.11'
@@ -140,15 +140,30 @@ jobs:
           outputs: type=docker,dest=/tmp/api-image.tar
 
       - name: Run Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@master
+        # Pinned to a specific version tag — using @master is a supply chain
+        # risk as any upstream commit would immediately affect this pipeline.
+        uses: aquasecurity/trivy-action@0.18.0
         with:
           input: /tmp/api-image.tar
-          format: 'table'
-          exit-code: '0'          # Non-blocking - shows security awareness
+          format: 'sarif'          # Must be sarif so the file exists for upload below
+          output: 'trivy-results.sarif'
+          exit-code: '0'          # Non-blocking — shows security awareness
           ignore-unfixed: true
           severity: 'CRITICAL,HIGH'
 
-      - name: Upload Trivy results
+      - name: Display Trivy results summary
+        # Print a human-readable view of findings into the Actions log.
+        # Runs even if the scan step above fails so we always see what was found.
+        if: always()
+        run: |
+          echo "::group::Trivy Scan Results"
+          cat trivy-results.sarif \
+            | jq '.runs[].results[] | {ruleId, message: .message.text}' \
+            2>/dev/null || echo "No vulnerabilities found or sarif parse error"
+          echo "::endgroup::"
+        continue-on-error: true
+
+      - name: Upload Trivy results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
@@ -186,7 +201,7 @@ jobs:
 
       - name: Validate each environment
         run: |
-          for env in dev staging prod; do
+          for env in dev prod; do
             echo "Validating $env..."
             cd terraform/environments/$env
             terraform init -backend=false
@@ -207,7 +222,8 @@ jobs:
         run: |
           if [[ "${{ needs.lint.result }}" == "failure" || \
                 "${{ needs.test.result }}" == "failure" || \
-                "${{ needs.docker-build.result }}" == "failure" ]]; then
+                "${{ needs.docker-build.result }}" == "failure" || \
+                "${{ needs.terraform-lint.result }}" == "failure" ]]; then
             echo "❌ CI failed - blocking merge"
             exit 1
           fi

@@ -42,7 +42,8 @@ def create_app(config_name='default'):
 
         if not app.config.get('SQLALCHEMY_DATABASE_URI'):
             missing.append(
-                'DATABASE_URL — without this the app has no database. '
+                'SQLALCHEMY_DATABASE_URI (set via DATABASE_URL env var) — '
+                'without this the app has no database. '
                 'Check that ECS Secrets Manager injection is configured correctly.'
             )
 

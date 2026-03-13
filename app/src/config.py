@@ -67,9 +67,10 @@ class DevelopmentConfig(Config):
 class ProductionConfig(Config):
     """
     Production configuration.
-    No fallback values. If any required variable is missing the app
-    crashes at startup with a clear message rather than running silently
-    with wrong config.
+    No fallback values for required secrets — all resolve to None if absent.
+    Startup validation in app.py's create_app() checks for missing values and
+    raises a RuntimeError listing every missing variable before the app binds
+    to any port, ensuring fast and visible failure rather than silent misconfig.
 
     All values are injected by ECS from AWS Secrets Manager at container launch.
     The flow is:
@@ -81,12 +82,21 @@ class ProductionConfig(Config):
     DEBUG = False
     SQLALCHEMY_ECHO = False
 
-    SECRET_KEY     = os.environ.get('SECRET_KEY')
-    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY') or os.environ.get('SECRET_KEY')
+    # All three values below deliberately use .get() with no fallback so they
+    # resolve to None when the env var is absent. They are NOT fail-fast here
+    # by design — the validation block in app.py's create_app() is the single
+    # authoritative place that checks for missing values and raises a
+    # RuntimeError with a clear message listing every missing variable at once.
+    # Using os.environ['KEY'] here would raise a bare KeyError at import time
+    # with no context, before the logger is even configured.
+    SECRET_KEY     = os.environ.get('SECRET_KEY')       # validated in app.py
+    JWT_SECRET_KEY = (                                   # validated in app.py
+        os.environ.get('JWT_SECRET_KEY') or
+        os.environ.get('SECRET_KEY')     # acceptable fallback: same key, different claim
+    )
 
-    # Production deliberately has NO fallback for DATABASE_URL.
-    # If it is not set, SQLALCHEMY_DATABASE_URI will be None and SQLAlchemy
-    # will raise a clear error at startup rather than silently using SQLite.
+    # No SQLite fallback. None here causes SQLAlchemy to raise at startup
+    # rather than silently connecting to a local file — validated in app.py.
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL')
 
 
