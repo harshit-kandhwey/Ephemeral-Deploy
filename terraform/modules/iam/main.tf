@@ -325,9 +325,20 @@ resource "aws_iam_role_policy" "vpc_flow_log" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect   = "Allow"
-      Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogGroups", "logs:DescribeLogStreams"]
-      Resource = "*"
+      Effect = "Allow"
+      Action = [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams"
+      ]
+      # Scoped to project-specific VPC flow log groups only.
+      # The VPC flow logs service writes to /aws/vpc/flowlogs/{project}-{env}.
+      Resource = [
+        "arn:aws:logs:*:*:log-group:/aws/vpc/flowlogs/${var.project}-*",
+        "arn:aws:logs:*:*:log-group:/aws/vpc/flowlogs/${var.project}-*:log-stream:*"
+      ]
     }]
   })
 }

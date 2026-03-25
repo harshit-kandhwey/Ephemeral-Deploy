@@ -57,6 +57,7 @@ resource "aws_db_instance" "main" {
   })
 }
 
+
 resource "aws_db_parameter_group" "main" {
   family = "postgres15"
   name   = "${var.project}-${var.environment}-pg15"

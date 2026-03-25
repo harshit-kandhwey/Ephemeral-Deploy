@@ -143,11 +143,11 @@ resource "aws_instance" "monitoring" {
 
   # User data: install and configure everything at boot
   user_data = base64encode(templatefile("${path.module}/templates/monitoring-userdata.sh.tpl", {
-    project             = var.project
-    environment         = var.environment
-    aws_region          = var.aws_region
-    ecs_cluster_name    = var.ecs_cluster_name
-    grafana_password    = var.grafana_admin_password
+    project               = var.project
+    environment           = var.environment
+    aws_region            = var.aws_region
+    ecs_cluster_name      = var.ecs_cluster_name
+    grafana_password      = var.grafana_admin_password
     cloudwatch_log_groups = jsonencode(var.cloudwatch_log_groups)
   }))
 
@@ -233,12 +233,15 @@ resource "aws_cloudwatch_dashboard" "main" {
     widgets = [
       {
         type   = "metric"
-        x      = 0; y = 0; width = 8; height = 6
+        x      = 0
+        y      = 0
+        width  = 8
+        height = 6
         properties = {
           title  = "ECS API - CPU & Memory"
           region = var.aws_region
           metrics = [
-            ["AWS/ECS", "CPUUtilization",    "ClusterName", var.ecs_cluster_name, "ServiceName", "${var.project}-${var.environment}-api"],
+            ["AWS/ECS", "CPUUtilization", "ClusterName", var.ecs_cluster_name, "ServiceName", "${var.project}-${var.environment}-api"],
             ["AWS/ECS", "MemoryUtilization", "ClusterName", var.ecs_cluster_name, "ServiceName", "${var.project}-${var.environment}-api"]
           ]
           period = 60
@@ -247,12 +250,15 @@ resource "aws_cloudwatch_dashboard" "main" {
       },
       {
         type   = "metric"
-        x      = 8; y = 0; width = 8; height = 6
+        x      = 8
+        y      = 0
+        width  = 8
+        height = 6
         properties = {
           title  = "RDS - CPU & Connections"
           region = var.aws_region
           metrics = [
-            ["AWS/RDS", "CPUUtilization",   "DBInstanceIdentifier", "${var.project}-${var.environment}-postgres"],
+            ["AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${var.project}-${var.environment}-postgres"],
             ["AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "${var.project}-${var.environment}-postgres"]
           ]
           period = 60
@@ -261,13 +267,16 @@ resource "aws_cloudwatch_dashboard" "main" {
       },
       {
         type   = "metric"
-        x      = 16; y = 0; width = 8; height = 6
+        x      = 16
+        y      = 0
+        width  = 8
+        height = 6
         properties = {
           title  = "Redis - Memory & Connections"
           region = var.aws_region
           metrics = [
             ["AWS/ElastiCache", "DatabaseMemoryUsagePercentage", "CacheClusterId", "${var.project}-${var.environment}-redis"],
-            ["AWS/ElastiCache", "CurrConnections",               "CacheClusterId", "${var.project}-${var.environment}-redis"]
+            ["AWS/ElastiCache", "CurrConnections", "CacheClusterId", "${var.project}-${var.environment}-redis"]
           ]
           period = 60
           stat   = "Average"
@@ -275,12 +284,15 @@ resource "aws_cloudwatch_dashboard" "main" {
       },
       {
         type   = "log"
-        x      = 0; y = 6; width = 24; height = 6
+        x      = 0
+        y      = 6
+        width  = 24
+        height = 6
         properties = {
-          title   = "API Error Logs (last 30 min)"
-          region  = var.aws_region
-          query   = "SOURCE '/ecs/${var.project}/${var.environment}/api' | fields @timestamp, @message | filter @message like /ERROR/ | sort @timestamp desc | limit 50"
-          view    = "table"
+          title  = "API Error Logs (last 30 min)"
+          region = var.aws_region
+          query  = "SOURCE '/ecs/${var.project}/${var.environment}/api' | fields @timestamp, @message | filter @message like /ERROR/ | sort @timestamp desc | limit 50"
+          view   = "table"
         }
       }
     ]

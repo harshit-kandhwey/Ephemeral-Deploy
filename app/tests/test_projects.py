@@ -1,7 +1,5 @@
 import pytest
-from src.models.user import User
 from src.models.team import Team
-from src.extensions import db
 
 
 @pytest.fixture

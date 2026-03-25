@@ -217,9 +217,9 @@ def seed_sample_data(app):
 
         # Read demo passwords from env, fall back to obvious dev-only values
         # In production these would come from Secrets Manager
-        admin_password    = os.environ.get('SEED_ADMIN_PASSWORD',    'ChangeMe-Admin-2024!')
-        manager_password  = os.environ.get('SEED_MANAGER_PASSWORD',  'ChangeMe-Manager-2024!')
-        dev_password      = os.environ.get('SEED_DEV_PASSWORD',      'ChangeMe-Dev-2024!')
+        admin_password = os.environ.get('SEED_ADMIN_PASSWORD', 'ChangeMe-Admin-2024!')
+        manager_password = os.environ.get('SEED_MANAGER_PASSWORD', 'ChangeMe-Manager-2024!')
+        dev_password = os.environ.get('SEED_DEV_PASSWORD', 'ChangeMe-Dev-2024!')
 
         # Teams
         team_eng = Team(name='Engineering', description='Backend and frontend developers')

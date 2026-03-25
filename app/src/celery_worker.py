@@ -3,7 +3,7 @@ Celery worker entry point
 """
 import os
 from . import create_app
-from .extensions import celery
+from .extensions import celery  # noqa: F401
 
 # Pass ENV explicitly so production validation runs for workers too.
 # If ENV=production and SECRET_KEY is missing, the worker logs a clear

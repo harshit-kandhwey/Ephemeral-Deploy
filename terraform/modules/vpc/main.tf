@@ -180,7 +180,7 @@ resource "aws_cloudwatch_log_group" "vpc_flow_logs" {
 
 resource "aws_flow_log" "main" {
   vpc_id          = aws_vpc.main.id
-  traffic_type    = "REJECT"   # Only log rejected traffic (cost optimization)
+  traffic_type    = var.flow_log_traffic_type
   iam_role_arn    = var.flow_log_role_arn
   log_destination = aws_cloudwatch_log_group.vpc_flow_logs.arn
 

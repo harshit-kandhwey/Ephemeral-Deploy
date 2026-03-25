@@ -66,6 +66,7 @@ resource "aws_ecr_lifecycle_policy" "api" {
   })
 }
 
+
 resource "aws_ecr_lifecycle_policy" "worker" {
   repository = aws_ecr_repository.worker.name
 

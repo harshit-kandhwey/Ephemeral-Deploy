@@ -1,6 +1,5 @@
 import logging
 import time
-import os
 from flask import Flask, jsonify
 from sqlalchemy import text
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
@@ -49,9 +48,9 @@ def create_app(config_name='default'):
 
         if missing:
             for var in missing:
-                app.logger.critical(f'STARTUP FAILED: missing required env var: {var}')
+                app.logger.critical('STARTUP FAILED: missing required env var: %s', var)
             raise RuntimeError(
-                f'Production startup failed. Missing environment variables:\n' +
+                'Production startup failed. Missing environment variables:\n' +
                 '\n'.join(f'  - {v}' for v in missing)
             )
 

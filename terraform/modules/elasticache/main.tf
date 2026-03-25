@@ -9,6 +9,7 @@ resource "aws_elasticache_subnet_group" "main" {
   tags = var.common_tags
 }
 
+
 resource "aws_elasticache_cluster" "redis" {
   cluster_id           = "${var.project}-${var.environment}-redis"
   engine               = "redis"

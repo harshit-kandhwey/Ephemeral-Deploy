@@ -1,6 +1,4 @@
-import pytest
 from src.models.team import Team
-from src.extensions import db
 
 
 # admin_headers and manager_headers fixtures are defined in conftest.py

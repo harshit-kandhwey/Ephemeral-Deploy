@@ -1,6 +1,5 @@
 from flask import request, jsonify
 from flask_jwt_extended import create_access_token, create_refresh_token, jwt_required, get_jwt_identity
-from flasgger import swag_from
 from . import api_v1
 from ...extensions import db, limiter
 from ...models.user import User

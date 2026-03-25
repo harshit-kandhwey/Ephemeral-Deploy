@@ -89,8 +89,8 @@ class ProductionConfig(Config):
     # RuntimeError with a clear message listing every missing variable at once.
     # Using os.environ['KEY'] here would raise a bare KeyError at import time
     # with no context, before the logger is even configured.
-    SECRET_KEY     = os.environ.get('SECRET_KEY')       # validated in app.py
-    JWT_SECRET_KEY = (                                   # validated in app.py
+    SECRET_KEY = os.environ.get('SECRET_KEY')       # validated in app.py
+    JWT_SECRET_KEY = (                               # validated in app.py
         os.environ.get('JWT_SECRET_KEY') or
         os.environ.get('SECRET_KEY')     # acceptable fallback: same key, different claim
     )
@@ -116,7 +116,7 @@ class TestingConfig(Config):
 
 config = {
     'development': DevelopmentConfig,
-    'production':  ProductionConfig,
-    'testing':     TestingConfig,
-    'default':     DevelopmentConfig,
+    'production': ProductionConfig,
+    'testing': TestingConfig,
+    'default': DevelopmentConfig,
 }

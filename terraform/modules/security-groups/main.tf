@@ -51,11 +51,25 @@ resource "aws_security_group" "api" {
     # When ALB is enabled, replace with: security_groups = [aws_security_group.alb.id]
   }
 
+  # Egress: scoped to least-privilege destinations only.
+  # API tasks need:
+  #   1. PostgreSQL and Redis — within the VPC
+  #   2. HTTPS to AWS APIs   — ECR image pulls, Secrets Manager, SSM, CloudWatch
+  #      (NAT Gateway or VPC endpoints forward these; dest is still 0.0.0.0/0
+  #       at the SG layer since AWS service IPs are not fixed CIDR blocks)
   egress {
-    description = "All outbound"
+    description = "PostgreSQL and Redis within VPC"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  egress {
+    description = "HTTPS for AWS API calls (ECR, Secrets Manager, SSM, CloudWatch)"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 

@@ -165,14 +165,15 @@ module "iam" {
 module "vpc" {
   source = "../../modules/vpc"
 
-  project            = local.project
-  environment        = local.environment
-  vpc_cidr           = var.vpc_cidr
-  availability_zones = var.availability_zones
-  enable_nat_gateway = false   # Saves ~$1/day in dev
-  flow_log_role_arn  = module.iam.vpc_flow_log_role_arn
-  log_retention_days = 3
-  common_tags        = local.common_tags
+  project               = local.project
+  environment           = local.environment
+  vpc_cidr              = var.vpc_cidr
+  availability_zones    = var.availability_zones
+  enable_nat_gateway    = false   # Saves ~$1/day in dev
+  flow_log_role_arn     = module.iam.vpc_flow_log_role_arn
+  flow_log_traffic_type = "REJECT"  # Cost-optimised: capture security events only
+  log_retention_days    = 3
+  common_tags           = local.common_tags
 }
 
 module "security_groups" {
@@ -256,15 +257,15 @@ module "ecs" {
 module "monitoring" {
   source = "../../modules/monitoring"
 
-  project                    = local.project
-  environment                = local.environment
-  aws_region                 = var.aws_region
-  vpc_id                     = module.vpc.vpc_id
-  public_subnet_id           = module.vpc.public_subnet_ids[0]
-  monitoring_sg_id           = module.security_groups.monitoring_sg_id
-  ecs_cluster_name           = module.ecs.cluster_name
-  grafana_admin_password     = data.aws_ssm_parameter.grafana_admin_password.value
-  cloudwatch_log_groups      = [
+  project                = local.project
+  environment            = local.environment
+  aws_region             = var.aws_region
+  vpc_id                 = module.vpc.vpc_id
+  public_subnet_id       = module.vpc.public_subnet_ids[0]
+  monitoring_sg_id       = module.security_groups.monitoring_sg_id
+  ecs_cluster_name       = module.ecs.cluster_name
+  grafana_admin_password = data.aws_ssm_parameter.grafana_admin_password.value
+  cloudwatch_log_groups  = [
     "/ecs/${local.project}/${local.environment}/api",
     "/ecs/${local.project}/${local.environment}/worker",
     "/ecs/${local.project}/${local.environment}/beat",

@@ -7,7 +7,6 @@ from ...models.task import Task
 from ...models.user import User
 from ...models.audit_log import AuditLog
 from ...utils.decorators import role_required, get_current_user_or_401
-from ...utils.pagination import paginate
 
 
 @api_v1.route('/tasks', methods=['GET'])
@@ -193,7 +192,6 @@ def create_task():
 
     # Send notification (async)
     if task.assignee_id:
-        # BUG FIX: same hardcoded absolute import issue as comments.py
         from ...tasks.email_tasks import send_task_assignment_email
         send_task_assignment_email.delay(task.id, task.assignee_id)
 
@@ -271,7 +269,6 @@ def update_task(task_id):
 
         # Notify new assignee
         if data['assignee_id'] and data['assignee_id'] != old_assignee:
-            # BUG FIX: same hardcoded absolute import issue
             from ...tasks.email_tasks import send_task_assignment_email
             send_task_assignment_email.delay(task.id, data['assignee_id'])
 

@@ -26,6 +26,7 @@ resource "aws_ecs_cluster_capacity_providers" "main" {
   }
 }
 
+
 # ── CloudWatch Log Groups ─────────────────────
 resource "aws_cloudwatch_log_group" "api" {
   name              = "/ecs/${var.project}/${var.environment}/api"
