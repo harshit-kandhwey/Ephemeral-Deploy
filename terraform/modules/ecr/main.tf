@@ -7,7 +7,7 @@ resource "aws_ecr_repository" "api" {
   image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {
-    scan_on_push = true   # Automatic vulnerability scanning on every push
+    scan_on_push = true # Automatic vulnerability scanning on every push
   }
 
   encryption_configuration {
@@ -65,7 +65,6 @@ resource "aws_ecr_lifecycle_policy" "api" {
     ]
   })
 }
-
 
 resource "aws_ecr_lifecycle_policy" "worker" {
   repository = aws_ecr_repository.worker.name

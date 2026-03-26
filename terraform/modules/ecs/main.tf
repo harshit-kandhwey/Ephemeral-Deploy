@@ -8,7 +8,7 @@ resource "aws_ecs_cluster" "main" {
 
   setting {
     name  = "containerInsights"
-    value = var.environment == "prod" ? "enabled" : "disabled"  # Cost optimization
+    value = var.environment == "prod" ? "enabled" : "disabled" # Cost optimization
   }
 
   tags = var.common_tags
@@ -25,7 +25,6 @@ resource "aws_ecs_cluster_capacity_providers" "main" {
     base              = 1
   }
 }
-
 
 # ── CloudWatch Log Groups ─────────────────────
 resource "aws_cloudwatch_log_group" "api" {
@@ -70,16 +69,16 @@ resource "aws_ecs_task_definition" "api" {
       ]
 
       environment = [
-        { name = "ENV",     value = var.environment },
+        { name = "ENV", value = var.environment },
         { name = "VERSION", value = var.git_commit }
       ]
 
       secrets = [
-        { name = "DATABASE_URL",          valueFrom = "${var.secrets_arn}:DATABASE_URL::" },
-        { name = "REDIS_URL",             valueFrom = "${var.secrets_arn}:REDIS_URL::" },
-        { name = "SECRET_KEY",            valueFrom = "${var.secrets_arn}:SECRET_KEY::" },
-        { name = "JWT_SECRET_KEY",        valueFrom = "${var.secrets_arn}:JWT_SECRET_KEY::" },
-        { name = "CELERY_BROKER_URL",     valueFrom = "${var.secrets_arn}:CELERY_BROKER_URL::" },
+        { name = "DATABASE_URL", valueFrom = "${var.secrets_arn}:DATABASE_URL::" },
+        { name = "REDIS_URL", valueFrom = "${var.secrets_arn}:REDIS_URL::" },
+        { name = "SECRET_KEY", valueFrom = "${var.secrets_arn}:SECRET_KEY::" },
+        { name = "JWT_SECRET_KEY", valueFrom = "${var.secrets_arn}:JWT_SECRET_KEY::" },
+        { name = "CELERY_BROKER_URL", valueFrom = "${var.secrets_arn}:CELERY_BROKER_URL::" },
         { name = "CELERY_RESULT_BACKEND", valueFrom = "${var.secrets_arn}:CELERY_RESULT_BACKEND::" }
       ]
 
@@ -122,14 +121,14 @@ resource "aws_ecs_task_definition" "worker" {
       essential = true
 
       environment = [
-        { name = "ENV",     value = var.environment },
+        { name = "ENV", value = var.environment },
         { name = "VERSION", value = var.git_commit }
       ]
 
       secrets = [
-        { name = "DATABASE_URL",          valueFrom = "${var.secrets_arn}:DATABASE_URL::" },
-        { name = "REDIS_URL",             valueFrom = "${var.secrets_arn}:REDIS_URL::" },
-        { name = "CELERY_BROKER_URL",     valueFrom = "${var.secrets_arn}:CELERY_BROKER_URL::" },
+        { name = "DATABASE_URL", valueFrom = "${var.secrets_arn}:DATABASE_URL::" },
+        { name = "REDIS_URL", valueFrom = "${var.secrets_arn}:REDIS_URL::" },
+        { name = "CELERY_BROKER_URL", valueFrom = "${var.secrets_arn}:CELERY_BROKER_URL::" },
         { name = "CELERY_RESULT_BACKEND", valueFrom = "${var.secrets_arn}:CELERY_RESULT_BACKEND::" }
       ]
 
@@ -169,7 +168,7 @@ resource "aws_ecs_task_definition" "beat" {
       ]
 
       secrets = [
-        { name = "DATABASE_URL",      valueFrom = "${var.secrets_arn}:DATABASE_URL::" },
+        { name = "DATABASE_URL", valueFrom = "${var.secrets_arn}:DATABASE_URL::" },
         { name = "CELERY_BROKER_URL", valueFrom = "${var.secrets_arn}:CELERY_BROKER_URL::" }
       ]
 
@@ -189,12 +188,12 @@ resource "aws_ecs_task_definition" "beat" {
 
 # ── ECS Service: API ─────────────────────────
 resource "aws_ecs_service" "api" {
-  name                               = "${var.project}-${var.environment}-api"
-  cluster                            = aws_ecs_cluster.main.id
-  task_definition                    = aws_ecs_task_definition.api.arn
-  desired_count                      = var.api_desired_count
-  launch_type                        = null  # Use capacity provider
-  health_check_grace_period_seconds  = 60
+  name                              = "${var.project}-${var.environment}-api"
+  cluster                           = aws_ecs_cluster.main.id
+  task_definition                   = aws_ecs_task_definition.api.arn
+  desired_count                     = var.api_desired_count
+  launch_type                       = null # Use capacity provider
+  health_check_grace_period_seconds = 60
 
   capacity_provider_strategy {
     capacity_provider = var.environment == "prod" ? "FARGATE" : "FARGATE_SPOT"
@@ -205,7 +204,7 @@ resource "aws_ecs_service" "api" {
   network_configuration {
     subnets          = var.private_app_subnet_ids
     security_groups  = [var.api_sg_id]
-    assign_public_ip = false  # Private subnet - no public IP needed
+    assign_public_ip = false # Private subnet - no public IP needed
   }
 
   # Uncomment to attach to ALB (shows LB knowledge)
@@ -217,7 +216,7 @@ resource "aws_ecs_service" "api" {
 
   deployment_circuit_breaker {
     enable   = true
-    rollback = true   # Auto-rollback on failed deployment
+    rollback = true # Auto-rollback on failed deployment
   }
 
   deployment_controller {
@@ -228,7 +227,7 @@ resource "aws_ecs_service" "api" {
   tags = var.common_tags
 
   lifecycle {
-    ignore_changes = [task_definition]  # Managed by CI/CD
+    ignore_changes = [task_definition] # Managed by CI/CD
   }
 }
 
@@ -258,7 +257,7 @@ resource "aws_ecs_service" "worker" {
   tags = var.common_tags
 
   lifecycle {
-    ignore_changes = [task_definition]  # Managed by CI/CD
+    ignore_changes = [task_definition] # Managed by CI/CD
   }
 }
 
@@ -267,7 +266,7 @@ resource "aws_ecs_service" "beat" {
   name            = "${var.project}-${var.environment}-beat"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.beat.arn
-  desired_count   = 1   # Beat scheduler must be singleton
+  desired_count   = 1 # Beat scheduler must be singleton
 
   capacity_provider_strategy {
     capacity_provider = var.environment == "prod" ? "FARGATE" : "FARGATE_SPOT"
@@ -287,7 +286,7 @@ resource "aws_ecs_service" "beat" {
   tags = var.common_tags
 
   lifecycle {
-    ignore_changes = [task_definition]  # Managed by CI/CD
+    ignore_changes = [task_definition] # Managed by CI/CD
   }
 }
 
@@ -328,15 +327,15 @@ resource "aws_appautoscaling_policy" "api_cpu" {
 #   load_balancer_type = "application"
 #   security_groups    = [var.alb_sg_id]
 #   subnets            = var.public_subnet_ids
-#   
+#
 #   enable_deletion_protection = var.environment == "prod"
-#   
+#
 #   access_logs {
 #     bucket  = var.alb_logs_bucket
 #     prefix  = "${var.environment}/alb"
 #     enabled = true
 #   }
-#   
+#
 #   tags = var.common_tags
 # }
 #
@@ -346,7 +345,7 @@ resource "aws_appautoscaling_policy" "api_cpu" {
 #   protocol    = "HTTP"
 #   vpc_id      = var.vpc_id
 #   target_type = "ip"   # Required for Fargate
-#   
+#
 #   health_check {
 #     path                = "/health"
 #     healthy_threshold   = 2
@@ -361,13 +360,13 @@ resource "aws_appautoscaling_policy" "api_cpu" {
 #   load_balancer_arn = aws_lb.api.arn
 #   port              = 80
 #   protocol          = "HTTP"
-#   
+#
 #   # Redirect HTTP → HTTPS in prod, forward to app in non-prod
 #   dynamic "default_action" {
 #     for_each = var.environment == "prod" ? [1] : []
 #     content {
 #       type = "redirect"
-#       
+#
 #       redirect {
 #         port        = "443"
 #         protocol    = "HTTPS"
@@ -375,7 +374,7 @@ resource "aws_appautoscaling_policy" "api_cpu" {
 #       }
 #     }
 #   }
-#   
+#
 #   dynamic "default_action" {
 #     for_each = var.environment == "prod" ? [] : [1]
 #     content {
@@ -391,7 +390,7 @@ resource "aws_appautoscaling_policy" "api_cpu" {
 #   protocol          = "HTTPS"
 #   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
 #   certificate_arn   = var.acm_certificate_arn
-#   
+#
 #   default_action {
 #     type             = "forward"
 #     target_group_arn = aws_lb_target_group.api.arn

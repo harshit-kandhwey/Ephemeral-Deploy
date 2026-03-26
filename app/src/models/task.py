@@ -62,3 +62,4 @@ class Task(db.Model):
             data['attachments'] = [a.to_dict() for a in self.attachments]
 
         return data
+    

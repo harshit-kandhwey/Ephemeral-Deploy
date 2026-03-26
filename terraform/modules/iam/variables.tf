@@ -4,7 +4,7 @@ variable "project" {
 }
 
 variable "environment" {
-  description = "Environment (dev, prod)"
+  description = "Environment (dev, staging, prod)"
   type        = string
 }
 
@@ -63,11 +63,10 @@ variable "app_s3_bucket" {
 variable "ecr_repository_names" {
   description = "List of ECR repository names for CI/CD to push images"
   type        = list(string)
-  default     = ["api", "worker"]  # Will be formatted as ${project}-${repo_name}
+  default     = ["api", "worker"] # Will be formatted as ${project}-${repo_name}
 }
 
 variable "common_tags" {
   description = "Common tags for all resources"
   type        = map(string)
 }
-

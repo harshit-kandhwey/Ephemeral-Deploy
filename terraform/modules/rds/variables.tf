@@ -61,5 +61,5 @@ variable "final_snapshot_identifier" {
 variable "enable_performance_insights" {
   description = "Enable Performance Insights for RDS (prod by default)"
   type        = bool
-  default     = null  # null means auto-enable for prod only
+  default     = null # null means auto-enable for prod only
 }
