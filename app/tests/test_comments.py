@@ -61,4 +61,3 @@ def test_get_comments(client, auth_headers, task_id):
 def test_get_comments_unauthenticated(client, task_id):
     response = client.get(f'/api/v1/tasks/{task_id}/comments')
     assert response.status_code == 401
-    

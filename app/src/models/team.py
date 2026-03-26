@@ -24,4 +24,5 @@ class Team(db.Model):
             'description': self.description,
             'member_count': len(self.members),
             'project_count': len(self.projects),
-            'created_at': self.created_at.isoformat() if self.created_at else None        }
+            'created_at': self.created_at.isoformat()
+        }

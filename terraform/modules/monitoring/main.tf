@@ -126,7 +126,7 @@ data "aws_ami" "amazon_linux_2023" {
 # ── EC2 Instance ──────────────────────────────
 resource "aws_instance" "monitoring" {
   ami                    = data.aws_ami.amazon_linux_2023.id
-  instance_type          = "t3.micro"   # Free tier eligible
+  instance_type          = "t3.micro" # Free tier eligible
   subnet_id              = var.public_subnet_id
   vpc_security_group_ids = [var.monitoring_sg_id]
   iam_instance_profile   = aws_iam_instance_profile.monitoring.name
@@ -135,7 +135,7 @@ resource "aws_instance" "monitoring" {
   # key_name = "your-key"  ← commented intentionally
 
   root_block_device {
-    volume_size = 8    # GB - minimal storage
+    volume_size = 8 # GB - minimal storage
     volume_type = "gp3"
     encrypted   = true
     tags = merge(var.common_tags, { Name = "${var.project}-${var.environment}-monitoring-root" })

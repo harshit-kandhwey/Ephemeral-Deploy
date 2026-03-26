@@ -83,9 +83,7 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
           "ecr:BatchDeleteImage",
           "ecr:DescribeRepositories"
         ]
-        Resource = concat(
-          [for repo in var.ecr_repository_names : "arn:aws:ecr:*:*:repository/${var.project}-${repo}"]
-        )
+        Resource = [for repo in var.ecr_repository_names : "arn:aws:ecr:*:*:repository/${var.project}-${repo}"]
       },
       # ECS - deploy services
       {

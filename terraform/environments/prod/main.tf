@@ -15,7 +15,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.40.0"  # Pinned for production stability — update deliberately after testing
+      version = "~> 5.40.0" # Pinned for production stability — update deliberately after testing
     }
   }
 
@@ -44,7 +44,7 @@ locals {
 
   # Blue-green: determine active slot from variable
   # deploy.yml sets this based on what's currently running
-  active_slot   = var.deployment_slot          # "blue" or "green"
+  active_slot   = var.deployment_slot # "blue" or "green"
   inactive_slot = var.deployment_slot == "blue" ? "green" : "blue"
 
   common_tags = {
@@ -102,7 +102,7 @@ data "aws_ssm_parameter" "grafana_admin_password" {
 resource "aws_secretsmanager_secret" "app" {
   name                    = "${local.project}/${local.environment}/app-secrets"
   description             = "Runtime secrets injected by ECS at container launch"
-  recovery_window_in_days = 7   # 7-day recovery window in prod (safety net)
+  recovery_window_in_days = 7 # 7-day recovery window in prod (safety net)
   tags                    = local.common_tags
 }
 
@@ -135,7 +135,7 @@ module "iam" {
   tf_state_bucket      = var.tf_state_bucket
   secrets_arn          = aws_secretsmanager_secret.app.arn
   app_s3_bucket        = var.app_s3_bucket
-  create_oidc_provider = false   # Already created by dev env - reuse it
+  create_oidc_provider = false # Already created by dev env - reuse it
   common_tags          = local.common_tags
 }
 
@@ -146,10 +146,10 @@ module "vpc" {
   environment          = local.environment
   vpc_cidr             = var.vpc_cidr
   availability_zones   = var.availability_zones
-  enable_nat_gateway   = false   # Still off for cost; enable if workers need internet
+  enable_nat_gateway   = false # Still off for cost; enable if workers need internet
   flow_log_role_arn    = module.iam.vpc_flow_log_role_arn
-  flow_log_traffic_type = "ALL"  # Full visibility in prod for compliance/security auditing
-  log_retention_days   = 14     # Longer retention in prod
+  flow_log_traffic_type = "ALL" # Full visibility in prod for compliance/security auditing
+  log_retention_days   = 14 # Longer retention in prod
   common_tags          = local.common_tags
 }
 
@@ -218,7 +218,7 @@ module "ecs_blue" {
   source = "../../modules/ecs"
 
   project                = local.project
-  environment            = "${local.environment}-blue"   # Separate service names
+  environment            = "${local.environment}-blue" # Separate service names
   aws_region             = var.aws_region
   api_image              = local.active_slot == "blue" ? var.api_image : var.previous_api_image
   worker_image           = local.active_slot == "blue" ? var.worker_image : var.previous_worker_image
@@ -285,7 +285,7 @@ module "monitoring" {
   vpc_id                 = module.vpc.vpc_id
   public_subnet_id       = module.vpc.public_subnet_ids[0]
   monitoring_sg_id       = module.security_groups.monitoring_sg_id
-  ecs_cluster_name       = module.ecs_blue.cluster_name   # Cluster is shared
+  ecs_cluster_name       = module.ecs_blue.cluster_name # Cluster is shared
   grafana_admin_password = data.aws_ssm_parameter.grafana_admin_password.value
   cloudwatch_log_groups  = [
     "/ecs/${local.project}/${local.environment}-blue/api",
@@ -306,6 +306,6 @@ resource "aws_ssm_parameter" "active_slot" {
   tags = local.common_tags
 
   lifecycle {
-    ignore_changes = [value]   # deploy.yml manages this value, not Terraform
+    ignore_changes = [value] # deploy.yml manages this value, not Terraform
   }
 }
