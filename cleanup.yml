@@ -26,6 +26,7 @@ env:
   TF_VERSION: 1.7.0
   TF_STATE_BUCKET: nexusdeploy-terraform-state
   TF_LOCK_TABLE: nexusdeploy-terraform-locks
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   # ─────────────────────────────────────────────
@@ -107,7 +108,7 @@ jobs:
           echo "🧹 Cleaning ECR images for ${{ env.TF_ENV }}..."
           for repo in nexusdeploy-api-${{ env.TF_ENV }} nexusdeploy-worker-${{ env.TF_ENV }}; do
             echo "Cleaning repo: $repo"
-            
+
             # Check if repo exists
             if aws ecr describe-repositories --repository-names $repo --region ${{ env.AWS_REGION }} 2>/dev/null; then
               # Get all image digests
@@ -116,7 +117,7 @@ jobs:
                 --region ${{ env.AWS_REGION }} \
                 --query 'imageIds[*]' \
                 --output json)
-              
+
               if [[ "$IMAGES" != "[]" && -n "$IMAGES" ]]; then
                 aws ecr batch-delete-image \
                   --repository-name $repo \
@@ -135,32 +136,32 @@ jobs:
       - name: Delete Terraform state from S3
         run: |
           echo "🗑️ Removing Terraform state for ${{ env.TF_ENV }}..."
-          
+
           STATE_KEY="${{ env.TF_ENV }}/terraform.tfstate"
-          
+
           # Check if state exists
           if aws s3api head-object \
             --bucket ${{ env.TF_STATE_BUCKET }} \
             --key $STATE_KEY \
             --region ${{ env.AWS_REGION }} 2>/dev/null; then
-            
+
             # Backup state before deletion (safety net)
             aws s3 cp \
               s3://${{ env.TF_STATE_BUCKET }}/$STATE_KEY \
               s3://${{ env.TF_STATE_BUCKET }}/backups/${{ env.TF_ENV }}/terraform-$(date +%Y%m%d-%H%M%S).tfstate \
               --region ${{ env.AWS_REGION }}
-            
+
             # Delete active state
             aws s3 rm \
               s3://${{ env.TF_STATE_BUCKET }}/$STATE_KEY \
               --region ${{ env.AWS_REGION }}
-            
+
             # Release DynamoDB lock if stuck
             aws dynamodb delete-item \
               --table-name ${{ env.TF_LOCK_TABLE }} \
               --key "{\"LockID\": {\"S\": \"${{ env.TF_STATE_BUCKET }}/$STATE_KEY\"}}" \
               --region ${{ env.AWS_REGION }} 2>/dev/null || true
-            
+
             echo "✅ State deleted and backed up"
           else
             echo "ℹ️ No state file found for ${{ env.TF_ENV }}"

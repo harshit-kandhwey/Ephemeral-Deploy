@@ -27,6 +27,7 @@ env:
   AWS_REGION: us-east-1
   TF_VERSION: 1.7.0
   TF_STATE_BUCKET: nexusdeploy-terraform-state
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   # DynamoDB locking - commented intentionally (single-dev, no concurrency risk)
   # TF_LOCK_TABLE: nexusdeploy-terraform-locks
 
@@ -274,7 +275,7 @@ jobs:
             --query 'Parameter.Value' --output text \
             --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
           echo "api=${PREV_API}" >> $GITHUB_OUTPUT
-          
+
           PREV_WORKER=$(aws ssm get-parameter \
             --name "/nexusdeploy/prod/deployment/prev_worker_image" \
             --query 'Parameter.Value' --output text \
@@ -365,8 +366,6 @@ jobs:
       - name: Store current images as 'previous' for next deploy
         if: steps.health.outputs.health_ok == 'true'
         run: |
-          # These become TF_VAR_previous_* in the NEXT deployment
-          # Store in SSM so the next workflow run can read them
           aws ssm put-parameter \
             --name "/nexusdeploy/prod/deployment/prev_api_image" \
             --value "${{ needs.build.outputs.api_image }}" \
