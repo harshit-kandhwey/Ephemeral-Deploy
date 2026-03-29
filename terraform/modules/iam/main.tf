@@ -110,9 +110,9 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
       },
       # Terraform state locking
       {
-        Sid    = "TerraformStateLock"
-        Effect = "Allow"
-        Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"]
+        Sid      = "TerraformStateLock"
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"]
         Resource = "arn:aws:dynamodb:*:*:table/${var.tf_lock_table}"
       },
       # Infrastructure: EC2 and VPC (Terraform-managed only)
@@ -221,9 +221,9 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
       },
       # IAM: PassRole limited to project-scoped roles (security critical)
       {
-        Sid    = "IAMPassRole"
-        Effect = "Allow"
-        Action = ["iam:PassRole"]
+        Sid      = "IAMPassRole"
+        Effect   = "Allow"
+        Action   = ["iam:PassRole"]
         Resource = "arn:aws:iam::*:role/${var.project}-*"
       }
     ]

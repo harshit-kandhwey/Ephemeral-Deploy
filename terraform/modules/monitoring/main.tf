@@ -97,7 +97,7 @@ resource "aws_iam_instance_profile" "monitoring" {
 # ── Elastic IP for stable Grafana URL ────────
 resource "aws_eip" "monitoring" {
   domain = "vpc"
-  tags   = merge(var.common_tags, {
+  tags = merge(var.common_tags, {
     Name = "${var.project}-${var.environment}-monitoring-eip"
   })
 }
