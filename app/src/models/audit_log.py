@@ -3,10 +3,10 @@ from ..extensions import db
 
 
 class AuditLog(db.Model):
-    __tablename__ = 'audit_logs'
+    __tablename__ = "audit_logs"
 
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'))
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"))
     # created, updated, deleted
     action = db.Column(db.String(50), nullable=False)
     # task, project, user, etc.
@@ -17,15 +17,15 @@ class AuditLog(db.Model):
     user_agent = db.Column(db.String(255))
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
 
-    user = db.relationship('User')
+    user = db.relationship("User")
 
     def to_dict(self):
         return {
-            'id': self.id,
-            'user': self.user.username if self.user else 'system',
-            'action': self.action,
-            'entity_type': self.entity_type,
-            'entity_id': self.entity_id,
-            'changes': self.changes,
-            'created_at': self.created_at.isoformat()
+            "id": self.id,
+            "user": self.user.username if self.user else "system",
+            "action": self.action,
+            "entity_type": self.entity_type,
+            "entity_id": self.entity_id,
+            "changes": self.changes,
+            "created_at": self.created_at.isoformat(),
         }

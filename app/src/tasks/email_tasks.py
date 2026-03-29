@@ -5,7 +5,7 @@ from ..models.user import User
 from ..models.comment import Comment
 
 
-@celery.task(name='tasks.send_task_assignment_email')
+@celery.task(name="tasks.send_task_assignment_email")
 def send_task_assignment_email(task_id, user_id):
     """Send email when a task is assigned"""
     task = Task.query.get(task_id)
@@ -17,14 +17,12 @@ def send_task_assignment_email(task_id, user_id):
         )
         return
 
-    current_app.logger.info(
-        f"[EMAIL] Task '{task.title}' assigned to {user.email}"
-    )
+    current_app.logger.info(f"[EMAIL] Task '{task.title}' assigned to {user.email}")
 
     return f"Email sent to {user.email}"
 
 
-@celery.task(name='tasks.send_comment_notification')
+@celery.task(name="tasks.send_comment_notification")
 def send_comment_notification(comment_id, user_id):
     """Send email when someone comments on your task"""
     comment = Comment.query.get(comment_id)
@@ -43,7 +41,7 @@ def send_comment_notification(comment_id, user_id):
     return f"Notification sent to {user.email}"
 
 
-@celery.task(name='tasks.send_daily_digest')
+@celery.task(name="tasks.send_daily_digest")
 def send_daily_digest():
     """Send daily digest of tasks to all users"""
     users = User.query.filter_by(is_active=True).all()
@@ -54,12 +52,9 @@ def send_daily_digest():
         # ignoring 'in_progress' and 'in_review'. Count all non-done tasks so the
         # digest reflects actual pending work.
         pending_tasks = Task.query.filter(
-            Task.assignee_id == user.id,
-            Task.status != 'done'
+            Task.assignee_id == user.id, Task.status != "done"
         ).count()
 
-        current_app.logger.info(
-            f"[DIGEST] {user.email}: {pending_tasks} pending tasks"
-        )
+        current_app.logger.info(f"[DIGEST] {user.email}: {pending_tasks} pending tasks")
 
     return f"Digest sent to {len(users)} users"

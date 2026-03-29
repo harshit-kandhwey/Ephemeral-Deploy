@@ -18,11 +18,7 @@ class CacheService:
     def set(key, value, expiration=3600):
         """Set value in cache with expiration (default 1 hour)"""
         try:
-            redis_client.setex(
-                key,
-                expiration,
-                json.dumps(value)
-            )
+            redis_client.setex(key, expiration, json.dumps(value))
             return True
         except Exception as e:
             current_app.logger.error(f"Cache set error: {e}")

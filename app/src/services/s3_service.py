@@ -8,12 +8,11 @@ import os
 class S3Service:
     def __init__(self):
         self.s3_client = boto3.client(
-            's3',
-            region_name=current_app.config['AWS_REGION']
+            "s3", region_name=current_app.config["AWS_REGION"]
         )
-        self.bucket = current_app.config['S3_BUCKET']
+        self.bucket = current_app.config["S3_BUCKET"]
 
-    def upload_file(self, file, folder='attachments'):
+    def upload_file(self, file, folder="attachments"):
         """
         Upload file to S3
         Returns: (success, s3_key or error_message)
@@ -28,10 +27,7 @@ class S3Service:
                 file,
                 self.bucket,
                 s3_key,
-                ExtraArgs={
-                    'ContentType': file.content_type,
-                    'ACL': 'private'
-                }
+                ExtraArgs={"ContentType": file.content_type, "ACL": "private"},
             )
 
             return True, s3_key
@@ -44,9 +40,9 @@ class S3Service:
         """Generate presigned URL for downloading"""
         try:
             url = self.s3_client.generate_presigned_url(
-                'get_object',
-                Params={'Bucket': self.bucket, 'Key': s3_key},
-                ExpiresIn=expiration
+                "get_object",
+                Params={"Bucket": self.bucket, "Key": s3_key},
+                ExpiresIn=expiration,
             )
             return url
         except ClientError as e:

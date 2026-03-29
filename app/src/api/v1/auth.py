@@ -1,12 +1,17 @@
 from flask import request, jsonify
-from flask_jwt_extended import create_access_token, create_refresh_token, jwt_required, get_jwt_identity
+from flask_jwt_extended import (
+    create_access_token,
+    create_refresh_token,
+    jwt_required,
+    get_jwt_identity,
+)
 from . import api_v1
 from ...extensions import db, limiter
 from ...models.user import User
 from ...models.audit_log import AuditLog
 
 
-@api_v1.route('/auth/register', methods=['POST'])
+@api_v1.route("/auth/register", methods=["POST"])
 @limiter.limit("5 per hour")
 def register():
     """
@@ -42,23 +47,23 @@ def register():
     data = request.get_json()
 
     # Validation
-    if not data or not all(k in data for k in ['email', 'username', 'password']):
-        return jsonify({'error': 'Missing required fields'}), 400
+    if not data or not all(k in data for k in ["email", "username", "password"]):
+        return jsonify({"error": "Missing required fields"}), 400
 
     # Check if user exists
-    if User.query.filter_by(email=data['email']).first():
-        return jsonify({'error': 'Email already registered'}), 400
+    if User.query.filter_by(email=data["email"]).first():
+        return jsonify({"error": "Email already registered"}), 400
 
-    if User.query.filter_by(username=data['username']).first():
-        return jsonify({'error': 'Username already taken'}), 400
+    if User.query.filter_by(username=data["username"]).first():
+        return jsonify({"error": "Username already taken"}), 400
 
     # Create user
     user = User(
-        email=data['email'],
-        username=data['username'],
-        full_name=data.get('full_name', '')
+        email=data["email"],
+        username=data["username"],
+        full_name=data.get("full_name", ""),
     )
-    user.set_password(data['password'])
+    user.set_password(data["password"])
 
     db.session.add(user)
     db.session.commit()
@@ -66,22 +71,27 @@ def register():
     # Audit log
     audit = AuditLog(
         user_id=user.id,
-        action='created',
-        entity_type='user',
+        action="created",
+        entity_type="user",
         entity_id=user.id,
         ip_address=request.remote_addr,
-        user_agent=request.user_agent.string
+        user_agent=request.user_agent.string,
     )
     db.session.add(audit)
     db.session.commit()
 
-    return jsonify({
-        'message': 'User created successfully',
-        'user': user.to_dict(include_email=True)
-    }), 201
+    return (
+        jsonify(
+            {
+                "message": "User created successfully",
+                "user": user.to_dict(include_email=True),
+            }
+        ),
+        201,
+    )
 
 
-@api_v1.route('/auth/login', methods=['POST'])
+@api_v1.route("/auth/login", methods=["POST"])
 @limiter.limit("10 per minute")
 def login():
     """
@@ -111,16 +121,16 @@ def login():
     """
     data = request.get_json()
 
-    if not data or not all(k in data for k in ['username', 'password']):
-        return jsonify({'error': 'Missing username or password'}), 400
+    if not data or not all(k in data for k in ["username", "password"]):
+        return jsonify({"error": "Missing username or password"}), 400
 
-    user = User.query.filter_by(username=data['username']).first()
+    user = User.query.filter_by(username=data["username"]).first()
 
-    if not user or not user.check_password(data['password']):
-        return jsonify({'error': 'Invalid credentials'}), 401
+    if not user or not user.check_password(data["password"]):
+        return jsonify({"error": "Invalid credentials"}), 401
 
     if not user.is_active:
-        return jsonify({'error': 'Account is disabled'}), 403
+        return jsonify({"error": "Account is disabled"}), 403
 
     # Create tokens
     access_token = create_access_token(identity=str(user.id))
@@ -129,23 +139,28 @@ def login():
     # Audit log
     audit = AuditLog(
         user_id=user.id,
-        action='login',
-        entity_type='auth',
+        action="login",
+        entity_type="auth",
         entity_id=user.id,
         ip_address=request.remote_addr,
-        user_agent=request.user_agent.string
+        user_agent=request.user_agent.string,
     )
     db.session.add(audit)
     db.session.commit()
 
-    return jsonify({
-        'access_token': access_token,
-        'refresh_token': refresh_token,
-        'user': user.to_dict(include_email=True)
-    }), 200
+    return (
+        jsonify(
+            {
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "user": user.to_dict(include_email=True),
+            }
+        ),
+        200,
+    )
 
 
-@api_v1.route('/auth/refresh', methods=['POST'])
+@api_v1.route("/auth/refresh", methods=["POST"])
 @jwt_required(refresh=True)
 def refresh():
     """
@@ -161,10 +176,10 @@ def refresh():
     """
     user_id = int(get_jwt_identity())
     access_token = create_access_token(identity=user_id)
-    return jsonify({'access_token': access_token}), 200
+    return jsonify({"access_token": access_token}), 200
 
 
-@api_v1.route('/auth/me', methods=['GET'])
+@api_v1.route("/auth/me", methods=["GET"])
 @jwt_required()
 def get_current_user():
     """

@@ -1,7 +1,7 @@
 from flask import Blueprint
 
 # CREATE the blueprint FIRST
-api_v1 = Blueprint('api_v1', __name__)
+api_v1 = Blueprint("api_v1", __name__)
 
 # THEN import the routes (they will register themselves on api_v1)
 # Import AFTER blueprint creation to avoid circular imports

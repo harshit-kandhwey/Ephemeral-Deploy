@@ -8,7 +8,7 @@ from ...models.audit_log import AuditLog
 from ...utils.decorators import role_required
 
 
-@api_v1.route('/projects', methods=['GET'])
+@api_v1.route("/projects", methods=["GET"])
 @jwt_required()
 def get_projects():
     """
@@ -26,22 +26,22 @@ def get_projects():
     user = User.query.get(user_id)
 
     if not user:
-        return jsonify({'error': 'User not found'}), 401
+        return jsonify({"error": "User not found"}), 401
 
-    if user.role == 'admin':
+    if user.role == "admin":
         projects = Project.query.all()
     elif user.team:
         projects = user.team.projects
     else:
         projects = []
 
-    return jsonify({
-        'projects': [p.to_dict() for p in projects],
-        'count': len(projects)
-    }), 200
+    return (
+        jsonify({"projects": [p.to_dict() for p in projects], "count": len(projects)}),
+        200,
+    )
 
 
-@api_v1.route('/projects/<int:project_id>', methods=['GET'])
+@api_v1.route("/projects/<int:project_id>", methods=["GET"])
 @jwt_required()
 def get_project(project_id):
     """Get project by ID"""
@@ -49,9 +49,9 @@ def get_project(project_id):
     return jsonify(project.to_dict()), 200
 
 
-@api_v1.route('/projects', methods=['POST'])
+@api_v1.route("/projects", methods=["POST"])
 @jwt_required()
-@role_required(['admin', 'manager'])
+@role_required(["admin", "manager"])
 def create_project():
     """
     Create a new project (manager/admin only)
@@ -83,13 +83,13 @@ def create_project():
     user_id = get_jwt_identity()
     data = request.get_json()
 
-    if not data or 'name' not in data or 'team_id' not in data:
-        return jsonify({'error': 'Missing required fields'}), 400
+    if not data or "name" not in data or "team_id" not in data:
+        return jsonify({"error": "Missing required fields"}), 400
 
     project = Project(
-        name=data['name'],
-        description=data.get('description', ''),
-        team_id=data['team_id']
+        name=data["name"],
+        description=data.get("description", ""),
+        team_id=data["team_id"],
     )
 
     db.session.add(project)
@@ -98,10 +98,10 @@ def create_project():
     # Audit log
     audit = AuditLog(
         user_id=user_id,
-        action='created',
-        entity_type='project',
+        action="created",
+        entity_type="project",
         entity_id=project.id,
-        changes={'name': project.name, 'team_id': project.team_id}
+        changes={"name": project.name, "team_id": project.team_id},
     )
     db.session.add(audit)
     db.session.commit()
@@ -109,9 +109,9 @@ def create_project():
     return jsonify(project.to_dict()), 201
 
 
-@api_v1.route('/projects/<int:project_id>', methods=['PUT'])
+@api_v1.route("/projects/<int:project_id>", methods=["PUT"])
 @jwt_required()
-@role_required(['admin', 'manager'])
+@role_required(["admin", "manager"])
 def update_project(project_id):
     """Update project"""
     user_id = get_jwt_identity()
@@ -120,25 +120,25 @@ def update_project(project_id):
 
     changes = {}
 
-    if 'name' in data:
-        changes['name'] = {'old': project.name, 'new': data['name']}
-        project.name = data['name']
+    if "name" in data:
+        changes["name"] = {"old": project.name, "new": data["name"]}
+        project.name = data["name"]
 
-    if 'description' in data:
-        project.description = data['description']
+    if "description" in data:
+        project.description = data["description"]
 
-    if 'status' in data:
-        changes['status'] = {'old': project.status, 'new': data['status']}
-        project.status = data['status']
+    if "status" in data:
+        changes["status"] = {"old": project.status, "new": data["status"]}
+        project.status = data["status"]
 
     db.session.commit()
 
     audit = AuditLog(
         user_id=user_id,
-        action='updated',
-        entity_type='project',
+        action="updated",
+        entity_type="project",
         entity_id=project.id,
-        changes=changes
+        changes=changes,
     )
     db.session.add(audit)
     db.session.commit()
