@@ -97,7 +97,7 @@ resource "aws_iam_instance_profile" "monitoring" {
 # ── Elastic IP for stable Grafana URL ────────
 resource "aws_eip" "monitoring" {
   domain = "vpc"
-  tags = merge(var.common_tags, {
+  tags   = merge(var.common_tags, {
     Name = "${var.project}-${var.environment}-monitoring-eip"
   })
 }
@@ -138,7 +138,7 @@ resource "aws_instance" "monitoring" {
     volume_size = 8 # GB - minimal storage
     volume_type = "gp3"
     encrypted   = true
-    tags = merge(var.common_tags, { Name = "${var.project}-${var.environment}-monitoring-root" })
+    tags        = merge(var.common_tags, { Name = "${var.project}-${var.environment}-monitoring-root" })
   }
 
   # User data: install and configure everything at boot

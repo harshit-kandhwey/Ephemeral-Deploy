@@ -128,8 +128,8 @@ resource "aws_secretsmanager_secret_version" "app" {
 module "iam" {
   source = "../../modules/iam"
 
-  project              = local.project
-  environment          = local.environment
+  project               = local.project
+  environment           = local.environment
   github_org           = var.github_org
   github_repo          = var.github_repo
   tf_state_bucket      = var.tf_state_bucket
@@ -142,15 +142,15 @@ module "iam" {
 module "vpc" {
   source = "../../modules/vpc"
 
-  project              = local.project
-  environment          = local.environment
-  vpc_cidr             = var.vpc_cidr
-  availability_zones   = var.availability_zones
-  enable_nat_gateway   = false # Still off for cost; enable if workers need internet
-  flow_log_role_arn    = module.iam.vpc_flow_log_role_arn
+  project               = local.project
+  environment           = local.environment
+  vpc_cidr              = var.vpc_cidr
+  availability_zones    = var.availability_zones
+  enable_nat_gateway    = false # Still off for cost; enable if workers need internet
+  flow_log_role_arn     = module.iam.vpc_flow_log_role_arn
   flow_log_traffic_type = "ALL" # Full visibility in prod for compliance/security auditing
-  log_retention_days   = 14 # Longer retention in prod
-  common_tags          = local.common_tags
+  log_retention_days    = 14 # Longer retention in prod
+  common_tags           = local.common_tags
 }
 
 module "security_groups" {

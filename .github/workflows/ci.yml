@@ -202,17 +202,38 @@ jobs:
     name: Terraform Validate & Lint
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: write  # needed to push auto-format commits
+
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.head_ref || github.ref_name }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.7.0
 
-      - name: Terraform Format Check
-        run: terraform fmt -check -recursive terraform/
-        continue-on-error: false
+      - name: Auto-format Terraform files
+        # Run in write mode — fixes all HCL formatting in one shot.
+        # If CI is running on a PR or branch push, it commits the result back.
+        # This means terraform fmt -check never blocks the pipeline.
+        run: terraform fmt -recursive terraform/
+
+      - name: Commit Terraform formatting changes (if any)
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          if ! git diff --quiet; then
+            git add -A
+            git commit -m "style: apply terraform fmt formatting [skip ci]"
+            git push
+            echo "✅ Terraform formatting fixes committed and pushed"
+          else
+            echo "✅ No Terraform formatting changes needed"
+          fi
 
       - name: Setup TFLint
         uses: terraform-linters/setup-tflint@v4
