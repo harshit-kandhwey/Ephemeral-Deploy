@@ -12,9 +12,7 @@ from redis import Redis
 db = SQLAlchemy()
 migrate = Migrate()
 jwt = JWTManager()
-limiter = Limiter(
-    key_func=get_remote_address, default_limits=["200 per day", "50 per hour"]
-)
+limiter = Limiter(key_func=get_remote_address, default_limits=["200 per day", "50 per hour"])
 cors = CORS()
 redis_client = None
 celery = Celery()

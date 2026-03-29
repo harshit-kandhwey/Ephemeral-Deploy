@@ -37,12 +37,8 @@ class Config:
 
     REDIS_URL = os.environ.get("REDIS_URL") or "redis://localhost:6379/0"
 
-    CELERY_BROKER_URL = (
-        os.environ.get("CELERY_BROKER_URL") or "redis://localhost:6379/0"
-    )
-    CELERY_RESULT_BACKEND = (
-        os.environ.get("CELERY_RESULT_BACKEND") or "redis://localhost:6379/0"
-    )
+    CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL") or "redis://localhost:6379/0"
+    CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND") or "redis://localhost:6379/0"
 
     JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY") or os.environ.get("SECRET_KEY")
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=1)
@@ -70,9 +66,7 @@ class DevelopmentConfig(Config):
     SQLALCHEMY_ECHO = True
     SECRET_KEY = os.environ.get("SECRET_KEY") or "dev-secret-key-DO-NOT-USE-IN-PROD-32b"
     JWT_SECRET_KEY = (
-        os.environ.get("JWT_SECRET_KEY")
-        or os.environ.get("SECRET_KEY")
-        or "dev-secret-key-DO-NOT-USE-IN-PROD-32b"
+        os.environ.get("JWT_SECRET_KEY") or os.environ.get("SECRET_KEY") or "dev-secret-key-DO-NOT-USE-IN-PROD-32b"
     )
 
 
@@ -103,9 +97,7 @@ class ProductionConfig(Config):
     # Using os.environ['KEY'] here would raise a bare KeyError at import time
     # with no context, before the logger is even configured.
     SECRET_KEY = os.environ.get("SECRET_KEY")  # validated in app.py
-    JWT_SECRET_KEY = os.environ.get(  # validated in app.py
-        "JWT_SECRET_KEY"
-    ) or os.environ.get(
+    JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY") or os.environ.get(  # validated in app.py
         "SECRET_KEY"
     )  # acceptable fallback: same key, different claim
 

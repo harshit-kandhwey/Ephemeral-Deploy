@@ -1,4 +1,5 @@
 import pytest
+
 from src.models.team import Team
 
 
@@ -47,9 +48,7 @@ def test_create_project_as_developer_forbidden(client, auth_headers, team_id):
 
 
 def test_create_project_missing_fields(client, manager_headers):
-    response = client.post(
-        "/api/v1/projects", headers=manager_headers, json={"name": "No Team"}
-    )
+    response = client.post("/api/v1/projects", headers=manager_headers, json={"name": "No Team"})
     assert response.status_code == 400
 
 
@@ -98,7 +97,5 @@ def test_update_project_status(client, manager_headers, project_id):
 
 
 def test_update_project_as_developer_forbidden(client, auth_headers, project_id):
-    response = client.put(
-        f"/api/v1/projects/{project_id}", headers=auth_headers, json={"name": "Hacked"}
-    )
+    response = client.put(f"/api/v1/projects/{project_id}", headers=auth_headers, json={"name": "Hacked"})
     assert response.status_code == 403

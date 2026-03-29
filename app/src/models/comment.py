@@ -11,9 +11,7 @@ class Comment(db.Model):
     task_id = db.Column(db.Integer, db.ForeignKey("tasks.id"), nullable=False)
     author_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(
-        db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
-    )
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
     task = db.relationship("Task", back_populates="comments")

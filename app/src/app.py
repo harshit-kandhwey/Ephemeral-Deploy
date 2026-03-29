@@ -2,23 +2,17 @@ import logging
 import time
 
 from flask import Flask, jsonify
-from prometheus_client import (CONTENT_TYPE_LATEST, Counter, Histogram,
-                               generate_latest)
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from sqlalchemy import text
 
 from .config import config
-from .extensions import (cors, db, init_celery, init_redis, jwt, limiter,
-                         migrate, swagger)
+from .extensions import cors, db, init_celery, init_redis, jwt, limiter, migrate, swagger
 
 # ── Prometheus metrics ────────────────────────
 # Defined at module level so they survive across requests.
 # Exposed at /metrics for Prometheus scraping.
-REQUEST_COUNT = Counter(
-    "app_requests_total", "Total HTTP requests", ["method", "endpoint", "status"]
-)
-REQUEST_LATENCY = Histogram(
-    "app_request_latency_seconds", "HTTP request latency in seconds", ["endpoint"]
-)
+REQUEST_COUNT = Counter("app_requests_total", "Total HTTP requests", ["method", "endpoint", "status"])
+REQUEST_LATENCY = Histogram("app_request_latency_seconds", "HTTP request latency in seconds", ["endpoint"])
 
 
 def create_app(config_name="default"):
@@ -50,8 +44,7 @@ def create_app(config_name="default"):
             for var in missing:
                 app.logger.critical("STARTUP FAILED: missing required env var: %s", var)
             raise RuntimeError(
-                "Production startup failed. Missing environment variables:\n"
-                + "\n".join(f"  - {v}" for v in missing)
+                "Production startup failed. Missing environment variables:\n" + "\n".join(f"  - {v}" for v in missing)
             )
 
     # ── Extensions ────────────────────────────
@@ -83,9 +76,7 @@ def create_app(config_name="default"):
     swagger.init_app(app)
 
     # ── Logging ───────────────────────────────
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     # ── Blueprints ────────────────────────────
     from .api.v1 import api_v1
@@ -105,9 +96,7 @@ def create_app(config_name="default"):
 
         if hasattr(request, "start_time"):
             latency = time.time() - request.start_time
-            REQUEST_LATENCY.labels(endpoint=request.endpoint or "unknown").observe(
-                latency
-            )
+            REQUEST_LATENCY.labels(endpoint=request.endpoint or "unknown").observe(latency)
             REQUEST_COUNT.labels(
                 method=request.method,
                 endpoint=request.endpoint or "unknown",

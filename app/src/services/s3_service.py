@@ -8,9 +8,7 @@ from flask import current_app
 
 class S3Service:
     def __init__(self):
-        self.s3_client = boto3.client(
-            "s3", region_name=current_app.config["AWS_REGION"]
-        )
+        self.s3_client = boto3.client("s3", region_name=current_app.config["AWS_REGION"])
         self.bucket = current_app.config["S3_BUCKET"]
 
     def upload_file(self, file, folder="attachments"):

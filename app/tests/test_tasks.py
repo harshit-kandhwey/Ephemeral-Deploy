@@ -1,4 +1,5 @@
 import pytest
+
 from src.extensions import db
 from src.models.project import Project
 from src.models.user import User
@@ -53,16 +54,12 @@ def test_create_task(client, auth_headers, project_id):
 
 
 def test_create_task_missing_fields(client, auth_headers):
-    response = client.post(
-        "/api/v1/tasks", headers=auth_headers, json={"title": "No Project"}
-    )
+    response = client.post("/api/v1/tasks", headers=auth_headers, json={"title": "No Project"})
     assert response.status_code == 400
 
 
 def test_create_task_unauthenticated(client, project_id):
-    response = client.post(
-        "/api/v1/tasks", json={"title": "Test Task", "project_id": project_id}
-    )
+    response = client.post("/api/v1/tasks", json={"title": "Test Task", "project_id": project_id})
     assert response.status_code == 401
 
 
@@ -132,26 +129,20 @@ def test_update_task_title(client, auth_headers, task_id):
 
 
 def test_update_task_status(client, auth_headers, task_id):
-    response = client.put(
-        f"/api/v1/tasks/{task_id}", headers=auth_headers, json={"status": "in_progress"}
-    )
+    response = client.put(f"/api/v1/tasks/{task_id}", headers=auth_headers, json={"status": "in_progress"})
     assert response.status_code == 200
     assert response.json["status"] == "in_progress"
 
 
 def test_update_task_status_to_done_sets_completed_at(client, auth_headers, task_id):
-    response = client.put(
-        f"/api/v1/tasks/{task_id}", headers=auth_headers, json={"status": "done"}
-    )
+    response = client.put(f"/api/v1/tasks/{task_id}", headers=auth_headers, json={"status": "done"})
     assert response.status_code == 200
     assert response.json["status"] == "done"
     assert response.json["completed_at"] is not None
 
 
 def test_update_task_priority(client, auth_headers, task_id):
-    response = client.put(
-        f"/api/v1/tasks/{task_id}", headers=auth_headers, json={"priority": "critical"}
-    )
+    response = client.put(f"/api/v1/tasks/{task_id}", headers=auth_headers, json={"priority": "critical"})
     assert response.status_code == 200
     assert response.json["priority"] == "critical"
 

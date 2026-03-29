@@ -40,31 +40,23 @@ def test_create_team_as_admin(client, admin_headers):
 
 
 def test_create_team_as_developer_forbidden(client, auth_headers):
-    response = client.post(
-        "/api/v1/teams", headers=auth_headers, json={"name": "Unauthorized Team"}
-    )
+    response = client.post("/api/v1/teams", headers=auth_headers, json={"name": "Unauthorized Team"})
     assert response.status_code == 403
 
 
 def test_create_team_missing_name(client, admin_headers):
-    response = client.post(
-        "/api/v1/teams", headers=admin_headers, json={"description": "No name given"}
-    )
+    response = client.post("/api/v1/teams", headers=admin_headers, json={"description": "No name given"})
     assert response.status_code == 400
 
 
 def test_create_duplicate_team_name(client, admin_headers):
     # Create the initial team and verify success
-    response1 = client.post(
-        "/api/v1/teams", headers=admin_headers, json={"name": "Duplicate"}
-    )
+    response1 = client.post("/api/v1/teams", headers=admin_headers, json={"name": "Duplicate"})
     assert response1.status_code == 201
     assert response1.json["name"] == "Duplicate"
 
     # Attempt to create a duplicate and verify it fails with 409 Conflict
-    response2 = client.post(
-        "/api/v1/teams", headers=admin_headers, json={"name": "Duplicate"}
-    )
+    response2 = client.post("/api/v1/teams", headers=admin_headers, json={"name": "Duplicate"})
     assert response2.status_code == 409
 
 
@@ -92,7 +84,5 @@ def test_update_team_as_developer_forbidden(client, auth_headers):
         assert first_team is not None, "No teams exist in database"
         team_id = first_team.id
 
-    response = client.put(
-        f"/api/v1/teams/{team_id}", headers=auth_headers, json={"name": "Hacked"}
-    )
+    response = client.put(f"/api/v1/teams/{team_id}", headers=auth_headers, json={"name": "Hacked"})
     assert response.status_code == 403

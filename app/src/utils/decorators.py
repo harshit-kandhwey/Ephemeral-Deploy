@@ -40,9 +40,7 @@ def role_required(roles):
 
             if not user or user.role not in roles:
                 return (
-                    jsonify(
-                        {"error": "Insufficient permissions", "required_roles": roles}
-                    ),
+                    jsonify({"error": "Insufficient permissions", "required_roles": roles}),
                     403,
                 )
 

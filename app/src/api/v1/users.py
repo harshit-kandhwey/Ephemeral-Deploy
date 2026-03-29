@@ -46,9 +46,7 @@ def get_user(user_id):
     current_user = User.query.get_or_404(current_user_id)
     user = User.query.get_or_404(user_id)
     # Only include email for admins/managers or the user themselves
-    include_email = (
-        current_user.role in ("admin", "manager") or current_user_id == user_id
-    )
+    include_email = current_user.role in ("admin", "manager") or current_user_id == user_id
     return jsonify(user.to_dict(include_email=include_email)), 200
 
 
@@ -83,11 +81,7 @@ def update_user(user_id):
             allowed_roles = ["admin", "manager", "developer"]
             if data["role"] not in allowed_roles:
                 return (
-                    jsonify(
-                        {
-                            "error": f'Invalid role. Must be one of: {", ".join(allowed_roles)}'
-                        }
-                    ),
+                    jsonify({"error": f'Invalid role. Must be one of: {", ".join(allowed_roles)}'}),
                     400,
                 )
             user.role = data["role"]

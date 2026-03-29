@@ -1,6 +1,5 @@
 from flask import jsonify, request
-from flask_jwt_extended import (create_access_token, create_refresh_token,
-                                get_jwt_identity, jwt_required)
+from flask_jwt_extended import create_access_token, create_refresh_token, get_jwt_identity, jwt_required
 
 from ...extensions import db, limiter
 from ...models.audit_log import AuditLog

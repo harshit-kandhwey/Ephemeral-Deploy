@@ -22,25 +22,15 @@ class Task(db.Model):
     # Dates
     due_date = db.Column(db.DateTime)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(
-        db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
-    )
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     completed_at = db.Column(db.DateTime)
 
     # Relationships
     project = db.relationship("Project", back_populates="tasks")
-    creator = db.relationship(
-        "User", back_populates="created_tasks", foreign_keys=[creator_id]
-    )
-    assignee = db.relationship(
-        "User", back_populates="assigned_tasks", foreign_keys=[assignee_id]
-    )
-    comments = db.relationship(
-        "Comment", back_populates="task", cascade="all, delete-orphan"
-    )
-    attachments = db.relationship(
-        "Attachment", back_populates="task", cascade="all, delete-orphan"
-    )
+    creator = db.relationship("User", back_populates="created_tasks", foreign_keys=[creator_id])
+    assignee = db.relationship("User", back_populates="assigned_tasks", foreign_keys=[assignee_id])
+    comments = db.relationship("Comment", back_populates="task", cascade="all, delete-orphan")
+    attachments = db.relationship("Attachment", back_populates="task", cascade="all, delete-orphan")
 
     def to_dict(self, include_comments=False):
         data = {
@@ -56,9 +46,7 @@ class Task(db.Model):
             "due_date": self.due_date.isoformat() if self.due_date else None,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
-            "completed_at": (
-                self.completed_at.isoformat() if self.completed_at else None
-            ),
+            "completed_at": (self.completed_at.isoformat() if self.completed_at else None),
             "comment_count": len(self.comments),
             "attachment_count": len(self.attachments),
         }

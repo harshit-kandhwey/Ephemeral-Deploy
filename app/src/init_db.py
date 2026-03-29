@@ -59,8 +59,7 @@ def _get_master_conn():
 
     if not master_user or not master_password:
         raise RuntimeError(
-            "DB_MASTER_USER and DB_MASTER_PASSWORD must be set "
-            "(injected from Secrets Manager by ECS)"
+            "DB_MASTER_USER and DB_MASTER_PASSWORD must be set " "(injected from Secrets Manager by ECS)"
         )
 
     conn = psycopg2.connect(
@@ -107,10 +106,9 @@ def create_app_user():
             # psycopg2.sql.Identifier safely quotes the username as a
             # PostgreSQL identifier, preventing SQL injection via env vars.
             cursor.execute(
-                sql.SQL(
-                    "CREATE USER {} WITH PASSWORD %s "
-                    "NOSUPERUSER NOCREATEDB NOCREATEROLE LOGIN"
-                ).format(sql.Identifier(app_user)),
+                sql.SQL("CREATE USER {} WITH PASSWORD %s " "NOSUPERUSER NOCREATEDB NOCREATEROLE LOGIN").format(
+                    sql.Identifier(app_user)
+                ),
                 (app_password,),
             )
             print(f'✓ App DB user "{app_user}" created')
@@ -121,41 +119,30 @@ def create_app_user():
         dbname = parsed.path.lstrip("/")
 
         cursor.execute(
-            sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
-                sql.Identifier(dbname), sql.Identifier(app_user)
-            )
+            sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(sql.Identifier(dbname), sql.Identifier(app_user))
         )
 
         # Grant usage on the public schema and all tables within it
+        cursor.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(app_user)))
         cursor.execute(
-            sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(
+            sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE " "ON ALL TABLES IN SCHEMA public TO {}").format(
                 sql.Identifier(app_user)
             )
         )
         cursor.execute(
-            sql.SQL(
-                "GRANT SELECT, INSERT, UPDATE, DELETE "
-                "ON ALL TABLES IN SCHEMA public TO {}"
-            ).format(sql.Identifier(app_user))
-        )
-        cursor.execute(
-            sql.SQL(
-                "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {}"
-            ).format(sql.Identifier(app_user))
+            sql.SQL("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {}").format(sql.Identifier(app_user))
         )
 
         # Ensure future tables created by migrations are also accessible
         cursor.execute(
             sql.SQL(
-                "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {}"
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA public " "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {}"
             ).format(sql.Identifier(app_user))
         )
         cursor.execute(
-            sql.SQL(
-                "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
-                "GRANT USAGE, SELECT ON SEQUENCES TO {}"
-            ).format(sql.Identifier(app_user))
+            sql.SQL("ALTER DEFAULT PRIVILEGES IN SCHEMA public " "GRANT USAGE, SELECT ON SEQUENCES TO {}").format(
+                sql.Identifier(app_user)
+            )
         )
         print(f'✓ Privileges granted to "{app_user}"')
 
@@ -218,18 +205,12 @@ def seed_sample_data(app):
         # Read demo passwords from env, fall back to obvious dev-only values
         # In production these would come from Secrets Manager
         admin_password = os.environ.get("SEED_ADMIN_PASSWORD", "ChangeMe-Admin-2024!")
-        manager_password = os.environ.get(
-            "SEED_MANAGER_PASSWORD", "ChangeMe-Manager-2024!"
-        )
+        manager_password = os.environ.get("SEED_MANAGER_PASSWORD", "ChangeMe-Manager-2024!")
         dev_password = os.environ.get("SEED_DEV_PASSWORD", "ChangeMe-Dev-2024!")
 
         # Teams
-        team_eng = Team(
-            name="Engineering", description="Backend and frontend developers"
-        )
-        team_product = Team(
-            name="Product", description="Product managers and designers"
-        )
+        team_eng = Team(name="Engineering", description="Backend and frontend developers")
+        team_product = Team(name="Product", description="Product managers and designers")
         db.session.add_all([team_eng, team_product])
         db.session.commit()
 

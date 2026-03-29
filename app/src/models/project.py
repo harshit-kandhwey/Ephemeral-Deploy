@@ -13,15 +13,11 @@ class Project(db.Model):
     status = db.Column(db.String(20), default="active")
     team_id = db.Column(db.Integer, db.ForeignKey("teams.id"), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(
-        db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
-    )
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
     team = db.relationship("Team", back_populates="projects")
-    tasks = db.relationship(
-        "Task", back_populates="project", cascade="all, delete-orphan"
-    )
+    tasks = db.relationship("Task", back_populates="project", cascade="all, delete-orphan")
 
     def to_dict(self):
         return {

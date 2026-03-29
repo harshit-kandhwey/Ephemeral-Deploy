@@ -13,9 +13,7 @@ def send_task_assignment_email(task_id, user_id):
     user = User.query.get(user_id)
 
     if not task or not user:
-        current_app.logger.warning(
-            f"send_task_assignment_email: task {task_id} or user {user_id} not found"
-        )
+        current_app.logger.warning(f"send_task_assignment_email: task {task_id} or user {user_id} not found")
         return
 
     current_app.logger.info(f"[EMAIL] Task '{task.title}' assigned to {user.email}")
@@ -30,14 +28,10 @@ def send_comment_notification(comment_id, user_id):
     user = User.query.get(user_id)
 
     if not comment or not user:
-        current_app.logger.warning(
-            f"send_comment_notification: comment {comment_id} or user {user_id} not found"
-        )
+        current_app.logger.warning(f"send_comment_notification: comment {comment_id} or user {user_id} not found")
         return
 
-    current_app.logger.info(
-        f"[EMAIL] New comment on task {comment.task_id} for {user.email}"
-    )
+    current_app.logger.info(f"[EMAIL] New comment on task {comment.task_id} for {user.email}")
 
     return f"Notification sent to {user.email}"
 
@@ -52,9 +46,7 @@ def send_daily_digest():
         # 'in_review', 'done'. The digest only counted 'todo' tasks, silently
         # ignoring 'in_progress' and 'in_review'. Count all non-done tasks so the
         # digest reflects actual pending work.
-        pending_tasks = Task.query.filter(
-            Task.assignee_id == user.id, Task.status != "done"
-        ).count()
+        pending_tasks = Task.query.filter(Task.assignee_id == user.id, Task.status != "done").count()
 
         current_app.logger.info(f"[DIGEST] {user.email}: {pending_tasks} pending tasks")
 

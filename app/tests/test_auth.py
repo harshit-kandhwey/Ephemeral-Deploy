@@ -44,25 +44,19 @@ def test_register_missing_fields(client):
 
 
 def test_login_success(client, auth_headers):
-    response = client.post(
-        "/api/v1/auth/login", json={"username": "testuser", "password": "password123"}
-    )
+    response = client.post("/api/v1/auth/login", json={"username": "testuser", "password": "password123"})
     assert response.status_code == 200
     assert "access_token" in response.json
     assert "refresh_token" in response.json
 
 
 def test_login_invalid_credentials(client):
-    response = client.post(
-        "/api/v1/auth/login", json={"username": "testuser", "password": "wrongpassword"}
-    )
+    response = client.post("/api/v1/auth/login", json={"username": "testuser", "password": "wrongpassword"})
     assert response.status_code == 401
 
 
 def test_login_nonexistent_user(client):
-    response = client.post(
-        "/api/v1/auth/login", json={"username": "nobody", "password": "password123"}
-    )
+    response = client.post("/api/v1/auth/login", json={"username": "nobody", "password": "password123"})
     assert response.status_code == 401
 
 
@@ -84,14 +78,10 @@ def test_access_without_token(client):
 
 def test_refresh_token(client, auth_headers):
     # Get refresh token from login
-    login = client.post(
-        "/api/v1/auth/login", json={"username": "testuser", "password": "password123"}
-    )
+    login = client.post("/api/v1/auth/login", json={"username": "testuser", "password": "password123"})
     refresh_token = login.json["refresh_token"]
 
-    response = client.post(
-        "/api/v1/auth/refresh", headers={"Authorization": f"Bearer {refresh_token}"}
-    )
+    response = client.post("/api/v1/auth/refresh", headers={"Authorization": f"Bearer {refresh_token}"})
     assert response.status_code == 200
     assert "access_token" in response.json
 

@@ -17,34 +17,22 @@ class User(db.Model):
     role = db.Column(db.String(20), default="developer")
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(
-        db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
-    )
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
     team_id = db.Column(db.Integer, db.ForeignKey("teams.id"))
     team = db.relationship("Team", back_populates="members")
-    created_tasks = db.relationship(
-        "Task", back_populates="creator", foreign_keys="Task.creator_id"
-    )
-    assigned_tasks = db.relationship(
-        "Task", back_populates="assignee", foreign_keys="Task.assignee_id"
-    )
-    comments = db.relationship(
-        "Comment", back_populates="author", cascade="all, delete-orphan"
-    )
+    created_tasks = db.relationship("Task", back_populates="creator", foreign_keys="Task.creator_id")
+    assigned_tasks = db.relationship("Task", back_populates="assignee", foreign_keys="Task.assignee_id")
+    comments = db.relationship("Comment", back_populates="author", cascade="all, delete-orphan")
 
     def set_password(self, password):
         """Hash and set password"""
-        self.password_hash = bcrypt.hashpw(
-            password.encode("utf-8"), bcrypt.gensalt()
-        ).decode("utf-8")
+        self.password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
     def check_password(self, password):
         """Verify password"""
-        return bcrypt.checkpw(
-            password.encode("utf-8"), self.password_hash.encode("utf-8")
-        )
+        return bcrypt.checkpw(password.encode("utf-8"), self.password_hash.encode("utf-8"))
 
     def to_dict(self, include_email=False):
         data = {

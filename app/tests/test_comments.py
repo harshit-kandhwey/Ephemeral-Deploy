@@ -1,4 +1,5 @@
 import pytest
+
 from src.extensions import db
 from src.models.project import Project
 from src.models.user import User
@@ -34,9 +35,7 @@ def test_create_comment(client, auth_headers, task_id):
 
 
 def test_create_comment_missing_content(client, auth_headers, task_id):
-    response = client.post(
-        f"/api/v1/tasks/{task_id}/comments", headers=auth_headers, json={}
-    )
+    response = client.post(f"/api/v1/tasks/{task_id}/comments", headers=auth_headers, json={})
     assert response.status_code == 400
 
 

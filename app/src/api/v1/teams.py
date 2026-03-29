@@ -91,9 +91,7 @@ def update_team(team_id):
 
     # Validate name uniqueness if name is being updated
     if "name" in data:
-        existing_team = (
-            Team.query.filter_by(name=data["name"]).filter(Team.id != team.id).first()
-        )
+        existing_team = Team.query.filter_by(name=data["name"]).filter(Team.id != team.id).first()
         if existing_team:
             return jsonify({"error": "Team name already exists"}), 409
 

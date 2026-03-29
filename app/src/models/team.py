@@ -10,15 +10,11 @@ class Team(db.Model):
     name = db.Column(db.String(100), nullable=False, unique=True)
     description = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(
-        db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
-    )
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
     members = db.relationship("User", back_populates="team")
-    projects = db.relationship(
-        "Project", back_populates="team", cascade="all, delete-orphan"
-    )
+    projects = db.relationship("Project", back_populates="team", cascade="all, delete-orphan")
 
     def to_dict(self):
         return {

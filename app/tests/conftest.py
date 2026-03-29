@@ -2,6 +2,7 @@ import os
 import sys
 
 import pytest
+
 from src import create_app
 from src.extensions import db
 from src.models.team import Team
@@ -46,9 +47,7 @@ def auth_headers(client):
         db.session.add(user)
         db.session.commit()
 
-    response = client.post(
-        "/api/v1/auth/login", json={"username": "testuser", "password": "password123"}
-    )
+    response = client.post("/api/v1/auth/login", json={"username": "testuser", "password": "password123"})
     token = response.json["access_token"]
     return {"Authorization": f"Bearer {token}"}
 
@@ -70,9 +69,7 @@ def admin_headers(client, auth_headers):
         db.session.add(admin)
         db.session.commit()
 
-    login = client.post(
-        "/api/v1/auth/login", json={"username": "adminuser", "password": "admin123"}
-    )
+    login = client.post("/api/v1/auth/login", json={"username": "adminuser", "password": "admin123"})
     return {"Authorization": f'Bearer {login.json["access_token"]}'}
 
 
@@ -93,7 +90,5 @@ def manager_headers(client, auth_headers):
         db.session.add(manager)
         db.session.commit()
 
-    login = client.post(
-        "/api/v1/auth/login", json={"username": "manageruser", "password": "manager123"}
-    )
+    login = client.post("/api/v1/auth/login", json={"username": "manageruser", "password": "manager123"})
     return {"Authorization": f'Bearer {login.json["access_token"]}'}
