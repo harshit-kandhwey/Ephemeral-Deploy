@@ -4,7 +4,7 @@ Main application package
 """
 
 from .app import create_app
-from .extensions import db, celery
+from .extensions import celery, db
 
 __version__ = "1.0.0"
 

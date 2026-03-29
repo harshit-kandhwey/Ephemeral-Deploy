@@ -1,10 +1,11 @@
-from flask import request, jsonify
-from flask_jwt_extended import jwt_required, get_jwt_identity
-from . import api_v1
+from flask import jsonify, request
+from flask_jwt_extended import get_jwt_identity, jwt_required
+
 from ...extensions import db
-from ...models.user import User
 from ...models.team import Team
+from ...models.user import User
 from ...utils.decorators import role_required
+from . import api_v1
 
 
 @api_v1.route("/users", methods=["GET"])

@@ -1,12 +1,12 @@
-from flask_sqlalchemy import SQLAlchemy
-from flask_migrate import Migrate
+from celery import Celery
+from flasgger import Swagger
+from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-from flask_cors import CORS
+from flask_migrate import Migrate
+from flask_sqlalchemy import SQLAlchemy
 from redis import Redis
-from celery import Celery
-from flasgger import Swagger
 
 # Initialize extensions
 db = SQLAlchemy()

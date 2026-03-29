@@ -4,6 +4,7 @@ This is what Gunicorn will run
 """
 
 import os
+
 from . import create_app
 
 # Get environment from ENV variable, default to production

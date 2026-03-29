@@ -1,19 +1,14 @@
 import logging
 import time
+
 from flask import Flask, jsonify
+from prometheus_client import (CONTENT_TYPE_LATEST, Counter, Histogram,
+                               generate_latest)
 from sqlalchemy import text
-from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+
 from .config import config
-from .extensions import (
-    db,
-    migrate,
-    jwt,
-    limiter,
-    cors,
-    init_redis,
-    init_celery,
-    swagger,
-)
+from .extensions import (cors, db, init_celery, init_redis, jwt, limiter,
+                         migrate, swagger)
 
 # ── Prometheus metrics ────────────────────────
 # Defined at module level so they survive across requests.

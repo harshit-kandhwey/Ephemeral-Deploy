@@ -1,10 +1,11 @@
+import os
+import sys
+
+import pytest
 from src import create_app
 from src.extensions import db
-from src.models.user import User
 from src.models.team import Team
-import pytest
-import sys
-import os
+from src.models.user import User
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 

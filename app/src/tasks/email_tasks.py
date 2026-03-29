@@ -1,8 +1,9 @@
 from flask import current_app
+
 from ..extensions import celery
+from ..models.comment import Comment
 from ..models.task import Task
 from ..models.user import User
-from ..models.comment import Comment
 
 
 @celery.task(name="tasks.send_task_assignment_email")

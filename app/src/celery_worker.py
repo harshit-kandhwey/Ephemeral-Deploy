@@ -3,6 +3,7 @@ Celery worker entry point
 """
 
 import os
+
 from . import create_app
 from .extensions import celery  # noqa: F401
 

@@ -1,0 +1,20 @@
+[tool.black]
+line-length = 120
+target-version = ["py311"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    migrations
+  | __pycache__
+  | \.git
+  | \.venv
+  | venv
+)/
+'''
+
+[tool.isort]
+# Use black-compatible profile so isort and black never conflict
+profile = "black"
+line_length = 120
+known_first_party = ["src"]
+skip = ["migrations", "__pycache__", ".venv", "venv"]

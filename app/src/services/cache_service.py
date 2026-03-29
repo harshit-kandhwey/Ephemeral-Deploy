@@ -1,5 +1,7 @@
-from flask import current_app
 import json
+
+from flask import current_app
+
 from ..extensions import redis_client
 
 

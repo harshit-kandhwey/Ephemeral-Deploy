@@ -1,11 +1,12 @@
-from flask import request, jsonify
-from flask_jwt_extended import jwt_required, get_jwt_identity
-from . import api_v1
+from flask import jsonify, request
+from flask_jwt_extended import get_jwt_identity, jwt_required
+
 from ...extensions import db
+from ...models.audit_log import AuditLog
 from ...models.project import Project
 from ...models.user import User
-from ...models.audit_log import AuditLog
 from ...utils.decorators import role_required
+from . import api_v1
 
 
 @api_v1.route("/projects", methods=["GET"])

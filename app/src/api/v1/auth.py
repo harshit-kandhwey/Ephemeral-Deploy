@@ -1,14 +1,11 @@
-from flask import request, jsonify
-from flask_jwt_extended import (
-    create_access_token,
-    create_refresh_token,
-    jwt_required,
-    get_jwt_identity,
-)
-from . import api_v1
+from flask import jsonify, request
+from flask_jwt_extended import (create_access_token, create_refresh_token,
+                                get_jwt_identity, jwt_required)
+
 from ...extensions import db, limiter
-from ...models.user import User
 from ...models.audit_log import AuditLog
+from ...models.user import User
+from . import api_v1
 
 
 @api_v1.route("/auth/register", methods=["POST"])

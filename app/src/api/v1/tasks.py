@@ -1,12 +1,14 @@
-from flask import request, jsonify
-from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import datetime
-from . import api_v1
+
+from flask import jsonify, request
+from flask_jwt_extended import get_jwt_identity, jwt_required
+
 from ...extensions import db
+from ...models.audit_log import AuditLog
 from ...models.task import Task
 from ...models.user import User
-from ...models.audit_log import AuditLog
-from ...utils.decorators import role_required, get_current_user_or_401
+from ...utils.decorators import get_current_user_or_401, role_required
+from . import api_v1
 
 
 @api_v1.route("/tasks", methods=["GET"])

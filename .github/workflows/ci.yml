@@ -18,8 +18,16 @@ jobs:
   lint:
     name: Lint & Static Analysis
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: write  # needed to push auto-format commits
+
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Fetch with token so we can push formatting commits back
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.head_ref || github.ref_name }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -31,14 +39,30 @@ jobs:
         run: |
           pip install flake8 black isort bandit safety
 
-      - name: Run flake8 (style)
+      - name: Auto-format with black and isort
+        # Run in write mode — fixes all formatting in one shot.
+        # If CI is running on a PR or branch push, it commits the result back.
+        # This means developers never need to run formatters locally to unblock CI.
+        run: |
+          cd app
+          black .
+          isort .
+
+      - name: Commit formatting changes (if any)
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          if ! git diff --quiet; then
+            git add -A
+            git commit -m "style: apply black and isort formatting [skip ci]"
+            git push
+            echo "✅ Formatting fixes committed and pushed"
+          else
+            echo "✅ No formatting changes needed"
+          fi
+
+      - name: Run flake8 (style — after formatting)
         run: flake8 app/ --max-line-length=120 --exclude=migrations/
-
-      - name: Run black (formatting check)
-        run: black --check app/
-
-      - name: Run isort (import ordering)
-        run: isort --check-only app/
 
       - name: Run bandit (security scan)
         run: bandit -r app/src/ -ll -x app/src/tests/

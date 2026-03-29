@@ -1,10 +1,11 @@
-from flask import request, jsonify
+from flask import jsonify, request
 from flask_jwt_extended import jwt_required
 from sqlalchemy.exc import IntegrityError
-from . import api_v1
+
 from ...extensions import db
 from ...models.team import Team
 from ...utils.decorators import role_required
+from . import api_v1
 
 
 @api_v1.route("/teams", methods=["GET"])

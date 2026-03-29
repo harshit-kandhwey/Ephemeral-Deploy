@@ -36,10 +36,11 @@ Environment variables read:
 """
 
 import os
+from urllib.parse import urlparse
+
 import psycopg2
 from psycopg2 import sql
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
-from urllib.parse import urlparse
 
 
 def _get_master_conn():
@@ -194,10 +195,10 @@ def seed_sample_data(app):
     Falls back to demo values only in non-production environments.
     """
     from .extensions import db
-    from .models.user import User
-    from .models.team import Team
     from .models.project import Project
     from .models.task import Task
+    from .models.team import Team
+    from .models.user import User
 
     env = os.environ.get("ENV", "development")
     force_seed = os.environ.get("SEED_DB", "false").lower() == "true"

@@ -1,5 +1,7 @@
 from datetime import datetime
+
 import bcrypt
+
 from ..extensions import db
 
 
