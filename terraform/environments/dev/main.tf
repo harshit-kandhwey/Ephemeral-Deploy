@@ -265,7 +265,7 @@ module "monitoring" {
   monitoring_sg_id       = module.security_groups.monitoring_sg_id
   ecs_cluster_name       = module.ecs.cluster_name
   grafana_admin_password = data.aws_ssm_parameter.grafana_admin_password.value
-  cloudwatch_log_groups = [
+  cloudwatch_log_groups  = [
     "/ecs/${local.project}/${local.environment}/api",
     "/ecs/${local.project}/${local.environment}/worker",
     "/ecs/${local.project}/${local.environment}/beat",
