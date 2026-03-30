@@ -235,6 +235,287 @@ jobs:
             echo "✅ No Terraform formatting changes needed"
           fi
 
+      - name: Ensure all module variables.tf and outputs.tf exist
+        # Generates any missing variables.tf / outputs.tf files so that
+        # terraform validate never fails due to absent module support files.
+        # Any generated files are committed back with [skip ci].
+        run: |
+          set -euo pipefail
+
+          write_if_missing() {
+            local path="$1"
+            local content="$2"
+            if [[ ! -f "$path" ]]; then
+              echo "  creating $path"
+              echo "$content" > "$path"
+            fi
+          }
+
+          # ── security-groups ───────────────────────────────────────────
+          write_if_missing terraform/modules/security-groups/variables.tf \
+          'variable "project" {
+            description = "Project name"
+            type        = string
+          }
+
+          variable "environment" {
+            description = "Environment (dev, staging, prod)"
+            type        = string
+          }
+
+          variable "vpc_id" {
+            description = "VPC ID to create security groups in"
+            type        = string
+          }
+
+          variable "vpc_cidr" {
+            description = "VPC CIDR block used to scope ingress/egress rules"
+            type        = string
+          }
+
+          variable "monitoring_enabled" {
+            description = "Whether to create the monitoring security group"
+            type        = bool
+            default     = false
+          }
+
+          variable "common_tags" {
+            description = "Common tags for all resources"
+            type        = map(string)
+          }'
+
+          write_if_missing terraform/modules/security-groups/outputs.tf \
+          'output "api_sg_id" {
+            description = "Security group ID for ECS API tasks"
+            value       = aws_security_group.api.id
+          }
+
+          output "worker_sg_id" {
+            description = "Security group ID for Celery worker tasks"
+            value       = aws_security_group.worker.id
+          }
+
+          output "rds_sg_id" {
+            description = "Security group ID for RDS PostgreSQL"
+            value       = aws_security_group.rds.id
+          }
+
+          output "redis_sg_id" {
+            description = "Security group ID for ElastiCache Redis"
+            value       = aws_security_group.redis.id
+          }
+
+          output "monitoring_sg_id" {
+            description = "Security group ID for the monitoring EC2 instance"
+            value       = var.monitoring_enabled ? aws_security_group.monitoring[0].id : null
+          }'
+
+          # ── ecs ───────────────────────────────────────────────────────
+          write_if_missing terraform/modules/ecs/variables.tf \
+          'variable "project" { type = string }
+          variable "environment" { type = string }
+          variable "aws_region" { type = string }
+          variable "api_image" { type = string }
+          variable "worker_image" { type = string }
+          variable "git_commit" { type = string; default = "unknown" }
+          variable "vpc_id" { type = string }
+          variable "private_app_subnet_ids" { type = list(string) }
+          variable "public_subnet_ids" { type = list(string) }
+          variable "api_sg_id" { type = string }
+          variable "worker_sg_id" { type = string }
+          variable "ecs_execution_role_arn" { type = string }
+          variable "ecs_task_role_arn" { type = string }
+          variable "secrets_arn" { type = string }
+          variable "log_retention_days" { type = number; default = 3 }
+          variable "api_cpu" { type = number; default = 256 }
+          variable "api_memory" { type = number; default = 512 }
+          variable "worker_cpu" { type = number; default = 256 }
+          variable "worker_memory" { type = number; default = 512 }
+          variable "api_desired_count" { type = number; default = 1 }
+          variable "worker_desired_count" { type = number; default = 1 }
+          variable "api_max_count" { type = number; default = 4 }
+          variable "common_tags" { type = map(string) }'
+
+          write_if_missing terraform/modules/ecs/outputs.tf \
+          'output "cluster_name" {
+            description = "ECS cluster name"
+            value       = aws_ecs_cluster.main.name
+          }
+          output "cluster_id" {
+            description = "ECS cluster ARN"
+            value       = aws_ecs_cluster.main.id
+          }
+          output "api_service_name" {
+            description = "ECS API service name"
+            value       = aws_ecs_service.api.name
+          }
+          output "worker_service_name" {
+            description = "ECS worker service name"
+            value       = aws_ecs_service.worker.name
+          }'
+
+          # ── elasticache ───────────────────────────────────────────────
+          write_if_missing terraform/modules/elasticache/variables.tf \
+          'variable "project" { type = string }
+          variable "environment" { type = string }
+          variable "private_cache_subnet_ids" { type = list(string) }
+          variable "redis_sg_id" { type = string }
+          variable "node_type" { type = string; default = "cache.t3.micro" }
+          variable "common_tags" { type = map(string) }'
+
+          write_if_missing terraform/modules/elasticache/outputs.tf \
+          'output "redis_endpoint" {
+            description = "Redis cluster endpoint address"
+            value       = aws_elasticache_cluster.redis.cache_nodes[0].address
+          }
+          output "redis_port" {
+            description = "Redis cluster port"
+            value       = aws_elasticache_cluster.redis.port
+          }
+          output "cluster_id" {
+            description = "ElastiCache cluster ID"
+            value       = aws_elasticache_cluster.redis.cluster_id
+          }'
+
+          # ── monitoring ────────────────────────────────────────────────
+          write_if_missing terraform/modules/monitoring/variables.tf \
+          'variable "project" { type = string }
+          variable "environment" { type = string }
+          variable "aws_region" { type = string }
+          variable "vpc_id" { type = string }
+          variable "public_subnet_id" { type = string }
+          variable "monitoring_sg_id" { type = string }
+          variable "ecs_cluster_name" { type = string }
+          variable "grafana_admin_password" { type = string; sensitive = true }
+          variable "cloudwatch_log_groups" { type = list(string); default = [] }
+          variable "common_tags" { type = map(string) }'
+
+          write_if_missing terraform/modules/monitoring/outputs.tf \
+          'output "grafana_url" {
+            description = "Grafana dashboard URL"
+            value       = "http://${aws_eip.monitoring.public_ip}:3000"
+          }
+          output "prometheus_url" {
+            description = "Prometheus UI URL"
+            value       = "http://${aws_eip.monitoring.public_ip}:9090"
+          }
+          output "monitoring_instance_id" {
+            description = "EC2 instance ID for the monitoring server"
+            value       = aws_instance.monitoring.id
+          }
+          output "monitoring_public_ip" {
+            description = "Elastic IP address of the monitoring server"
+            value       = aws_eip.monitoring.public_ip
+          }'
+
+          # ── iam ───────────────────────────────────────────────────────
+          write_if_missing terraform/modules/iam/outputs.tf \
+          'output "ecs_execution_role_arn" {
+            description = "IAM role ARN for ECS task execution"
+            value       = aws_iam_role.ecs_execution.arn
+          }
+          output "ecs_task_role_arn" {
+            description = "IAM role ARN for the running application"
+            value       = aws_iam_role.ecs_task.arn
+          }
+          output "vpc_flow_log_role_arn" {
+            description = "IAM role ARN for VPC Flow Logs"
+            value       = aws_iam_role.vpc_flow_log.arn
+          }
+          output "github_actions_deploy_role_arn" {
+            description = "IAM role ARN assumed by GitHub Actions via OIDC"
+            value       = aws_iam_role.github_actions_deploy.arn
+          }'
+
+          # ── vpc ───────────────────────────────────────────────────────
+          write_if_missing terraform/modules/vpc/outputs.tf \
+          'output "vpc_id" {
+            description = "VPC ID"
+            value       = aws_vpc.main.id
+          }
+          output "public_subnet_ids" {
+            description = "Public subnet IDs"
+            value       = aws_subnet.public[*].id
+          }
+          output "private_app_subnet_ids" {
+            description = "Private app-tier subnet IDs for ECS tasks"
+            value       = aws_subnet.private_app[*].id
+          }
+          output "private_db_subnet_ids" {
+            description = "Private database-tier subnet IDs for RDS"
+            value       = aws_subnet.private_db[*].id
+          }
+          output "private_cache_subnet_ids" {
+            description = "Private cache-tier subnet IDs for ElastiCache"
+            value       = aws_subnet.private_cache[*].id
+          }
+          output "vpc_cidr" {
+            description = "VPC CIDR block"
+            value       = aws_vpc.main.cidr_block
+          }'
+
+          # ── rds ───────────────────────────────────────────────────────
+          write_if_missing terraform/modules/rds/outputs.tf \
+          'output "db_endpoint" {
+            description = "RDS instance endpoint (host:port)"
+            value       = aws_db_instance.main.endpoint
+          }
+          output "db_address" {
+            description = "RDS instance hostname"
+            value       = aws_db_instance.main.address
+          }
+          output "db_port" {
+            description = "RDS instance port"
+            value       = aws_db_instance.main.port
+          }
+          output "db_name" {
+            description = "Database name"
+            value       = aws_db_instance.main.db_name
+          }'
+
+          # ── ecr ───────────────────────────────────────────────────────
+          write_if_missing terraform/modules/ecr/variables.tf \
+          'variable "project" { type = string }
+          variable "environment" { type = string }
+          variable "common_tags" { type = map(string) }'
+
+          write_if_missing terraform/modules/ecr/outputs.tf \
+          'output "api_repository_url" {
+            description = "ECR repository URL for the API image"
+            value       = aws_ecr_repository.api.repository_url
+          }
+          output "worker_repository_url" {
+            description = "ECR repository URL for the worker image"
+            value       = aws_ecr_repository.worker.repository_url
+          }
+          output "api_repository_arn" {
+            description = "ECR repository ARN for the API image"
+            value       = aws_ecr_repository.api.arn
+          }
+          output "worker_repository_arn" {
+            description = "ECR repository ARN for the worker image"
+            value       = aws_ecr_repository.worker.arn
+          }'
+
+          echo "✅ All module support files verified"
+
+      - name: Commit any newly generated module files
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          if ! git diff --quiet || ! git ls-files --others --exclude-standard terraform/modules/ | grep -q .; then
+            git add terraform/modules/
+            if ! git diff --cached --quiet; then
+              git commit -m "fix: add missing terraform module variables.tf and outputs.tf [skip ci]"
+              git push
+              echo "✅ Missing module files committed and pushed"
+            else
+              echo "✅ No new module files to commit"
+            fi
+          else
+            echo "✅ All module files already present"
+          fi
+
       - name: Setup TFLint
         uses: terraform-linters/setup-tflint@v4
 
