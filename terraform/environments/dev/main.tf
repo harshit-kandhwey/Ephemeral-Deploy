@@ -156,8 +156,8 @@ module "iam" {
   github_org           = var.github_org
   github_repo          = var.github_repo
   tf_state_bucket      = var.tf_state_bucket
-  secrets_arn          = aws_secretsmanager_secret.app.arn
   app_s3_bucket        = var.app_s3_bucket
+  secrets_arn          = aws_secretsmanager_secret.app.arn
   create_oidc_provider = true
   common_tags          = local.common_tags
 }
@@ -265,7 +265,7 @@ module "monitoring" {
   monitoring_sg_id       = module.security_groups.monitoring_sg_id
   ecs_cluster_name       = module.ecs.cluster_name
   grafana_admin_password = data.aws_ssm_parameter.grafana_admin_password.value
-  cloudwatch_log_groups = [
+  cloudwatch_log_groups  = [
     "/ecs/${local.project}/${local.environment}/api",
     "/ecs/${local.project}/${local.environment}/worker",
     "/ecs/${local.project}/${local.environment}/beat",

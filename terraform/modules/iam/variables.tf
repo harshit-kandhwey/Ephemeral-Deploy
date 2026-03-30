@@ -48,6 +48,7 @@ variable "tf_state_bucket" {
 variable "tf_lock_table" {
   description = "DynamoDB table for Terraform state locking"
   type        = string
+  default     = "nexusdeploy-terraform-locks"
 }
 
 variable "secrets_arn" {
