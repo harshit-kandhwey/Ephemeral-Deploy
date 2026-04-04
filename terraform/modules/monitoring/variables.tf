@@ -13,11 +13,6 @@ variable "aws_region" {
   type        = string
 }
 
-variable "vpc_id" {
-  description = "VPC ID for the monitoring EC2 instance"
-  type        = string
-}
-
 variable "public_subnet_id" {
   description = "Public subnet ID to place the monitoring EC2 instance in"
   type        = string
@@ -31,12 +26,6 @@ variable "monitoring_sg_id" {
 variable "ecs_cluster_name" {
   description = "ECS cluster name for Prometheus service discovery"
   type        = string
-}
-
-variable "grafana_admin_password" {
-  description = "Grafana admin UI password"
-  type        = string
-  sensitive   = true
 }
 
 variable "state_bucket" {
