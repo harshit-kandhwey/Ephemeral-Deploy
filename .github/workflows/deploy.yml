@@ -1,10 +1,9 @@
 name: Deploy
 
 on:
-  push:
-    branches:
-      - dev    # → dev environment (auto-destroys in 30 min)
-      - main   # → prod environment (blue-green, manual destroy)
+  # Triggered explicitly by ci.yml on successful push to dev/main.
+  # This replaces the workflow_run trigger which was unreliable.
+  # Chain: push → ci.yml passes → dispatches deploy.yml → deploy dispatches cleanup.yml
   workflow_dispatch:
     inputs:
       environment:
@@ -17,11 +16,15 @@ on:
         required: true
         type: choice
         options: [ plan, apply ]
-        default: plan
+        default: apply
 
 concurrency:
   group: deploy-${{ github.ref_name }}
   cancel-in-progress: false
+
+permissions:
+  actions: write   # needed to dispatch cleanup.yml
+  contents: read
 
 env:
   AWS_REGION: us-east-1
@@ -38,36 +41,221 @@ jobs:
   setup:
     name: Setup Context
     runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+
+    permissions:
+      id-token: write   # needed for AWS credentials on infra-only image lookup
+      contents: read
+
     outputs:
-      environment: ${{ steps.ctx.outputs.environment }}
-      tf_action:   ${{ steps.ctx.outputs.tf_action }}
-      image_tag:   ${{ github.sha }}
+      environment:    ${{ steps.ctx.outputs.environment }}
+      tf_action:      ${{ steps.ctx.outputs.tf_action }}
+      image_tag:      ${{ github.sha }}
+      app_changed:    ${{ steps.changed.outputs.app_changed }}
+      current_api:    ${{ steps.current_images.outputs.api_image }}
+      current_worker: ${{ steps.current_images.outputs.worker_image }}
 
     steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: Setup-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2   # needed for git diff HEAD~1 HEAD in changed-files detection
+
       - name: Determine context
         id: ctx
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
-            echo "tf_action=${{ github.event.inputs.action }}" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref_name }}" == "main" ]]; then
-            echo "environment=prod" >> $GITHUB_OUTPUT
-            echo "tf_action=apply" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref_name }}" == "dev" ]]; then
-            echo "environment=dev" >> $GITHUB_OUTPUT
-            echo "tf_action=apply" >> $GITHUB_OUTPUT
+          # deploy.yml is only triggered via workflow_dispatch
+          # (either from ci.yml on push, or manually)
+          echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+          echo "tf_action=${{ github.event.inputs.action }}"        >> $GITHUB_OUTPUT
+          echo "📦 Environment: ${{ github.event.inputs.environment }}"
+          echo "⚙️  Action:      ${{ github.event.inputs.action }}"
+
+      - name: Detect changed files
+        id: changed
+        run: |
+          # Get list of changed files — fetch-depth: 2 ensures HEAD~1 is available
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "app/")
+
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          # Check if any app/ files changed
+          if echo "$CHANGED" | grep -q "^app/"; then
+            echo "app_changed=true" >> $GITHUB_OUTPUT
+            echo "✅ App code changed — image build required"
           else
-            echo "Unsupported trigger: event_name=${{ github.event_name }}, ref_name=${{ github.ref_name }}" >&2
-            exit 1
+            echo "app_changed=false" >> $GITHUB_OUTPUT
+            echo "⏭️  No app code changes — skipping image build"
+          fi
+
+      - name: Get current image URIs (infra-only deploy)
+        id: current_images
+        # When app has not changed, look up the currently deployed image from ECR.
+        # If ECR is empty (e.g. after cleanup), force a build by setting app_changed=true.
+        if: steps.changed.outputs.app_changed == 'false'
+        env:
+          ENV: ${{ github.event.inputs.environment }}
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          REGISTRY="$ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          ENV="${{ github.event.inputs.environment }}"
+
+          # Check if images exist in ECR — empty repo means build is required
+          IMAGE_COUNT=$(aws ecr describe-images \
+            --repository-name "nexusdeploy-api-$ENV" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'length(imageDetails)' \
+            --output text 2>/dev/null || echo "0")
+
+          if [[ "$IMAGE_COUNT" == "0" || -z "$IMAGE_COUNT" ]]; then
+            echo "No images in ECR - forcing build despite no app code change"
+            echo "app_changed=true" >> $GITHUB_OUTPUT
+            echo "api_image="      >> $GITHUB_OUTPUT
+            echo "worker_image="   >> $GITHUB_OUTPUT
+          else
+            API_TAGS=$(aws ecr describe-images \
+              --repository-name "nexusdeploy-api-$ENV" \
+              --region ${{ env.AWS_REGION }} \
+              --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags' \
+              --output text 2>/dev/null || echo "latest")
+            API_IMAGE=$(echo "$API_TAGS" | tr $'\t' $'\n' | grep -v '^latest$' | head -1)
+            API_IMAGE="${API_IMAGE:-latest}"
+
+            WORKER_TAGS=$(aws ecr describe-images \
+              --repository-name "nexusdeploy-worker-$ENV" \
+              --region ${{ env.AWS_REGION }} \
+              --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags' \
+              --output text 2>/dev/null || echo "latest")
+            WORKER_IMAGE=$(echo "$WORKER_TAGS" | tr $'\t' $'\n' | grep -v '^latest$' | head -1)
+            WORKER_IMAGE="${WORKER_IMAGE:-latest}"
+
+            echo "api_image=$REGISTRY/nexusdeploy-api-$ENV:$API_IMAGE"       >> $GITHUB_OUTPUT
+            echo "worker_image=$REGISTRY/nexusdeploy-worker-$ENV:$WORKER_IMAGE" >> $GITHUB_OUTPUT
+            echo "Using existing images: api=$API_IMAGE worker=$WORKER_IMAGE"
           fi
 
   # ─────────────────────────────────────────────
-  # Build and push Docker images to ECR
+  # Phase 1a: Provision ECR repositories
+  # Runs in parallel with image build.
+  # Must complete before images can be pushed.
   # ─────────────────────────────────────────────
-  build:
-    name: Build & Push (${{ needs.setup.outputs.environment }})
+  ecr-provision:
+    name: Provision ECR (${{ needs.setup.outputs.environment }})
     runs-on: ubuntu-latest
     needs: setup
+    # Only needed when app changed — ECR repos already exist on infra-only pushes
+    if: needs.setup.outputs.app_changed == 'true'
+    environment: ${{ needs.setup.outputs.environment }}
+
+    permissions:
+      id-token: write
+      contents: read
+
+    outputs:
+      registry: ${{ steps.ecr-login.outputs.registry }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: ECRProvision-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: terraform/environments/${{ needs.setup.outputs.environment }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ needs.setup.outputs.environment }}/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform Apply — ECR only
+        # Creates ECR repositories before images are pushed.
+        # -target=module.ecr is intentional — only ECR is needed at this stage.
+        # The full apply (with ECS, RDS etc.) runs after images are pushed.
+        working-directory: terraform/environments/${{ needs.setup.outputs.environment }}
+        env:
+          TF_VAR_api_image:    "placeholder"
+          TF_VAR_worker_image: "placeholder"
+          TF_VAR_git_commit:   ${{ github.sha }}
+        run: |
+          terraform apply             -target=module.ecr             -var-file=terraform.tfvars             -auto-approve
+          echo "✅ ECR repositories ready"
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+  # ─────────────────────────────────────────────
+  # Phase 1b: Build Docker images
+  # Runs in parallel with ECR provisioning.
+  # Does NOT push — push happens after ECR exists.
+  # ─────────────────────────────────────────────
+  build-image:
+    name: Build Images (${{ needs.setup.outputs.environment }})
+    runs-on: ubuntu-latest
+    needs: setup
+    # Skip when only infra/terraform files changed — saves ~3 minutes per deploy
+    if: needs.setup.outputs.app_changed == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build API image (cache only — no push yet)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          file: ./app/Dockerfile
+          push: false
+          load: false
+          tags: nexusdeploy-api-${{ needs.setup.outputs.environment }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: GIT_COMMIT=${{ github.sha }}
+
+      - name: Build Worker image (cache only — no push yet)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          file: ./app/Dockerfile.worker
+          push: false
+          load: false
+          tags: nexusdeploy-worker-${{ needs.setup.outputs.environment }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─────────────────────────────────────────────
+  # Phase 2: Push images to ECR
+  # Waits for BOTH ECR to exist AND images to be built.
+  # ECR repos guaranteed to exist at this point.
+  # ─────────────────────────────────────────────
+  push-image:
+    name: Push Images (${{ needs.setup.outputs.environment }})
+    runs-on: ubuntu-latest
+    needs: [setup, ecr-provision, build-image]
+    if: |
+      always() &&
+      needs.setup.outputs.app_changed == 'true' &&
+      needs.ecr-provision.result == 'success' &&
+      needs.build-image.result == 'success'
     environment: ${{ needs.setup.outputs.environment }}
 
     permissions:
@@ -85,14 +273,17 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          role-session-name: Deploy-${{ github.run_id }}
+          role-session-name: PushImages-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Login to ECR
         id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build & push images
+      - name: Build and push API image
         id: push
         env:
           REGISTRY: ${{ steps.ecr-login.outputs.registry }}
@@ -101,7 +292,7 @@ jobs:
         run: |
           docker buildx build \
             --platform linux/amd64 \
-            --cache-from type=gha --cache-to type=gha,mode=max \
+            --cache-from type=gha \
             --build-arg GIT_COMMIT=$TAG \
             --tag $REGISTRY/nexusdeploy-api-$ENV:$TAG \
             --tag $REGISTRY/nexusdeploy-api-$ENV:latest \
@@ -110,6 +301,7 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             --file ./app/Dockerfile.worker \
+            --cache-from type=gha \
             --tag $REGISTRY/nexusdeploy-worker-$ENV:$TAG \
             --tag $REGISTRY/nexusdeploy-worker-$ENV:latest \
             --push ./app
@@ -124,8 +316,14 @@ jobs:
   deploy-dev:
     name: Deploy → dev
     runs-on: ubuntu-latest
-    needs: [setup, build]
-    if: needs.setup.outputs.environment == 'dev' && needs.setup.outputs.tf_action == 'apply'
+    needs: [setup, ecr-provision, push-image]
+    # Run when: env is dev AND (image was pushed OR only infra changed)
+    if: |
+      always() &&
+      needs.setup.outputs.environment == 'dev' &&
+      needs.setup.outputs.tf_action == 'apply' &&
+      (needs.ecr-provision.result == 'success' || needs.ecr-provision.result == 'skipped') &&
+      (needs.push-image.result == 'success' || needs.setup.outputs.app_changed == 'false')
     environment: dev
 
     permissions:
@@ -157,11 +355,15 @@ jobs:
             -backend-config="encrypt=true"
           # Note: no dynamodb_table - see backend comment in main.tf
 
-      - name: Terraform Apply
+      - name: Terraform Apply — full infrastructure
+        # ECR already exists from ecr-provision job.
+        # Images already pushed from push-image job.
+        # This apply creates VPC, ECS, RDS, ElastiCache etc. with real image tags.
         working-directory: terraform/environments/dev
         env:
-          TF_VAR_api_image:    ${{ needs.build.outputs.api_image }}
-          TF_VAR_worker_image: ${{ needs.build.outputs.worker_image }}
+          # Use newly pushed image if app changed, otherwise use current ECR image
+          TF_VAR_api_image:    ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}
+          TF_VAR_worker_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.worker_image || needs.setup.outputs.current_worker }}
           TF_VAR_git_commit:   ${{ github.sha }}
         run: terraform apply -var-file=terraform.tfvars -auto-approve
 
@@ -213,8 +415,13 @@ jobs:
   deploy-prod:
     name: Deploy → prod (blue-green)
     runs-on: ubuntu-latest
-    needs: [setup, build]
-    if: needs.setup.outputs.environment == 'prod' && needs.setup.outputs.tf_action == 'apply'
+    needs: [setup, ecr-provision, push-image]
+    if: |
+      always() &&
+      needs.setup.outputs.environment == 'prod' &&
+      needs.setup.outputs.tf_action == 'apply' &&
+      (needs.ecr-provision.result == 'success' || needs.ecr-provision.result == 'skipped') &&
+      (needs.push-image.result == 'success' || needs.setup.outputs.app_changed == 'false')
     environment: prod   # Requires manual approval in GitHub Environments settings
 
     permissions:
@@ -287,8 +494,8 @@ jobs:
         id: tf_apply
         working-directory: terraform/environments/prod
         env:
-          TF_VAR_api_image:    ${{ needs.build.outputs.api_image }}
-          TF_VAR_worker_image: ${{ needs.build.outputs.worker_image }}
+          TF_VAR_api_image:    ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}
+          TF_VAR_worker_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.worker_image || needs.setup.outputs.current_worker }}
           TF_VAR_git_commit:   ${{ github.sha }}
           # The NEW slot becomes active in this apply
           TF_VAR_deployment_slot: ${{ steps.slot.outputs.new_slot }}
@@ -368,11 +575,11 @@ jobs:
         run: |
           aws ssm put-parameter \
             --name "/nexusdeploy/prod/deployment/prev_api_image" \
-            --value "${{ needs.build.outputs.api_image }}" \
+            --value "${{ needs.push-image.outputs.api_image }}" \
             --type String --overwrite --region ${{ env.AWS_REGION }}
           aws ssm put-parameter \
             --name "/nexusdeploy/prod/deployment/prev_worker_image" \
-            --value "${{ needs.build.outputs.worker_image }}" \
+            --value "${{ needs.push-image.outputs.worker_image }}" \
             --type String --overwrite --region ${{ env.AWS_REGION }}
 
       # Schedule old slot scale-down after 24 hours (gives time for monitoring)

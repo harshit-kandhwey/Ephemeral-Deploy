@@ -13,11 +13,6 @@ variable "aws_region" {
   type        = string
 }
 
-variable "vpc_id" {
-  description = "VPC ID for the monitoring EC2 instance"
-  type        = string
-}
-
 variable "public_subnet_id" {
   description = "Public subnet ID to place the monitoring EC2 instance in"
   type        = string
@@ -33,16 +28,9 @@ variable "ecs_cluster_name" {
   type        = string
 }
 
-variable "grafana_admin_password" {
-  description = "Grafana admin UI password"
+variable "state_bucket" {
+  description = "S3 bucket name used for Terraform state — monitoring configs are stored here under monitoring/config/"
   type        = string
-  sensitive   = true
-}
-
-variable "cloudwatch_log_groups" {
-  description = "List of CloudWatch log group names to surface in Grafana"
-  type        = list(string)
-  default     = []
 }
 
 variable "common_tags" {

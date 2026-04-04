@@ -1,0 +1,110 @@
+{
+  "title": "NexusDeploy Overview",
+  "uid": "nexusdeploy-overview",
+  "tags": ["nexusdeploy", "ecs", "flask"],
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "type": "stat",
+      "title": "HTTP Request Rate",
+      "datasource": "Prometheus",
+      "targets": [
+        { "expr": "rate(app_requests_total[5m])", "legendFormat": "req/s" }
+      ]
+    },
+    {
+      "id": 2,
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "type": "stat",
+      "title": "p95 Request Latency",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(app_request_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 3,
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "type": "stat",
+      "title": "Error Rate (5xx)",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(app_requests_total{status=~'5..'}[5m])",
+          "legendFormat": "errors/s"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "type": "stat",
+      "title": "ECS Running Tasks",
+      "datasource": "CloudWatch",
+      "targets": [
+        {
+          "queryMode": "Metrics",
+          "namespace": "AWS/ECS",
+          "metricName": "RunningTaskCount",
+          "dimensions": {
+            "ClusterName": "NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV",
+            "ServiceName": "NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-api"
+          }
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "type": "timeseries",
+      "title": "Request Latency Percentiles",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(app_request_latency_seconds_bucket[5m])) by (le, endpoint, method))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(app_request_latency_seconds_bucket[5m])) by (le, endpoint, method))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(app_request_latency_seconds_bucket[5m])) by (le, endpoint, method))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "type": "timeseries",
+      "title": "RDS CPU & Connections (CloudWatch)",
+      "datasource": "CloudWatch",
+      "targets": [
+        {
+          "queryMode": "Metrics",
+          "namespace": "AWS/RDS",
+          "metricName": "CPUUtilization",
+          "dimensions": {
+            "DBInstanceIdentifier": "NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-postgres"
+          }
+        },
+        {
+          "queryMode": "Metrics",
+          "namespace": "AWS/RDS",
+          "metricName": "DatabaseConnections",
+          "dimensions": {
+            "DBInstanceIdentifier": "NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-postgres"
+          }
+        }
+      ]
+    }
+  ]
+}
