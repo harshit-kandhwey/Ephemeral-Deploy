@@ -51,9 +51,12 @@ jobs:
       - name: Wait for TTL delay
         if: github.event.inputs.delay_minutes != '0' && github.event.inputs.delay_minutes != ''
         run: |
-          DELAY=${{ github.event.inputs.delay_minutes || 0 }}
-          echo "⏳ Waiting ${DELAY} minutes before cleanup..."
-          echo "Reason: ${{ github.event.inputs.reason }}"
+          DELAY='${{ github.event.inputs.delay_minutes || 0 }}'
+          if ! [[ "$DELAY" =~ ^[0-9]+$ ]]; then
+            echo "❌ Invalid delay_minutes: must be a non-negative integer, got: $DELAY"
+            exit 1
+          fi          echo "⏳ Waiting ${DELAY} minutes before cleanup..."
+          echo "Reason: ${{ github.event.inputs.reason || 'Manual cleanup' }}"
           sleep $((DELAY * 60))
 
       - name: Configure AWS credentials (OIDC)
@@ -153,11 +156,14 @@ jobs:
               --key "$STATE_KEY" \
               --region "${{ env.AWS_REGION }}" 2>/dev/null; then
 
-            # Backup before deleting — recoverable if something goes wrong
-            aws s3 cp \
+            # Backup before deleting — abort if backup fails to prevent permanent loss
+            if ! aws s3 cp \
               "s3://${{ env.TF_STATE_BUCKET }}/$STATE_KEY" \
               "s3://${{ env.TF_STATE_BUCKET }}/backups/${{ env.TF_ENV }}/terraform-$(date +%Y%m%d-%H%M%S).tfstate" \
-              --region "${{ env.AWS_REGION }}"
+              --region "${{ env.AWS_REGION }}"; then
+              echo "❌ Failed to backup state file — aborting deletion to prevent data loss"
+              exit 1
+            fi
 
             aws s3 rm \
               "s3://${{ env.TF_STATE_BUCKET }}/$STATE_KEY" \

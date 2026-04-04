@@ -10,7 +10,7 @@
 #   5. SSM parameters      — all app secrets, stored encrypted
 #
 # Idempotent — safe to re-run at any time:
-#   S3 bucket       skips creation if exists; re-applies versioning/encryption (harmless)
+#   S3 bucket       skips creation if exists; re-applies encryption + public-access-block (harmless)
 #   OIDC provider   skips entirely if exists
 #   IAM role        skips creation if exists; re-applies trust policy only
 #   IAM policy      always overwrites with latest policy from this script
@@ -91,13 +91,16 @@ else
   log_success "Created bucket: s3://$STATE_BUCKET"
 fi
 
-# Enable versioning — keeps history of every state file change.
-# Essential for disaster recovery: if state gets corrupted you can
-# roll back to any previous version.
-aws s3api put-bucket-versioning \
-  --bucket "$STATE_BUCKET" \
-  --versioning-configuration Status=Enabled
-log_success "Versioning enabled on s3://$STATE_BUCKET"
+# S3 versioning — disabled for demo/cost purposes.
+# Each stored version is billed as a separate S3 object.
+# Re-enable for production: essential for state file disaster recovery.
+#
+# To enable: uncomment below and re-run bootstrap (idempotent)
+# aws s3api put-bucket-versioning \
+#   --bucket "$STATE_BUCKET" \
+#   --versioning-configuration Status=Enabled
+# log_success "Versioning enabled on s3://$STATE_BUCKET"
+log_warn "S3 versioning disabled (demo mode) — enable for production use"
 
 # Enable server-side encryption — state files contain resource IDs
 # and ARNs; AES256 is free and adds a layer of protection at rest.
@@ -276,7 +279,7 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
     {
       "Sid": "ECR",
       "Effect": "Allow",
-      "Action": ["ecr:CreateRepository","ecr:DeleteRepository","ecr:DescribeRepositories","ecr:PutLifecyclePolicy","ecr:GetLifecyclePolicy","ecr:DeleteLifecyclePolicy","ecr:BatchCheckLayerAvailability","ecr:GetDownloadUrlForLayer","ecr:BatchGetImage","ecr:InitiateLayerUpload","ecr:UploadLayerPart","ecr:CompleteLayerUpload","ecr:PutImage","ecr:ListImages","ecr:BatchDeleteImage","ecr:TagResource","ecr:PutImageScanningConfiguration","ecr:PutImageTagMutability"],
+      "Action": ["ecr:CreateRepository","ecr:DeleteRepository","ecr:DescribeRepositories","ecr:ListTagsForResource","ecr:PutLifecyclePolicy","ecr:GetLifecyclePolicy","ecr:DeleteLifecyclePolicy","ecr:BatchCheckLayerAvailability","ecr:GetDownloadUrlForLayer","ecr:BatchGetImage","ecr:InitiateLayerUpload","ecr:UploadLayerPart","ecr:CompleteLayerUpload","ecr:PutImage","ecr:ListImages","ecr:BatchDeleteImage","ecr:TagResource","ecr:UntagResource","ecr:PutImageScanningConfiguration","ecr:PutImageTagMutability"],
       "Resource": "arn:aws:ecr:*:${ACCOUNT_ID}:repository/${PROJECT}-*"
     },
     {
@@ -411,13 +414,13 @@ echo "════════════════════════�
 echo ""
 
 # Generate two distinct random values — one for SECRET_KEY, one for JWT_SECRET_KEY
-KEY_1=$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null \
+SUGGESTED_SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null \
   || openssl rand -hex 32)
-KEY_2=$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null \
+SUGGESTED_JWT_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null \
   || openssl rand -hex 32)
 echo -e "  ${BLUE}💡 Suggested values (copy each one separately):${NC}"
-echo "     KEY_1     : $KEY_1"
-echo "     KEY_2     : $KEY_2"
+echo "     SECRET_KEY     : $SUGGESTED_SECRET_KEY"
+echo "     JWT_SECRET_KEY : $SUGGESTED_JWT_KEY"
 echo ""
 
 create_ssm_param() {
@@ -461,8 +464,8 @@ create_ssm_param "db/master_username"          "RDS superuser name (e.g. nexusad
 create_ssm_param "db/master_password"          "RDS superuser password — use a strong password"  true
 create_ssm_param "db/app_username"             "App DB user name (e.g. nexusapp)"                false
 create_ssm_param "db/app_password"             "App DB user password — use a strong password"    true
-create_ssm_param "app/secret_key"              "Flask SECRET_KEY — can use the suggested hex above"  true
-create_ssm_param "app/jwt_secret_key"          "JWT signing key — can use the suggested hex above"     true
+create_ssm_param "app/secret_key"              "Flask SECRET_KEY — use the suggested hex above"  true
+create_ssm_param "app/jwt_secret_key"          "JWT signing key — use a different hex value"     true
 create_ssm_param "monitoring/grafana_password" "Grafana admin UI password"                       true
 
 # ── Summary ───────────────────────────────────
@@ -471,7 +474,7 @@ echo -e "${GREEN}═════════════════════
 echo -e "${GREEN} Bootstrap Complete!${NC}"
 echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
 echo ""
-echo "  S3 State Bucket : s3://$STATE_BUCKET  (versioned + encrypted)"
+echo "  S3 State Bucket : s3://$STATE_BUCKET  (encrypted, versioning disabled for demo)"
 echo "  OIDC Provider   : $OIDC_ARN"
 echo "  IAM Role        : $ROLE_ARN"
 echo "  IAM Policy      : least-privilege inline (covers deploy + cleanup)"
