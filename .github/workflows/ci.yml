@@ -5,11 +5,17 @@ on:
     branches: [ main, dev, 'feature/**' ]
   pull_request:
     branches: [ main, dev ]
+  workflow_dispatch:  # allow manual trigger
 
 env:
   PYTHON_VERSION: '3.11'
   AWS_REGION: us-east-1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+# Needed so ci-summary can dispatch the deploy workflow
+permissions:
+  actions: write
+  contents: write
 
 jobs:
   # ─────────────────────────────────────────────
@@ -264,7 +270,7 @@ jobs:
           done
 
   # ─────────────────────────────────────────────
-  # SUMMARY: Post status to PR
+  # SUMMARY: Gate + dispatch deploy on success
   # ─────────────────────────────────────────────
   ci-summary:
     name: CI Summary
@@ -278,7 +284,28 @@ jobs:
                 "${{ needs.test.result }}" == "failure" || \
                 "${{ needs.docker-build.result }}" == "failure" || \
                 "${{ needs.terraform-lint.result }}" == "failure" ]]; then
-            echo "❌ CI failed - blocking merge"
+            echo "❌ CI failed — deploy will not run"
             exit 1
           fi
           echo "✅ All CI checks passed"
+
+      - name: Trigger deploy pipeline
+        # Only dispatch deploy for pushes to dev or main — not PRs or feature branches.
+        # PRs run CI for validation only; deploy only happens on branch push.
+        if: |
+          github.event_name == 'push' &&
+          (github.ref_name == 'dev' || github.ref_name == 'main')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              workflow_id: 'deploy.yml',
+              ref: context.ref,
+              inputs: {
+                environment: context.ref_name === 'main' ? 'prod' : 'dev',
+                action: 'apply'
+              }
+            });
+            console.log(`🚀 Deploy triggered for ${context.ref_name}`);

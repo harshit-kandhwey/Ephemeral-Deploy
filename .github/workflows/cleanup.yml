@@ -17,21 +17,19 @@ on:
         required: false
         default: 'Manual cleanup'
 
-  # Also allow scheduled cleanup of dev every night
+  # Nightly safety net — destroys any forgotten dev environments
   schedule:
-    - cron: '0 0 * * *'   # Midnight UTC - nuke any forgotten dev environments
+    - cron: '0 0 * * *'   # Midnight UTC
 
 env:
   AWS_REGION: us-east-1
   TF_VERSION: 1.7.0
   TF_STATE_BUCKET: nexusdeploy-terraform-state
-  TF_LOCK_TABLE: nexusdeploy-terraform-locks
+  # TF_LOCK_TABLE intentionally omitted — DynamoDB locking disabled (single-dev)
+  # See: scripts/bootstrap.sh and terraform/environments/dev/main.tf for rationale
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # ─────────────────────────────────────────────
-  # Wait for TTL then destroy
-  # ─────────────────────────────────────────────
   destroy:
     name: Destroy ${{ github.event.inputs.environment || 'dev' }}
     runs-on: ubuntu-latest
@@ -47,7 +45,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Wait for delay
+      # Sleep BEFORE acquiring AWS credentials — the OIDC token is only
+      # requested when configure-aws-credentials runs, so sleeping here
+      # does not consume any credential TTL.
+      - name: Wait for TTL delay
         if: github.event.inputs.delay_minutes != '0' && github.event.inputs.delay_minutes != ''
         run: |
           DELAY=${{ github.event.inputs.delay_minutes || 0 }}
@@ -74,13 +75,18 @@ jobs:
             -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
             -backend-config="key=${{ env.TF_ENV }}/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" \
-            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}" \
             -backend-config="encrypt=true"
+          # Note: no dynamodb_table — DynamoDB locking intentionally disabled.
+          # Single-developer workflow, no concurrent runs possible.
 
-      # ── Step 1: Graceful Terraform destroy ──
+      # ── Step 1: Graceful Terraform destroy ──────────────────────────────
       - name: Terraform Destroy
         id: tf_destroy
         working-directory: terraform/environments/${{ env.TF_ENV }}
+        env:
+          TF_VAR_api_image:    "placeholder"
+          TF_VAR_worker_image: "placeholder"
+          TF_VAR_git_commit:   "cleanup"
         run: |
           echo "🔥 Starting Terraform destroy for ${{ env.TF_ENV }}..."
           terraform destroy \
@@ -89,40 +95,45 @@ jobs:
             -no-color \
             2>&1 | tee destroy_output.txt
           echo "tf_destroy_exit=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
-        continue-on-error: true  # If TF destroy fails, fallback script runs
+        continue-on-error: true  # fallback script runs if this fails
 
-      # ── Step 2: Fallback - tag-based nuke script ──
+      # ── Step 2: Fallback — tag-based nuke script ─────────────────────────
       - name: Fallback cleanup script (if Terraform failed)
         if: steps.tf_destroy.outputs.tf_destroy_exit != '0'
         run: |
-          echo "⚠️ Terraform destroy failed. Running tag-based cleanup script..."
+          echo "⚠️ Terraform destroy failed — running tag-based cleanup script..."
           chmod +x scripts/cleanup.sh
           ./scripts/cleanup.sh \
             --env ${{ env.TF_ENV }} \
             --region ${{ env.AWS_REGION }} \
             --force
 
-      # ── Step 3: Clean ECR images ──
+      # ── Step 3: Clean ECR images ─────────────────────────────────────────
       - name: Delete ECR images
         run: |
           echo "🧹 Cleaning ECR images for ${{ env.TF_ENV }}..."
           for repo in nexusdeploy-api-${{ env.TF_ENV }} nexusdeploy-worker-${{ env.TF_ENV }}; do
             echo "Cleaning repo: $repo"
+            if aws ecr describe-repositories \
+                --repository-names "$repo" \
+                --region ${{ env.AWS_REGION }} 2>/dev/null; then
 
-            # Check if repo exists
-            if aws ecr describe-repositories --repository-names $repo --region ${{ env.AWS_REGION }} 2>/dev/null; then
-              # Get all image digests
               IMAGES=$(aws ecr list-images \
-                --repository-name $repo \
+                --repository-name "$repo" \
                 --region ${{ env.AWS_REGION }} \
                 --query 'imageIds[*]' \
                 --output json)
 
               if [[ "$IMAGES" != "[]" && -n "$IMAGES" ]]; then
+                # Write to temp file — inline JSON arrays are fragile with AWS CLI
+                TMPFILE=$(mktemp)
+                echo "$IMAGES" > "$TMPFILE"
                 aws ecr batch-delete-image \
-                  --repository-name $repo \
+                  --repository-name "$repo" \
                   --region ${{ env.AWS_REGION }} \
-                  --image-ids "$IMAGES"
+                  --image-ids "file://$TMPFILE" \
+                  --no-cli-pager
+                rm -f "$TMPFILE"
                 echo "✅ Deleted all images from $repo"
               else
                 echo "ℹ️ No images found in $repo"
@@ -132,41 +143,32 @@ jobs:
             fi
           done
 
-      # ── Step 4: Delete Terraform state from S3 ──
+      # ── Step 4: Delete Terraform state from S3 ───────────────────────────
       - name: Delete Terraform state from S3
         run: |
-          echo "🗑️ Removing Terraform state for ${{ env.TF_ENV }}..."
-
           STATE_KEY="${{ env.TF_ENV }}/terraform.tfstate"
 
-          # Check if state exists
           if aws s3api head-object \
-            --bucket ${{ env.TF_STATE_BUCKET }} \
-            --key $STATE_KEY \
-            --region ${{ env.AWS_REGION }} 2>/dev/null; then
+              --bucket "${{ env.TF_STATE_BUCKET }}" \
+              --key "$STATE_KEY" \
+              --region "${{ env.AWS_REGION }}" 2>/dev/null; then
 
-            # Backup state before deletion (safety net)
+            # Backup before deleting — recoverable if something goes wrong
             aws s3 cp \
-              s3://${{ env.TF_STATE_BUCKET }}/$STATE_KEY \
-              s3://${{ env.TF_STATE_BUCKET }}/backups/${{ env.TF_ENV }}/terraform-$(date +%Y%m%d-%H%M%S).tfstate \
-              --region ${{ env.AWS_REGION }}
+              "s3://${{ env.TF_STATE_BUCKET }}/$STATE_KEY" \
+              "s3://${{ env.TF_STATE_BUCKET }}/backups/${{ env.TF_ENV }}/terraform-$(date +%Y%m%d-%H%M%S).tfstate" \
+              --region "${{ env.AWS_REGION }}"
 
-            # Delete active state
             aws s3 rm \
-              s3://${{ env.TF_STATE_BUCKET }}/$STATE_KEY \
-              --region ${{ env.AWS_REGION }}
-
-            # Release DynamoDB lock if stuck
-            aws dynamodb delete-item \
-              --table-name ${{ env.TF_LOCK_TABLE }} \
-              --key "{\"LockID\": {\"S\": \"${{ env.TF_STATE_BUCKET }}/$STATE_KEY\"}}" \
-              --region ${{ env.AWS_REGION }} 2>/dev/null || true
+              "s3://${{ env.TF_STATE_BUCKET }}/$STATE_KEY" \
+              --region "${{ env.AWS_REGION }}"
 
             echo "✅ State deleted and backed up"
           else
             echo "ℹ️ No state file found for ${{ env.TF_ENV }}"
           fi
 
+      # ── Summary ──────────────────────────────────────────────────────────
       - name: Cleanup summary
         if: always()
         run: |
