@@ -24,25 +24,17 @@ variable "worker_image" {
 }
 
 variable "git_commit" {
-  description = "Git commit SHA injected as VERSION env var into containers"
+  description = "Git commit SHA — injected as VERSION env var into containers"
   type        = string
   default     = "unknown"
 }
 
-variable "vpc_id" {
-  description = "VPC ID (used for ALB when enabled)"
-  type        = string
-}
 
 variable "private_app_subnet_ids" {
   description = "Private subnet IDs for ECS task network placement"
   type        = list(string)
 }
 
-variable "public_subnet_ids" {
-  description = "Public subnet IDs (used for ALB when enabled)"
-  type        = list(string)
-}
 
 variable "api_sg_id" {
   description = "Security group ID for API tasks"
