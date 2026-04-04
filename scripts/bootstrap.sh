@@ -410,12 +410,14 @@ echo " Press Enter to skip any that are already set."
 echo "════════════════════════════════════════════════════════"
 echo ""
 
-# Suggest random values for secret keys
-SUGGESTED_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null \
+# Generate two distinct random values — one for SECRET_KEY, one for JWT_SECRET_KEY
+KEY_1=$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null \
   || openssl rand -hex 32)
-echo -e "  ${BLUE}💡 Suggested value for secret keys:${NC}"
-echo "     $SUGGESTED_KEY"
-echo "     (run the command again to get a different one)"
+KEY_2=$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null \
+  || openssl rand -hex 32)
+echo -e "  ${BLUE}💡 Suggested values (copy each one separately):${NC}"
+echo "     KEY_1     : $KEY_1"
+echo "     KEY_2     : $KEY_2"
 echo ""
 
 create_ssm_param() {
@@ -459,8 +461,8 @@ create_ssm_param "db/master_username"          "RDS superuser name (e.g. nexusad
 create_ssm_param "db/master_password"          "RDS superuser password — use a strong password"  true
 create_ssm_param "db/app_username"             "App DB user name (e.g. nexusapp)"                false
 create_ssm_param "db/app_password"             "App DB user password — use a strong password"    true
-create_ssm_param "app/secret_key"              "Flask SECRET_KEY — use the suggested hex above"  true
-create_ssm_param "app/jwt_secret_key"          "JWT signing key — use a different hex value"     true
+create_ssm_param "app/secret_key"              "Flask SECRET_KEY — can use the suggested hex above"  true
+create_ssm_param "app/jwt_secret_key"          "JWT signing key — can use the suggested hex above"     true
 create_ssm_param "monitoring/grafana_password" "Grafana admin UI password"                       true
 
 # ── Summary ───────────────────────────────────
