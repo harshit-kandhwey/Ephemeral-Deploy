@@ -67,7 +67,6 @@ locals {
 }
 
 data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}
 
 # ══════════════════════════════════════════════
 # SECRETS — Zero hardcoded values
@@ -230,9 +229,7 @@ module "ecs" {
   api_image              = var.api_image
   worker_image           = var.worker_image
   git_commit             = var.git_commit
-  vpc_id                 = module.vpc.vpc_id
   private_app_subnet_ids = module.vpc.private_app_subnet_ids
-  public_subnet_ids      = module.vpc.public_subnet_ids
   api_sg_id              = module.security_groups.api_sg_id
   worker_sg_id           = module.security_groups.worker_sg_id
   ecs_execution_role_arn = module.iam.ecs_execution_role_arn
@@ -257,19 +254,12 @@ module "ecs" {
 module "monitoring" {
   source = "../../modules/monitoring"
 
-  project                = local.project
-  environment            = local.environment
-  aws_region             = var.aws_region
-  vpc_id                 = module.vpc.vpc_id
-  public_subnet_id       = module.vpc.public_subnet_ids[0]
-  monitoring_sg_id       = module.security_groups.monitoring_sg_id
-  ecs_cluster_name       = module.ecs.cluster_name
-  grafana_admin_password = data.aws_ssm_parameter.grafana_admin_password.value
-  cloudwatch_log_groups = [
-    "/ecs/${local.project}/${local.environment}/api",
-    "/ecs/${local.project}/${local.environment}/worker",
-    "/ecs/${local.project}/${local.environment}/beat",
-    "/aws/vpc/flowlogs/${local.project}-${local.environment}",
-  ]
-  common_tags = local.common_tags
+  project          = local.project
+  environment      = local.environment
+  aws_region       = var.aws_region
+  public_subnet_id = module.vpc.public_subnet_ids[0]
+  monitoring_sg_id = module.security_groups.monitoring_sg_id
+  ecs_cluster_name = module.ecs.cluster_name
+  state_bucket     = var.tf_state_bucket
+  common_tags      = local.common_tags
 }

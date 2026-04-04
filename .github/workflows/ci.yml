@@ -19,11 +19,53 @@ permissions:
 
 jobs:
   # ─────────────────────────────────────────────
+  # JOB 0: Detect what changed
+  # Runs first so all other jobs can skip intelligently.
+  # ─────────────────────────────────────────────
+  detect-changes:
+    name: Detect Changed Files
+    runs-on: ubuntu-latest
+    outputs:
+      app_changed:  ${{ steps.filter.outputs.app }}
+      infra_changed: ${{ steps.filter.outputs.infra }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect changed paths
+        id: filter
+        run: |
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "app/ terraform/")
+
+          if echo "$CHANGED" | grep -q "^app/"; then
+            echo "app=true"  >> $GITHUB_OUTPUT
+            echo "📦 App code changed"
+          else
+            echo "app=false" >> $GITHUB_OUTPUT
+            echo "⏭️  No app changes"
+          fi
+
+          if echo "$CHANGED" | grep -qE "^terraform/|^\.github/"; then
+            echo "infra=true"  >> $GITHUB_OUTPUT
+            echo "🏗️  Infra/workflow changed"
+          else
+            echo "infra=false" >> $GITHUB_OUTPUT
+            echo "⏭️  No infra changes"
+          fi
+
+  # ─────────────────────────────────────────────
   # JOB 1: Lint & Static Analysis
+  # Always runs — catches hardcoded credentials,
+  # formatting issues, and security anti-patterns
+  # regardless of what changed.
   # ─────────────────────────────────────────────
   lint:
     name: Lint & Static Analysis
     runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.app_changed == 'true'
 
     permissions:
       contents: write  # needed to push auto-format commits
@@ -31,9 +73,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Fetch with token so we can push formatting commits back
           token: ${{ secrets.GITHUB_TOKEN }}
           ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 2
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -45,8 +87,6 @@ jobs:
         run: pip install flake8 black isort bandit safety
 
       - name: Auto-format with black and isort
-        # Run in write mode — fixes all formatting in one shot.
-        # Developers never need to run formatters locally to unblock CI.
         run: |
           cd app
           black .
@@ -70,19 +110,26 @@ jobs:
 
       - name: Run bandit (security scan)
         run: bandit -r app/src/ -ll -x app/src/tests/
-        continue-on-error: true  # Non-blocking — shows awareness
+        continue-on-error: true
 
       - name: Run safety (dependency vulnerability scan)
         run: safety scan --target app/
-        continue-on-error: true  # Non-blocking — shows awareness
+        continue-on-error: true
 
   # ─────────────────────────────────────────────
   # JOB 2: Unit & Integration Tests
+  # Skipped when only infra files changed.
+  # Runs in PARALLEL with docker-build.
   # ─────────────────────────────────────────────
   test:
     name: Run Tests
     runs-on: ubuntu-latest
-    needs: lint
+    needs: [detect-changes, lint]
+    # Only run when app code changed AND lint passed
+    if: |
+      always() &&
+      needs.detect-changes.outputs.app_changed == 'true' &&
+      (needs.lint.result == 'success' || needs.lint.result == 'skipped')
 
     services:
       postgres:
@@ -141,18 +188,25 @@ jobs:
         with:
           file: app/coverage.xml
           flags: unittests
-          fail_ci_if_error: false  # Non-blocking
+          fail_ci_if_error: false
 
   # ─────────────────────────────────────────────
   # JOB 3: Docker Build & Security Scan
+  # Skipped when only infra files changed.
+  # Runs in PARALLEL with test — no dependency between them.
   # ─────────────────────────────────────────────
   docker-build:
     name: Docker Build & Security Scan
     runs-on: ubuntu-latest
-    needs: test
+    needs: [detect-changes, lint]
+    # Parallel with test — only needs lint to pass, not test
+    if: |
+      always() &&
+      needs.detect-changes.outputs.app_changed == 'true' &&
+      (needs.lint.result == 'success' || needs.lint.result == 'skipped')
 
     permissions:
-      security-events: write  # needed to upload SARIF to GitHub Security tab
+      security-events: write
       contents: read
 
     steps:
@@ -161,7 +215,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build API image (load into Docker daemon)
+      - name: Build API image
         uses: docker/build-push-action@v6
         with:
           context: ./app
@@ -173,15 +227,11 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Scan image with Grype
-        # Grype by Anchore — replaces Trivy which suffered a supply chain
-        # compromise in March 2026 where 75 of 76 version tags were poisoned
-        # with credential-stealing malware. Grype runs fully locally with no
-        # outbound data sent and has had no known supply chain incidents.
         uses: anchore/scan-action@v7
         id: grype
         with:
           image: nexusdeploy-api:${{ github.sha }}
-          fail-build: false          # Non-blocking — shows security awareness
+          fail-build: false
           severity-cutoff: critical
           output-format: sarif
 
@@ -204,13 +254,18 @@ jobs:
 
   # ─────────────────────────────────────────────
   # JOB 4: Terraform Lint
+  # Skipped when only app files changed.
+  # Runs in PARALLEL with lint, test, docker-build.
   # ─────────────────────────────────────────────
   terraform-lint:
     name: Terraform Validate & Lint
     runs-on: ubuntu-latest
+    needs: detect-changes
+    # Only run when terraform or workflow files changed
+    if: needs.detect-changes.outputs.infra_changed == 'true'
 
     permissions:
-      contents: write  # needed to push auto-format commits
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -224,8 +279,6 @@ jobs:
           terraform_version: 1.7.0
 
       - name: Auto-format Terraform files
-        # Run in write mode — fixes all HCL formatting in one shot.
-        # terraform fmt -check never blocks the pipeline.
         run: terraform fmt -recursive terraform/
 
       - name: Commit Terraform formatting changes (if any)
@@ -249,13 +302,9 @@ jobs:
           cd terraform
           tflint --init
           tflint --recursive
-        continue-on-error: true  # Shows awareness
+        continue-on-error: true
 
       - name: Validate each environment
-        # Non-blocking: validate requires environment-level variables.tf and a
-        # configured backend. Real validation gate is terraform plan in deploy.yml
-        # against live AWS. Skipping here has no security impact.
-        # TF_PLUGIN_CACHE_DIR avoids re-downloading the AWS provider every run.
         continue-on-error: true
         env:
           TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/tf-plugin-cache
@@ -271,27 +320,49 @@ jobs:
 
   # ─────────────────────────────────────────────
   # SUMMARY: Gate + dispatch deploy on success
+  # Waits for all jobs — skipped jobs count as passed.
   # ─────────────────────────────────────────────
   ci-summary:
     name: CI Summary
     runs-on: ubuntu-latest
-    needs: [lint, test, docker-build, terraform-lint]
+    needs: [detect-changes, lint, test, docker-build, terraform-lint]
     if: always()
     steps:
       - name: Check all jobs passed
         run: |
-          if [[ "${{ needs.lint.result }}" == "failure" || \
-                "${{ needs.test.result }}" == "failure" || \
-                "${{ needs.docker-build.result }}" == "failure" || \
-                "${{ needs.terraform-lint.result }}" == "failure" ]]; then
-            echo "❌ CI failed — deploy will not run"
+          # A job result of 'skipped' means it wasn't needed — treat as pass
+          APP_CHANGED="${{ needs.detect-changes.outputs.app_changed }}"
+          INFRA_CHANGED="${{ needs.detect-changes.outputs.infra_changed }}"
+
+          FAILED=false
+
+          # Check app jobs only if app changed
+          if [[ "$APP_CHANGED" == "true" ]]; then
+            if [[ "${{ needs.lint.result }}"         == "failure" ]] || \
+               [[ "${{ needs.test.result }}"         == "failure" ]] || \
+               [[ "${{ needs.docker-build.result }}" == "failure" ]]; then
+              echo "❌ App CI failed — deploy will not run"
+              FAILED=true
+            fi
+          fi
+
+          # Check infra jobs only if infra changed
+          if [[ "$INFRA_CHANGED" == "true" ]]; then
+            if [[ "${{ needs.terraform-lint.result }}" == "failure" ]]; then
+              echo "❌ Terraform CI failed — deploy will not run"
+              FAILED=true
+            fi
+          fi
+
+          if [[ "$FAILED" == "true" ]]; then
             exit 1
           fi
-          echo "✅ All CI checks passed"
+
+          echo "✅ All required CI checks passed"
+          echo "   App jobs:   ${{ needs.lint.result }} / ${{ needs.test.result }} / ${{ needs.docker-build.result }}"
+          echo "   Infra jobs: ${{ needs.terraform-lint.result }}"
 
       - name: Trigger deploy pipeline
-        # Only dispatch deploy for pushes to dev or main — not PRs or feature branches.
-        # PRs run CI for validation only; deploy only happens on branch push.
         if: |
           github.event_name == 'push' &&
           (github.ref_name == 'dev' || github.ref_name == 'main')

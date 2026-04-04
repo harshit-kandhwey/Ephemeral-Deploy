@@ -275,19 +275,14 @@ module "ecs_green" {
 module "monitoring" {
   source = "../../modules/monitoring"
 
-  project                = local.project
-  environment            = local.environment
-  aws_region             = var.aws_region
-  public_subnet_id       = module.vpc.public_subnet_ids[0]
-  monitoring_sg_id       = module.security_groups.monitoring_sg_id
-  ecs_cluster_name       = module.ecs_blue.cluster_name # Cluster is shared
-  cloudwatch_log_groups  = [
-    "/ecs/${local.project}/${local.environment}-blue/api",
-    "/ecs/${local.project}/${local.environment}-green/api",
-    "/ecs/${local.project}/${local.environment}-blue/worker",
-    "/ecs/${local.project}/${local.environment}-green/worker",
-  ]
-  common_tags = local.common_tags
+  project          = local.project
+  environment      = local.environment
+  aws_region       = var.aws_region
+  public_subnet_id = module.vpc.public_subnet_ids[0]
+  monitoring_sg_id = module.security_groups.monitoring_sg_id
+  ecs_cluster_name = module.ecs_blue.cluster_name
+  state_bucket     = var.tf_state_bucket
+  common_tags      = local.common_tags
 }
 
 # ── SSM: Store active slot for next deployment ─
