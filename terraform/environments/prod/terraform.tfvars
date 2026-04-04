@@ -1,5 +1,5 @@
-github_org         = "YOUR_GITHUB_USERNAME" # ← change this
-github_repo        = "Ephemeral-Deploy"     # ← change to your repo name
+github_org         = "harshit-kandhwey"
+github_repo        = "Ephemeral-Deploy"
 tf_state_bucket    = "nexusdeploy-terraform-state"
 app_s3_bucket      = "nexusdeploy-attachments-prod"
 vpc_cidr           = "10.1.0.0/16"

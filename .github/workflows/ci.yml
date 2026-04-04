@@ -67,7 +67,7 @@ jobs:
         continue-on-error: true  # Non-blocking — shows awareness
 
       - name: Run safety (dependency vulnerability scan)
-        run: safety check -r app/requirements.txt
+        run: safety scan -r app/requirements.txt
         continue-on-error: true  # Non-blocking — shows awareness
 
   # ─────────────────────────────────────────────
@@ -120,7 +120,7 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/nexusdeploy_test
           REDIS_URL: redis://localhost:6379/15
           SECRET_KEY: test-secret-key
-          JWT_SECRET_KEY: test-jwt-key
+          JWT_SECRET_KEY: test-jwt-secret-key-minimum-32-bytes!!
           ENV: testing
         run: |
           cd app
@@ -190,7 +190,7 @@ jobs:
         continue-on-error: true
 
       - name: Upload Grype results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: ${{ steps.grype.outputs.sarif }}

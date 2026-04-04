@@ -3,6 +3,7 @@ from functools import wraps
 from flask import jsonify
 from flask_jwt_extended import get_jwt_identity
 
+from ..extensions import db
 from ..models.user import User
 
 
@@ -19,7 +20,7 @@ def get_current_user_or_401():
     except (ValueError, TypeError):
         return None, (jsonify({"error": "Invalid authentication"}), 401)
 
-    user = User.query.get(user_id)
+    user = db.session.get(User, user_id)
     if not user:
         return None, (jsonify({"error": "User not found"}), 401)
 
@@ -35,8 +36,12 @@ def role_required(roles):
     def decorator(f):
         @wraps(f)
         def wrapper(*args, **kwargs):
-            user_id = get_jwt_identity()
-            user = User.query.get(user_id)
+            try:
+                user_id = int(get_jwt_identity())
+            except (ValueError, TypeError):
+                return jsonify({"error": "Invalid authentication"}), 401
+
+            user = db.session.get(User, user_id)
 
             if not user or user.role not in roles:
                 return (

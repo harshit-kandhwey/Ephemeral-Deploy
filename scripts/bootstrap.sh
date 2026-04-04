@@ -3,10 +3,19 @@
 # bootstrap.sh — One-time AWS setup for NexusDeploy
 #
 # Creates:
-#   1. S3 bucket          — Terraform remote state
+#   1. S3 bucket           — Terraform remote state (versioned + encrypted)
 #   2. GitHub OIDC provider — keyless auth for GitHub Actions
 #   3. IAM role            — assumed by GitHub Actions via OIDC
-#   4. SSM parameters      — all app secrets, stored encrypted
+#   4. IAM inline policy   — least-privilege, covers deploy + cleanup
+#   5. SSM parameters      — all app secrets, stored encrypted
+#
+# Idempotent — safe to re-run at any time:
+#   S3 bucket       skips creation if exists; re-applies versioning/encryption (harmless)
+#   OIDC provider   skips entirely if exists
+#   IAM role        skips creation if exists; re-applies trust policy only
+#   IAM policy      always overwrites with latest policy from this script
+#                   (updating the policy here and re-running updates the role)
+#   SSM parameters  skips any parameter that already exists; never overwrites secrets
 #
 # Usage (run from repo root):
 #   export GITHUB_ORG=your-github-username
@@ -14,7 +23,7 @@
 #   export ENV=dev                          # dev or prod
 #   make bootstrap
 #     OR
-#   AWS_REGION=us-east-1 ./scripts/bootstrap.sh
+#   MSYS_NO_PATHCONV=1 AWS_REGION=us-east-1 bash scripts/bootstrap.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -206,18 +215,135 @@ else
     --assume-role-policy-document "$TRUST_POLICY" \
     --description "GitHub Actions OIDC deploy role for NexusDeploy CI/CD" \
     --tags Key=Project,Value="$PROJECT" Key=ManagedBy,Value=bootstrap
+  log_success "Role created: $ROLE_NAME"
+fi
 
-  # AdministratorAccess for bootstrap only.
-  # After first terraform apply, the IAM module creates a least-privilege
-  # policy. You can then detach AdministratorAccess and rely on that instead.
-  aws iam attach-role-policy \
+# ──────────────────────────────────────────────
+# STEP 4b: LEAST-PRIVILEGE INLINE POLICY
+# Applied directly to the role — no AdministratorAccess needed.
+# Covers all three phases:
+#   Phase 1 — First deploy   (terraform apply creates all infrastructure)
+#   Phase 2 — Ongoing deploy (image push + ECS update + state read/write)
+#   Phase 3 — Cleanup        (terraform destroy + cleanup.sh fallback)
+#
+# Uses put-role-policy (inline, 10240 char limit) rather than
+# create-policy (managed, 6144 char limit) because the full policy
+# covering all three phases exceeds the managed policy size limit.
+# ──────────────────────────────────────────────
+log_info "Applying least-privilege inline policy to $ROLE_NAME..."
+
+DEPLOY_POLICY=$(cat <<ENDPOLICY
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "TerraformState",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:ListBucket","s3:GetBucketVersioning","s3:GetEncryptionConfiguration"],
+      "Resource": ["arn:aws:s3:::${STATE_BUCKET}","arn:aws:s3:::${STATE_BUCKET}/*"]
+    },
+    {
+      "Sid": "SSM",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParameter","ssm:GetParameters","ssm:GetParametersByPath","ssm:DescribeParameters","ssm:PutParameter"],
+      "Resource": "arn:aws:ssm:*:${ACCOUNT_ID}:parameter/${PROJECT}/*"
+    },
+    {
+      "Sid": "SecretsManager",
+      "Effect": "Allow",
+      "Action": ["secretsmanager:CreateSecret","secretsmanager:UpdateSecret","secretsmanager:PutSecretValue","secretsmanager:GetSecretValue","secretsmanager:DescribeSecret","secretsmanager:DeleteSecret","secretsmanager:ListSecrets","secretsmanager:TagResource"],
+      "Resource": "arn:aws:secretsmanager:*:${ACCOUNT_ID}:secret:${PROJECT}/*"
+    },
+    {
+      "Sid": "ECRAuth",
+      "Effect": "Allow",
+      "Action": ["ecr:GetAuthorizationToken"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ECR",
+      "Effect": "Allow",
+      "Action": ["ecr:CreateRepository","ecr:DeleteRepository","ecr:DescribeRepositories","ecr:PutLifecyclePolicy","ecr:GetLifecyclePolicy","ecr:DeleteLifecyclePolicy","ecr:BatchCheckLayerAvailability","ecr:GetDownloadUrlForLayer","ecr:BatchGetImage","ecr:InitiateLayerUpload","ecr:UploadLayerPart","ecr:CompleteLayerUpload","ecr:PutImage","ecr:ListImages","ecr:BatchDeleteImage","ecr:TagResource","ecr:PutImageScanningConfiguration","ecr:PutImageTagMutability"],
+      "Resource": "arn:aws:ecr:*:${ACCOUNT_ID}:repository/${PROJECT}-*"
+    },
+    {
+      "Sid": "ECS",
+      "Effect": "Allow",
+      "Action": ["ecs:CreateCluster","ecs:DeleteCluster","ecs:DescribeClusters","ecs:UpdateCluster","ecs:UpdateClusterSettings","ecs:PutClusterCapacityProviders","ecs:RegisterTaskDefinition","ecs:DeregisterTaskDefinition","ecs:DescribeTaskDefinition","ecs:ListTaskDefinitions","ecs:CreateService","ecs:UpdateService","ecs:DeleteService","ecs:DescribeServices","ecs:ListServices","ecs:ListTasks","ecs:DescribeTasks","ecs:StopTask","ecs:TagResource","ecs:ListTagsForResource"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EC2Network",
+      "Effect": "Allow",
+      "Action": ["ec2:CreateVpc","ec2:DeleteVpc","ec2:DescribeVpcs","ec2:ModifyVpcAttribute","ec2:CreateSubnet","ec2:DeleteSubnet","ec2:DescribeSubnets","ec2:ModifySubnetAttribute","ec2:CreateRouteTable","ec2:DeleteRouteTable","ec2:DescribeRouteTables","ec2:AssociateRouteTable","ec2:DisassociateRouteTable","ec2:CreateRoute","ec2:DeleteRoute","ec2:CreateInternetGateway","ec2:DeleteInternetGateway","ec2:DescribeInternetGateways","ec2:AttachInternetGateway","ec2:DetachInternetGateway","ec2:CreateNatGateway","ec2:DeleteNatGateway","ec2:DescribeNatGateways","ec2:AllocateAddress","ec2:ReleaseAddress","ec2:DescribeAddresses","ec2:AssociateAddress","ec2:DisassociateAddress","ec2:CreateFlowLogs","ec2:DeleteFlowLogs","ec2:DescribeFlowLogs","ec2:CreateSecurityGroup","ec2:DeleteSecurityGroup","ec2:DescribeSecurityGroups","ec2:AuthorizeSecurityGroupIngress","ec2:RevokeSecurityGroupIngress","ec2:AuthorizeSecurityGroupEgress","ec2:RevokeSecurityGroupEgress"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EC2Instances",
+      "Effect": "Allow",
+      "Action": ["ec2:RunInstances","ec2:TerminateInstances","ec2:DescribeInstances","ec2:DescribeInstanceStatus","ec2:DescribeInstanceTypes","ec2:DescribeImages","ec2:DescribeNetworkInterfaces","ec2:CreateNetworkInterface","ec2:DeleteNetworkInterface","ec2:DescribeAvailabilityZones","ec2:DescribeAccountAttributes","ec2:DescribeVolumes","ec2:CreateTags","ec2:DeleteTags","ec2:DescribeTags","ec2:DescribeKeyPairs"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RDS",
+      "Effect": "Allow",
+      "Action": ["rds:CreateDBInstance","rds:DeleteDBInstance","rds:ModifyDBInstance","rds:DescribeDBInstances","rds:CreateDBSubnetGroup","rds:DeleteDBSubnetGroup","rds:DescribeDBSubnetGroups","rds:CreateDBParameterGroup","rds:DeleteDBParameterGroup","rds:DescribeDBParameterGroups","rds:DescribeDBParameters","rds:ModifyDBParameterGroup","rds:ResetDBParameterGroup","rds:AddTagsToResource","rds:RemoveTagsFromResource","rds:ListTagsForResource","rds:DescribeDBEngineVersions"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ElastiCache",
+      "Effect": "Allow",
+      "Action": ["elasticache:CreateCacheCluster","elasticache:DeleteCacheCluster","elasticache:DescribeCacheClusters","elasticache:ModifyCacheCluster","elasticache:CreateCacheSubnetGroup","elasticache:DeleteCacheSubnetGroup","elasticache:DescribeCacheSubnetGroups","elasticache:CreateCacheParameterGroup","elasticache:DeleteCacheParameterGroup","elasticache:DescribeCacheParameterGroups","elasticache:AddTagsToResource","elasticache:RemoveTagsFromResource","elasticache:ListTagsForResource"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "Observability",
+      "Effect": "Allow",
+      "Action": ["cloudwatch:PutMetricAlarm","cloudwatch:DeleteAlarms","cloudwatch:DescribeAlarms","cloudwatch:GetMetricData","cloudwatch:GetMetricStatistics","cloudwatch:ListMetrics","cloudwatch:PutDashboard","cloudwatch:DeleteDashboards","cloudwatch:GetDashboard","cloudwatch:ListDashboards","cloudwatch:TagResource","logs:CreateLogGroup","logs:DeleteLogGroup","logs:DescribeLogGroups","logs:PutRetentionPolicy","logs:DeleteRetentionPolicy","logs:TagLogGroup","logs:TagResource","logs:CreateLogStream","logs:DeleteLogStream","logs:DescribeLogStreams","logs:PutLogEvents","logs:GetLogEvents","logs:FilterLogEvents","logs:PutResourcePolicy","logs:DeleteResourcePolicy","logs:DescribeResourcePolicies"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IAM",
+      "Effect": "Allow",
+      "Action": ["iam:CreateRole","iam:DeleteRole","iam:GetRole","iam:UpdateAssumeRolePolicy","iam:UpdateRole","iam:TagRole","iam:ListRolePolicies","iam:ListAttachedRolePolicies","iam:PutRolePolicy","iam:GetRolePolicy","iam:DeleteRolePolicy","iam:AttachRolePolicy","iam:DetachRolePolicy","iam:PassRole","iam:CreateInstanceProfile","iam:DeleteInstanceProfile","iam:GetInstanceProfile","iam:AddRoleToInstanceProfile","iam:RemoveRoleFromInstanceProfile","iam:ListInstanceProfilesForRole","iam:CreateOpenIDConnectProvider","iam:DeleteOpenIDConnectProvider","iam:GetOpenIDConnectProvider","iam:UpdateOpenIDConnectProviderThumbprint","iam:ListOpenIDConnectProviders","iam:CreatePolicy","iam:DeletePolicy","iam:GetPolicy","iam:GetPolicyVersion","iam:ListPolicyVersions","iam:CreatePolicyVersion","iam:DeletePolicyVersion"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AutoScaling",
+      "Effect": "Allow",
+      "Action": ["application-autoscaling:RegisterScalableTarget","application-autoscaling:DeregisterScalableTarget","application-autoscaling:DescribeScalableTargets","application-autoscaling:PutScalingPolicy","application-autoscaling:DeleteScalingPolicy","application-autoscaling:DescribeScalingPolicies"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "TaggingAndSTS",
+      "Effect": "Allow",
+      "Action": ["tag:GetResources","tag:GetTagKeys","tag:GetTagValues","sts:GetCallerIdentity"],
+      "Resource": "*"
+    }
+  ]
+}
+ENDPOLICY
+)
+
+aws iam put-role-policy \
+  --role-name "$ROLE_NAME" \
+  --policy-name "${PROJECT}-github-actions-full-deploy" \
+  --policy-document "$DEPLOY_POLICY" \
+  --no-cli-pager
+
+log_success "Least-privilege policy applied to $ROLE_NAME"
+
+# Detach AdministratorAccess if it was previously attached
+# (safe to run even if it was never attached)
+ADMIN_ATTACHED=$(aws iam list-attached-role-policies \
+  --role-name "$ROLE_NAME" \
+  --query 'AttachedPolicies[?PolicyName==`AdministratorAccess`].PolicyName' \
+  --output text 2>/dev/null || echo "")
+if [[ -n "$ADMIN_ATTACHED" ]]; then
+  aws iam detach-role-policy \
     --role-name "$ROLE_NAME" \
     --policy-arn "arn:aws:iam::aws:policy/AdministratorAccess"
-
-  log_success "Role created: $ROLE_NAME"
-  log_warn "⚠️  AdministratorAccess attached for bootstrap."
-  log_warn "   After first deploy, replace with the least-privilege"
-  log_warn "   policy created by the IAM Terraform module."
+  log_success "AdministratorAccess detached (replaced by least-privilege policy)"
 fi
 
 # ──────────────────────────────────────────────
@@ -304,6 +430,7 @@ echo ""
 echo "  S3 State Bucket : s3://$STATE_BUCKET  (versioned + encrypted)"
 echo "  OIDC Provider   : $OIDC_ARN"
 echo "  IAM Role        : $ROLE_ARN"
+echo "  IAM Policy      : least-privilege inline (covers deploy + cleanup)"
 echo ""
 echo -e "${YELLOW}Next steps:${NC}"
 echo ""
@@ -323,8 +450,4 @@ echo "       github_repo = \"$GITHUB_REPO\""
 echo ""
 echo "  4. Push to trigger your first deployment:"
 echo "     git push origin dev"
-echo ""
-echo "  5. After first successful deploy, tighten IAM:"
-echo "     Detach AdministratorAccess from $ROLE_NAME"
-echo "     Attach the least-privilege policy created by the IAM module"
 echo ""
