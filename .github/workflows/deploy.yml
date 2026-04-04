@@ -109,9 +109,16 @@ jobs:
           ENV="${{ github.event.inputs.environment }}"
 
           # Get the latest image digest currently in ECR
-          API_IMAGE=$(aws ecr describe-images             --repository-name "nexusdeploy-api-$ENV"             --region ${{ env.AWS_REGION }}             --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]'             --output text 2>/dev/null || echo "latest")
+          # Prefer SHA-tagged image over 'latest' — imageTags[0] order is not guaranteed
+          API_TAGS=$(aws ecr describe-images             --repository-name "nexusdeploy-api-$ENV"             --region ${{ env.AWS_REGION }}             --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags'             --output text 2>/dev/null || echo "latest")
+          API_IMAGE=$(echo "$API_TAGS" | tr '	' '
+' | grep -v '^latest$' | head -1)
+          API_IMAGE="${API_IMAGE:-latest}"
 
-          WORKER_IMAGE=$(aws ecr describe-images             --repository-name "nexusdeploy-worker-$ENV"             --region ${{ env.AWS_REGION }}             --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]'             --output text 2>/dev/null || echo "latest")
+          WORKER_TAGS=$(aws ecr describe-images             --repository-name "nexusdeploy-worker-$ENV"             --region ${{ env.AWS_REGION }}             --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags'             --output text 2>/dev/null || echo "latest")
+          WORKER_IMAGE=$(echo "$WORKER_TAGS" | tr '	' '
+' | grep -v '^latest$' | head -1)
+          WORKER_IMAGE="${WORKER_IMAGE:-latest}"
 
           echo "api_image=$REGISTRY/nexusdeploy-api-$ENV:$API_IMAGE"       >> $GITHUB_OUTPUT
           echo "worker_image=$REGISTRY/nexusdeploy-worker-$ENV:$WORKER_IMAGE" >> $GITHUB_OUTPUT
@@ -298,7 +305,7 @@ jobs:
       always() &&
       needs.setup.outputs.environment == 'dev' &&
       needs.setup.outputs.tf_action == 'apply' &&
-      needs.ecr-provision.result == 'success' &&
+      (needs.ecr-provision.result == 'success' || needs.ecr-provision.result == 'skipped') &&
       (needs.push-image.result == 'success' || needs.setup.outputs.app_changed == 'false')
     environment: dev
 
@@ -396,7 +403,7 @@ jobs:
       always() &&
       needs.setup.outputs.environment == 'prod' &&
       needs.setup.outputs.tf_action == 'apply' &&
-      needs.ecr-provision.result == 'success' &&
+      (needs.ecr-provision.result == 'success' || needs.ecr-provision.result == 'skipped') &&
       (needs.push-image.result == 'success' || needs.setup.outputs.app_changed == 'false')
     environment: prod   # Requires manual approval in GitHub Environments settings
 

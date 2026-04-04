@@ -105,6 +105,13 @@ resource "aws_iam_role_policy" "monitoring_cloudwatch" {
         Effect = "Allow"
         Action = ["s3:GetObject"]
         Resource = "arn:aws:s3:::${var.state_bucket}/monitoring/*"
+      },
+      {
+        # Fetch Grafana password at runtime — avoids embedding secrets in user_data
+        Sid    = "SSMGrafanaPassword"
+        Effect = "Allow"
+        Action = ["ssm:GetParameter"]
+        Resource = "arn:aws:ssm:*:*:parameter/${var.project}/${var.environment}/monitoring/grafana_password"
       }
     ]
   })
@@ -150,12 +157,13 @@ resource "aws_instance" "monitoring" {
   iam_instance_profile   = aws_iam_instance_profile.monitoring.name
 
   user_data = base64encode(templatefile("${path.module}/templates/monitoring-userdata.sh.tpl", {
-    project               = var.project
-    environment           = var.environment
-    aws_region            = var.aws_region
-    ecs_cluster_name      = var.ecs_cluster_name
-    grafana_password      = var.grafana_admin_password
-    state_bucket          = var.state_bucket
+    project          = var.project
+    environment      = var.environment
+    aws_region       = var.aws_region
+    ecs_cluster_name = var.ecs_cluster_name
+    state_bucket     = var.state_bucket
+    # grafana_password intentionally omitted — fetched at runtime from SSM
+    # to avoid embedding secrets in EC2 user_data (visible in AWS console)
   }))
 
   # Replace instance when user_data changes (new config = new boot)

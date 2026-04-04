@@ -2,9 +2,11 @@ region: NEXUSDEPLOY_REGION
 metrics:
   - aws_namespace: AWS/ECS
     aws_metric_name: CPUUtilization
-    aws_dimensions:
+    aws_dimensions: [ClusterName, ServiceName]
+    aws_dimension_select:
       ClusterName: [NEXUSDEPLOY_CLUSTER]
       ServiceName: [NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-api, NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-worker]
+    aws_statistics: [Average]
     period_seconds: 300
     set_timestamp: false
     metrics:
@@ -14,9 +16,11 @@ metrics:
 
   - aws_namespace: AWS/ECS
     aws_metric_name: MemoryUtilization
-    aws_dimensions:
+    aws_dimensions: [ClusterName, ServiceName]
+    aws_dimension_select:
       ClusterName: [NEXUSDEPLOY_CLUSTER]
       ServiceName: [NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-api, NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-worker]
+    aws_statistics: [Average]
     period_seconds: 300
     set_timestamp: false
     metrics:
@@ -26,8 +30,10 @@ metrics:
 
   - aws_namespace: AWS/RDS
     aws_metric_name: CPUUtilization
-    aws_dimensions:
+    aws_dimensions: [DBInstanceIdentifier]
+    aws_dimension_select:
       DBInstanceIdentifier: [NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-postgres]
+    aws_statistics: [Average]
     period_seconds: 300
     set_timestamp: false
     metrics:
@@ -37,8 +43,10 @@ metrics:
 
   - aws_namespace: AWS/RDS
     aws_metric_name: DatabaseConnections
-    aws_dimensions:
+    aws_dimensions: [DBInstanceIdentifier]
+    aws_dimension_select:
       DBInstanceIdentifier: [NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-postgres]
+    aws_statistics: [Average]
     period_seconds: 300
     set_timestamp: false
     metrics:
@@ -48,8 +56,10 @@ metrics:
 
   - aws_namespace: AWS/ElastiCache
     aws_metric_name: DatabaseMemoryUsagePercentage
-    aws_dimensions:
+    aws_dimensions: [CacheClusterId]
+    aws_dimension_select:
       CacheClusterId: [NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-redis]
+    aws_statistics: [Average]
     period_seconds: 300
     set_timestamp: false
     metrics:

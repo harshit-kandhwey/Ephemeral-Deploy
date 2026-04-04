@@ -14,5 +14,6 @@ datasources:
     access: proxy
     jsonData:
       authType: ec2_iam_role
+      # NEXUSDEPLOY_REGION is substituted at boot by monitoring-userdata.sh
       defaultRegion: NEXUSDEPLOY_REGION
       logsTimeout: "30s"
