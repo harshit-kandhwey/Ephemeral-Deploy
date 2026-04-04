@@ -37,10 +37,10 @@ dnf install -y wget curl jq
 
 # ── Install Node Exporter ─────────────────────────────────────────────────────
 NODEXP_VERSION="1.7.0"
-wget -q https://github.com/prometheus/node_exporter/releases/download/v${NODEXP_VERSION}/node_exporter-${NODEXP_VERSION}.linux-amd64.tar.gz
-tar xf node_exporter-${NODEXP_VERSION}.linux-amd64.tar.gz
-mv node_exporter-${NODEXP_VERSION}.linux-amd64/node_exporter /usr/local/bin/
-rm -rf node_exporter-${NODEXP_VERSION}*
+wget -q https://github.com/prometheus/node_exporter/releases/download/v$${NODEXP_VERSION}/node_exporter-$${NODEXP_VERSION}.linux-amd64.tar.gz
+tar xf node_exporter-$${NODEXP_VERSION}.linux-amd64.tar.gz
+mv node_exporter-$${NODEXP_VERSION}.linux-amd64/node_exporter /usr/local/bin/
+rm -rf node_exporter-$${NODEXP_VERSION}*
 useradd -rs /bin/false node_exporter || true
 
 cat > /etc/systemd/system/node_exporter.service << 'EOF'
@@ -58,11 +58,11 @@ EOF
 
 # ── Install Prometheus ────────────────────────────────────────────────────────
 PROM_VERSION="2.49.1"
-wget -q https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz
-tar xf prometheus-${PROM_VERSION}.linux-amd64.tar.gz
-mv prometheus-${PROM_VERSION}.linux-amd64/prometheus /usr/local/bin/
-mv prometheus-${PROM_VERSION}.linux-amd64/promtool   /usr/local/bin/
-rm -rf prometheus-${PROM_VERSION}*
+wget -q https://github.com/prometheus/prometheus/releases/download/v$${PROM_VERSION}/prometheus-$${PROM_VERSION}.linux-amd64.tar.gz
+tar xf prometheus-$${PROM_VERSION}.linux-amd64.tar.gz
+mv prometheus-$${PROM_VERSION}.linux-amd64/prometheus /usr/local/bin/
+mv prometheus-$${PROM_VERSION}.linux-amd64/promtool   /usr/local/bin/
+rm -rf prometheus-$${PROM_VERSION}*
 mkdir -p /etc/prometheus /var/lib/prometheus
 useradd -rs /bin/false prometheus || true
 chown prometheus:prometheus /var/lib/prometheus
@@ -92,10 +92,10 @@ EOF
 # YACE is the Go-based drop-in replacement with identical config format and binary dist.
 # https://github.com/nerdswords/yet-another-cloudwatch-exporter
 YACE_VERSION="0.61.2"
-wget -q "https://github.com/nerdswords/yet-another-cloudwatch-exporter/releases/download/v${YACE_VERSION}/yet-another-cloudwatch-exporter_${YACE_VERSION}_Linux_x86_64.tar.gz"
-tar xf yet-another-cloudwatch-exporter_${YACE_VERSION}_Linux_x86_64.tar.gz
+wget -q "https://github.com/nerdswords/yet-another-cloudwatch-exporter/releases/download/v$${YACE_VERSION}/yet-another-cloudwatch-exporter_$${YACE_VERSION}_Linux_x86_64.tar.gz"
+tar xf yet-another-cloudwatch-exporter_$${YACE_VERSION}_Linux_x86_64.tar.gz
 mv yet-another-cloudwatch-exporter /usr/local/bin/yace
-rm -f yet-another-cloudwatch-exporter_${YACE_VERSION}_Linux_x86_64.tar.gz
+rm -f yet-another-cloudwatch-exporter_$${YACE_VERSION}_Linux_x86_64.tar.gz
 useradd -rs /bin/false yace || true
 mkdir -p /etc/yace
 chown yace:yace /etc/yace
@@ -200,8 +200,8 @@ echo "*/1 * * * * root /usr/local/bin/ecs-sd.sh" > /etc/cron.d/ecs-sd
 # Password was fetched from SSM at the top of this script (not embedded).
 # Escape special sed characters in the password (/, &, \ can break sed syntax)
 GRAFANA_PASSWORD_ESC=$(escape_sed "$GRAFANA_PASSWORD")
-sed -i "s/^;admin_password = admin/admin_password = ${GRAFANA_PASSWORD_ESC}/" /etc/grafana/grafana.ini
-sed -i "s/^admin_password = admin/admin_password = ${GRAFANA_PASSWORD_ESC}/"  /etc/grafana/grafana.ini
+sed -i "s/^;admin_password = admin/admin_password = $${GRAFANA_PASSWORD_ESC}/" /etc/grafana/grafana.ini
+sed -i "s/^admin_password = admin/admin_password = $${GRAFANA_PASSWORD_ESC}/"  /etc/grafana/grafana.ini
 sed -i "s/;allow_sign_up = true/allow_sign_up = false/"                       /etc/grafana/grafana.ini
 
 # ── Fix permissions ───────────────────────────────────────────────────────────
