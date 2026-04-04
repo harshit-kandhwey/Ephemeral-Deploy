@@ -2,20 +2,38 @@
 # Monitoring Module
 # Prometheus + Grafana on EC2 t3.micro (free tier)
 #
-# Architecture:
-#   EC2 t3.micro (public subnet, Elastic IP)
-#     ├── Prometheus  :9090  scrapes ECS /metrics endpoints
-#     ├── Grafana     :3000  visualizes Prometheus + CloudWatch
-#     └── Node Exporter:9100  system metrics for the EC2 itself
-#
-# Two monitoring approaches shown side-by-side:
-#   1. Prometheus - pull-based, real-time metrics from app
-#   2. CloudWatch - AWS-native, logs + managed metrics (RDS, ElastiCache)
-#   Both data sources available in Grafana simultaneously
+# Config files are stored in S3 (s3://<state_bucket>/monitoring/config/)
+# and downloaded at EC2 boot time. This keeps user_data under the 16KB limit.
 # ─────────────────────────────────────────────
 
-# ── IAM Role for the monitoring EC2 instance ─
-# Needs: CloudWatch read, ECS describe (for service discovery), SSM for setup
+# ── Upload monitoring configs to S3 ──────────────────────────────────────────
+# These files are downloaded by the EC2 instance at boot via aws s3 cp.
+# Storing them in S3 avoids the 16KB EC2 user_data size limit.
+locals {
+  config_prefix = "monitoring/config"
+  config_files = {
+    "prometheus.yml"          = "${path.module}/files/prometheus.yml"
+    "cloudwatch-exporter.yml" = "${path.module}/files/cloudwatch-exporter.yml"
+    "grafana-datasources.yml" = "${path.module}/files/grafana-datasources.yml"
+    "grafana-dashboards.yml"  = "${path.module}/files/grafana-dashboards.yml"
+    "nexusdeploy-dashboard.json" = "${path.module}/files/nexusdeploy-dashboard.json"
+  }
+}
+
+resource "aws_s3_object" "monitoring_configs" {
+  for_each = local.config_files
+
+  bucket  = var.state_bucket
+  key     = "${local.config_prefix}/${each.key}"
+  content = file(each.value)
+
+  # Force re-upload when file contents change
+  etag = filemd5(each.value)
+
+  tags = var.common_tags
+}
+
+# ── IAM Role for the monitoring EC2 instance ─────────────────────────────────
 resource "aws_iam_role" "monitoring" {
   name = "${var.project}-${var.environment}-monitoring-ec2"
 
@@ -38,7 +56,6 @@ resource "aws_iam_role_policy" "monitoring_cloudwatch" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      # Read CloudWatch metrics and logs (for Grafana CloudWatch datasource)
       {
         Sid    = "CloudWatchRead"
         Effect = "Allow"
@@ -56,7 +73,6 @@ resource "aws_iam_role_policy" "monitoring_cloudwatch" {
         ]
         Resource = "*"
       },
-      # ECS service discovery - Prometheus needs to find task IPs
       {
         Sid    = "ECSServiceDiscovery"
         Effect = "Allow"
@@ -71,7 +87,6 @@ resource "aws_iam_role_policy" "monitoring_cloudwatch" {
         ]
         Resource = "*"
       },
-      # SSM Session Manager - allows 'make shell-monitoring' without SSH keys
       {
         Sid    = "SSMSessionManager"
         Effect = "Allow"
@@ -83,6 +98,13 @@ resource "aws_iam_role_policy" "monitoring_cloudwatch" {
           "ssmmessages:OpenDataChannel"
         ]
         Resource = "*"
+      },
+      {
+        # Download monitoring configs at boot — scoped to monitoring prefix only
+        Sid    = "S3MonitoringConfigs"
+        Effect = "Allow"
+        Action = ["s3:GetObject"]
+        Resource = "arn:aws:s3:::${var.state_bucket}/monitoring/*"
       }
     ]
   })
@@ -94,7 +116,20 @@ resource "aws_iam_instance_profile" "monitoring" {
   tags = var.common_tags
 }
 
-# ── Elastic IP for stable Grafana URL ────────
+# ── EC2 Instance ──────────────────────────────────────────────────────────────
+data "aws_ami" "amazon_linux_2023" {
+  most_recent = true
+  owners      = ["amazon"]
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-x86_64"]
+  }
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
 resource "aws_eip" "monitoring" {
   domain = "vpc"
   tags = merge(var.common_tags, {
@@ -107,67 +142,37 @@ resource "aws_eip_association" "monitoring" {
   allocation_id = aws_eip.monitoring.id
 }
 
-# ── Find latest Amazon Linux 2023 AMI ────────
-data "aws_ami" "amazon_linux_2023" {
-  most_recent = true
-  owners      = ["amazon"]
-
-  filter {
-    name   = "name"
-    values = ["al2023-ami-*-x86_64"]
-  }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
-}
-
-# ── EC2 Instance ──────────────────────────────
 resource "aws_instance" "monitoring" {
   ami                    = data.aws_ami.amazon_linux_2023.id
-  instance_type          = "t3.micro" # Free tier eligible
+  instance_type          = "t3.micro"
   subnet_id              = var.public_subnet_id
   vpc_security_group_ids = [var.monitoring_sg_id]
   iam_instance_profile   = aws_iam_instance_profile.monitoring.name
 
-  # No SSH key needed - use SSM Session Manager (more secure)
-  # key_name = "your-key"  ← commented intentionally
-
-  root_block_device {
-    volume_size = 8 # GB - minimal storage
-    volume_type = "gp3"
-    encrypted   = true
-    tags        = merge(var.common_tags, { Name = "${var.project}-${var.environment}-monitoring-root" })
-  }
-
-  # User data: install and configure everything at boot
   user_data = base64encode(templatefile("${path.module}/templates/monitoring-userdata.sh.tpl", {
     project               = var.project
     environment           = var.environment
     aws_region            = var.aws_region
     ecs_cluster_name      = var.ecs_cluster_name
     grafana_password      = var.grafana_admin_password
-    cloudwatch_log_groups = jsonencode(var.cloudwatch_log_groups)
+    state_bucket          = var.state_bucket
   }))
+
+  # Replace instance when user_data changes (new config = new boot)
+  user_data_replace_on_change = true
+
+  # Ensure configs are uploaded to S3 before instance boots
+  depends_on = [aws_s3_object.monitoring_configs]
 
   tags = merge(var.common_tags, {
     Name = "${var.project}-${var.environment}-monitoring"
-    Role = "monitoring"
   })
-
-  # Replace instance if user_data changes (new config)
-  lifecycle {
-    create_before_destroy = true
-  }
 }
 
-# ── CloudWatch Alarms (uses CloudWatch, not Prometheus) ──
-# These are independent of the EC2 instance - AWS-managed alerting
-# Shows knowledge of both monitoring approaches
-
+# ── CloudWatch Alarms ─────────────────────────────────────────────────────────
 resource "aws_cloudwatch_metric_alarm" "ecs_api_cpu_high" {
   alarm_name          = "${var.project}-${var.environment}-api-cpu-high"
+  alarm_description   = "ECS API service CPU > 80% for 4 minutes"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
   metric_name         = "CPUUtilization"
@@ -175,19 +180,17 @@ resource "aws_cloudwatch_metric_alarm" "ecs_api_cpu_high" {
   period              = 120
   statistic           = "Average"
   threshold           = 80
-  alarm_description   = "ECS API service CPU > 80% for 4 minutes"
   treat_missing_data  = "notBreaching"
-
   dimensions = {
-    ClusterName = var.ecs_cluster_name
+    ClusterName = "${var.project}-${var.environment}"
     ServiceName = "${var.project}-${var.environment}-api"
   }
-
   tags = var.common_tags
 }
 
 resource "aws_cloudwatch_metric_alarm" "rds_cpu_high" {
   alarm_name          = "${var.project}-${var.environment}-rds-cpu-high"
+  alarm_description   = "RDS CPU > 75%"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 3
   metric_name         = "CPUUtilization"
@@ -195,18 +198,16 @@ resource "aws_cloudwatch_metric_alarm" "rds_cpu_high" {
   period              = 300
   statistic           = "Average"
   threshold           = 75
-  alarm_description   = "RDS CPU > 75%"
   treat_missing_data  = "notBreaching"
-
   dimensions = {
     DBInstanceIdentifier = "${var.project}-${var.environment}-postgres"
   }
-
   tags = var.common_tags
 }
 
 resource "aws_cloudwatch_metric_alarm" "redis_memory_high" {
   alarm_name          = "${var.project}-${var.environment}-redis-memory-high"
+  alarm_description   = "Redis memory > 80%"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
   metric_name         = "DatabaseMemoryUsagePercentage"
@@ -214,84 +215,57 @@ resource "aws_cloudwatch_metric_alarm" "redis_memory_high" {
   period              = 300
   statistic           = "Average"
   threshold           = 80
-  alarm_description   = "Redis memory > 80%"
   treat_missing_data  = "notBreaching"
-
   dimensions = {
     CacheClusterId = "${var.project}-${var.environment}-redis"
   }
-
   tags = var.common_tags
 }
 
-# ── CloudWatch Dashboard ──────────────────────
-# A pre-built dashboard showing all services in one place
+# ── CloudWatch Dashboard ──────────────────────────────────────────────────────
 resource "aws_cloudwatch_dashboard" "main" {
   dashboard_name = "${var.project}-${var.environment}"
-
   dashboard_body = jsonencode({
     widgets = [
       {
-        type   = "metric"
-        x      = 0
-        y      = 0
-        width  = 8
-        height = 6
+        type = "metric", x = 0, y = 0, width = 8, height = 6
         properties = {
-          title  = "ECS API - CPU & Memory"
-          region = var.aws_region
+          title   = "ECS API - CPU & Memory"
           metrics = [
-            ["AWS/ECS", "CPUUtilization", "ClusterName", var.ecs_cluster_name, "ServiceName", "${var.project}-${var.environment}-api"],
-            ["AWS/ECS", "MemoryUtilization", "ClusterName", var.ecs_cluster_name, "ServiceName", "${var.project}-${var.environment}-api"]
+            ["AWS/ECS", "CPUUtilization",    "ClusterName", "${var.project}-${var.environment}", "ServiceName", "${var.project}-${var.environment}-api"],
+            ["AWS/ECS", "MemoryUtilization", "ClusterName", "${var.project}-${var.environment}", "ServiceName", "${var.project}-${var.environment}-api"]
           ]
-          period = 60
-          stat   = "Average"
+          period = 60, stat = "Average", region = var.aws_region
         }
       },
       {
-        type   = "metric"
-        x      = 8
-        y      = 0
-        width  = 8
-        height = 6
+        type = "metric", x = 8, y = 0, width = 8, height = 6
         properties = {
-          title  = "RDS - CPU & Connections"
-          region = var.aws_region
+          title   = "RDS - CPU & Connections"
           metrics = [
-            ["AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${var.project}-${var.environment}-postgres"],
+            ["AWS/RDS", "CPUUtilization",      "DBInstanceIdentifier", "${var.project}-${var.environment}-postgres"],
             ["AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "${var.project}-${var.environment}-postgres"]
           ]
-          period = 60
-          stat   = "Average"
+          period = 60, stat = "Average", region = var.aws_region
         }
       },
       {
-        type   = "metric"
-        x      = 16
-        y      = 0
-        width  = 8
-        height = 6
+        type = "metric", x = 16, y = 0, width = 8, height = 6
         properties = {
-          title  = "Redis - Memory & Connections"
-          region = var.aws_region
+          title   = "Redis - Memory & Connections"
           metrics = [
             ["AWS/ElastiCache", "DatabaseMemoryUsagePercentage", "CacheClusterId", "${var.project}-${var.environment}-redis"],
-            ["AWS/ElastiCache", "CurrConnections", "CacheClusterId", "${var.project}-${var.environment}-redis"]
+            ["AWS/ElastiCache", "CurrConnections",               "CacheClusterId", "${var.project}-${var.environment}-redis"]
           ]
-          period = 60
-          stat   = "Average"
+          period = 60, stat = "Average", region = var.aws_region
         }
       },
       {
-        type   = "log"
-        x      = 0
-        y      = 6
-        width  = 24
-        height = 6
+        type = "log", x = 0, y = 6, width = 24, height = 6
         properties = {
           title  = "API Error Logs (last 30 min)"
-          region = var.aws_region
           query  = "SOURCE '/ecs/${var.project}/${var.environment}/api' | fields @timestamp, @message | filter @message like /ERROR/ | sort @timestamp desc | limit 50"
+          region = var.aws_region
           view   = "table"
         }
       }

@@ -41,12 +41,30 @@ jobs:
   setup:
     name: Setup Context
     runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+
+    permissions:
+      id-token: write   # needed for AWS credentials on infra-only image lookup
+      contents: read
+
     outputs:
-      environment: ${{ steps.ctx.outputs.environment }}
-      tf_action:   ${{ steps.ctx.outputs.tf_action }}
-      image_tag:   ${{ github.sha }}
+      environment:    ${{ steps.ctx.outputs.environment }}
+      tf_action:      ${{ steps.ctx.outputs.tf_action }}
+      image_tag:      ${{ github.sha }}
+      app_changed:    ${{ steps.changed.outputs.app_changed }}
+      current_api:    ${{ steps.current_images.outputs.api_image }}
+      current_worker: ${{ steps.current_images.outputs.worker_image }}
 
     steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: Setup-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: actions/checkout@v4
+
       - name: Determine context
         id: ctx
         run: |
@@ -57,6 +75,48 @@ jobs:
           echo "📦 Environment: ${{ github.event.inputs.environment }}"
           echo "⚙️  Action:      ${{ github.event.inputs.action }}"
 
+      - name: Detect changed files
+        id: changed
+        run: |
+          # Fetch the previous commit to diff against
+          git fetch origin --depth=2 2>/dev/null || true
+
+          # Get list of changed files in this push
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "app/")
+
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          # Check if any app/ files changed
+          if echo "$CHANGED" | grep -q "^app/"; then
+            echo "app_changed=true" >> $GITHUB_OUTPUT
+            echo "✅ App code changed — image build required"
+          else
+            echo "app_changed=false" >> $GITHUB_OUTPUT
+            echo "⏭️  No app code changes — skipping image build"
+          fi
+
+      - name: Get current image URIs (infra-only deploy)
+        id: current_images
+        # When app hasn't changed, look up the currently deployed image from ECR
+        # so Terraform apply gets the real image URI not an empty string
+        if: steps.changed.outputs.app_changed == 'false'
+        env:
+          ENV: ${{ github.event.inputs.environment }}
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          REGISTRY="$ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          ENV="${{ github.event.inputs.environment }}"
+
+          # Get the latest image digest currently in ECR
+          API_IMAGE=$(aws ecr describe-images             --repository-name "nexusdeploy-api-$ENV"             --region ${{ env.AWS_REGION }}             --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]'             --output text 2>/dev/null || echo "latest")
+
+          WORKER_IMAGE=$(aws ecr describe-images             --repository-name "nexusdeploy-worker-$ENV"             --region ${{ env.AWS_REGION }}             --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]'             --output text 2>/dev/null || echo "latest")
+
+          echo "api_image=$REGISTRY/nexusdeploy-api-$ENV:$API_IMAGE"       >> $GITHUB_OUTPUT
+          echo "worker_image=$REGISTRY/nexusdeploy-worker-$ENV:$WORKER_IMAGE" >> $GITHUB_OUTPUT
+          echo "ℹ️  Using existing images: api=$API_IMAGE worker=$WORKER_IMAGE"
+
   # ─────────────────────────────────────────────
   # Phase 1a: Provision ECR repositories
   # Runs in parallel with image build.
@@ -66,6 +126,8 @@ jobs:
     name: Provision ECR (${{ needs.setup.outputs.environment }})
     runs-on: ubuntu-latest
     needs: setup
+    # Only needed when app changed — ECR repos already exist on infra-only pushes
+    if: needs.setup.outputs.app_changed == 'true'
     environment: ${{ needs.setup.outputs.environment }}
 
     permissions:
@@ -125,6 +187,8 @@ jobs:
     name: Build Images (${{ needs.setup.outputs.environment }})
     runs-on: ubuntu-latest
     needs: setup
+    # Skip when only infra/terraform files changed — saves ~3 minutes per deploy
+    if: needs.setup.outputs.app_changed == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -163,6 +227,11 @@ jobs:
     name: Push Images (${{ needs.setup.outputs.environment }})
     runs-on: ubuntu-latest
     needs: [setup, ecr-provision, build-image]
+    if: |
+      always() &&
+      needs.setup.outputs.app_changed == 'true' &&
+      needs.ecr-provision.result == 'success' &&
+      needs.build-image.result == 'success'
     environment: ${{ needs.setup.outputs.environment }}
 
     permissions:
@@ -224,7 +293,13 @@ jobs:
     name: Deploy → dev
     runs-on: ubuntu-latest
     needs: [setup, ecr-provision, push-image]
-    if: needs.setup.outputs.environment == 'dev' && needs.setup.outputs.tf_action == 'apply'
+    # Run when: env is dev AND (image was pushed OR only infra changed)
+    if: |
+      always() &&
+      needs.setup.outputs.environment == 'dev' &&
+      needs.setup.outputs.tf_action == 'apply' &&
+      needs.ecr-provision.result == 'success' &&
+      (needs.push-image.result == 'success' || needs.setup.outputs.app_changed == 'false')
     environment: dev
 
     permissions:
@@ -262,8 +337,9 @@ jobs:
         # This apply creates VPC, ECS, RDS, ElastiCache etc. with real image tags.
         working-directory: terraform/environments/dev
         env:
-          TF_VAR_api_image:    ${{ needs.push-image.outputs.api_image }}
-          TF_VAR_worker_image: ${{ needs.push-image.outputs.worker_image }}
+          # Use newly pushed image if app changed, otherwise use current ECR image
+          TF_VAR_api_image:    ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}
+          TF_VAR_worker_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.worker_image || needs.setup.outputs.current_worker }}
           TF_VAR_git_commit:   ${{ github.sha }}
         run: terraform apply -var-file=terraform.tfvars -auto-approve
 
@@ -316,7 +392,12 @@ jobs:
     name: Deploy → prod (blue-green)
     runs-on: ubuntu-latest
     needs: [setup, ecr-provision, push-image]
-    if: needs.setup.outputs.environment == 'prod' && needs.setup.outputs.tf_action == 'apply'
+    if: |
+      always() &&
+      needs.setup.outputs.environment == 'prod' &&
+      needs.setup.outputs.tf_action == 'apply' &&
+      needs.ecr-provision.result == 'success' &&
+      (needs.push-image.result == 'success' || needs.setup.outputs.app_changed == 'false')
     environment: prod   # Requires manual approval in GitHub Environments settings
 
     permissions:
@@ -389,8 +470,8 @@ jobs:
         id: tf_apply
         working-directory: terraform/environments/prod
         env:
-          TF_VAR_api_image:    ${{ needs.push-image.outputs.api_image }}
-          TF_VAR_worker_image: ${{ needs.push-image.outputs.worker_image }}
+          TF_VAR_api_image:    ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}
+          TF_VAR_worker_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.worker_image || needs.setup.outputs.current_worker }}
           TF_VAR_git_commit:   ${{ github.sha }}
           # The NEW slot becomes active in this apply
           TF_VAR_deployment_slot: ${{ steps.slot.outputs.new_slot }}

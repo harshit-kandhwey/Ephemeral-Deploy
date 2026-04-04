@@ -17,6 +17,12 @@ resource "aws_iam_openid_connect_provider" "github" {
   thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1"]
 
   tags = var.common_tags
+
+  lifecycle {
+    # bootstrap.sh is the owner of this resource.
+    # Terraform imports it for reference but never modifies it.
+    ignore_changes = all
+  }
 }
 
 # ── GitHub Actions Deploy Role ────────────────
@@ -48,6 +54,12 @@ resource "aws_iam_role" "github_actions_deploy" {
   })
 
   tags = var.common_tags
+
+  lifecycle {
+    # bootstrap.sh owns this role and its trust policy.
+    # Permissions are managed via bootstrap — never overwritten by Terraform.
+    ignore_changes = all
+  }
 }
 
 # ── Deploy Role Policy ────────────────────────
@@ -110,9 +122,9 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
       },
       # Terraform state locking
       {
-        Sid      = "TerraformStateLock"
-        Effect   = "Allow"
-        Action   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"]
+        Sid    = "TerraformStateLock"
+        Effect = "Allow"
+        Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"]
         Resource = "arn:aws:dynamodb:*:*:table/${var.tf_lock_table}"
       },
       # Infrastructure: EC2 and VPC (Terraform-managed only)
@@ -221,13 +233,20 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
       },
       # IAM: PassRole limited to project-scoped roles (security critical)
       {
-        Sid      = "IAMPassRole"
-        Effect   = "Allow"
-        Action   = ["iam:PassRole"]
+        Sid    = "IAMPassRole"
+        Effect = "Allow"
+        Action = ["iam:PassRole"]
         Resource = "arn:aws:iam::*:role/${var.project}-*"
       }
     ]
   })
+
+  lifecycle {
+    # bootstrap.sh is the sole owner of this policy.
+    # All permission changes go through bootstrap.sh — not Terraform.
+    # This prevents Terraform from ever downgrading carefully managed permissions.
+    ignore_changes = all
+  }
 }
 
 # ── ECS Task Execution Role ───────────────────

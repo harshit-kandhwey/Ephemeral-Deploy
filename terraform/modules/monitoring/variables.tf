@@ -39,10 +39,9 @@ variable "grafana_admin_password" {
   sensitive   = true
 }
 
-variable "cloudwatch_log_groups" {
-  description = "List of CloudWatch log group names to surface in Grafana"
-  type        = list(string)
-  default     = []
+variable "state_bucket" {
+  description = "S3 bucket name used for Terraform state — monitoring configs are stored here under monitoring/config/"
+  type        = string
 }
 
 variable "common_tags" {

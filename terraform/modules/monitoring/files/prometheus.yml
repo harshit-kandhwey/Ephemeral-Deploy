@@ -1,0 +1,36 @@
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  external_labels:
+    project:     'NEXUSDEPLOY_PROJECT'
+    environment: 'NEXUSDEPLOY_ENV'
+    region:      'NEXUSDEPLOY_REGION'
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['localhost:9100']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'monitoring-ec2'
+
+  - job_name: 'nexusdeploy-api'
+    file_sd_configs:
+      - files:
+          - '/etc/prometheus/ecs-targets.json'
+        refresh_interval: 30s
+    metrics_path: '/metrics'
+    scheme: http
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+
+  - job_name: 'cloudwatch-ecs'
+    static_configs:
+      - targets: ['localhost:9106']
+    honor_labels: true

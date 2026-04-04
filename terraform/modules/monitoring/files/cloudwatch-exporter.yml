@@ -1,0 +1,58 @@
+region: NEXUSDEPLOY_REGION
+metrics:
+  - aws_namespace: AWS/ECS
+    aws_metric_name: CPUUtilization
+    aws_dimensions:
+      ClusterName: [NEXUSDEPLOY_CLUSTER]
+      ServiceName: [NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-api, NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-worker]
+    period_seconds: 300
+    set_timestamp: false
+    metrics:
+      - name: ecs_cpu_utilization
+        help: ECS service CPU utilization percentage
+        type: gauge
+
+  - aws_namespace: AWS/ECS
+    aws_metric_name: MemoryUtilization
+    aws_dimensions:
+      ClusterName: [NEXUSDEPLOY_CLUSTER]
+      ServiceName: [NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-api, NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-worker]
+    period_seconds: 300
+    set_timestamp: false
+    metrics:
+      - name: ecs_memory_utilization
+        help: ECS service memory utilization percentage
+        type: gauge
+
+  - aws_namespace: AWS/RDS
+    aws_metric_name: CPUUtilization
+    aws_dimensions:
+      DBInstanceIdentifier: [NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-postgres]
+    period_seconds: 300
+    set_timestamp: false
+    metrics:
+      - name: rds_cpu_utilization
+        help: RDS database CPU utilization percentage
+        type: gauge
+
+  - aws_namespace: AWS/RDS
+    aws_metric_name: DatabaseConnections
+    aws_dimensions:
+      DBInstanceIdentifier: [NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-postgres]
+    period_seconds: 300
+    set_timestamp: false
+    metrics:
+      - name: rds_database_connections
+        help: RDS active database connections
+        type: gauge
+
+  - aws_namespace: AWS/ElastiCache
+    aws_metric_name: DatabaseMemoryUsagePercentage
+    aws_dimensions:
+      CacheClusterId: [NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-redis]
+    period_seconds: 300
+    set_timestamp: false
+    metrics:
+      - name: redis_memory_usage_percentage
+        help: Redis memory usage percentage
+        type: gauge
