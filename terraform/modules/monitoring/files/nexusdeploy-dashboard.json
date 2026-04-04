@@ -23,10 +23,11 @@
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(app_request_latency_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum(rate(app_request_latency_seconds_bucket[5m])) by (le))",
           "legendFormat": "p95"
         }
-      ]
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
     },
     {
       "id": 3,
@@ -67,15 +68,15 @@
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(app_request_latency_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.50, sum(rate(app_request_latency_seconds_bucket[5m])) by (le, endpoint, method))",
           "legendFormat": "p50"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(app_request_latency_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum(rate(app_request_latency_seconds_bucket[5m])) by (le, endpoint, method))",
           "legendFormat": "p95"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(app_request_latency_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.99, sum(rate(app_request_latency_seconds_bucket[5m])) by (le, endpoint, method))",
           "legendFormat": "p99"
         }
       ]

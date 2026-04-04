@@ -64,6 +64,8 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2   # needed for git diff HEAD~1 HEAD in changed-files detection
 
       - name: Determine context
         id: ctx
@@ -78,10 +80,7 @@ jobs:
       - name: Detect changed files
         id: changed
         run: |
-          # Fetch the previous commit to diff against
-          git fetch origin --depth=2 2>/dev/null || true
-
-          # Get list of changed files in this push
+          # Get list of changed files — fetch-depth: 2 ensures HEAD~1 is available
           CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "app/")
 
           echo "Changed files:"
@@ -111,13 +110,11 @@ jobs:
           # Get the latest image digest currently in ECR
           # Prefer SHA-tagged image over 'latest' — imageTags[0] order is not guaranteed
           API_TAGS=$(aws ecr describe-images             --repository-name "nexusdeploy-api-$ENV"             --region ${{ env.AWS_REGION }}             --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags'             --output text 2>/dev/null || echo "latest")
-          API_IMAGE=$(echo "$API_TAGS" | tr '	' '
-' | grep -v '^latest$' | head -1)
+          API_IMAGE=$(echo "$API_TAGS" | tr $'\t' $'\n' | grep -v '^latest$' | head -1)
           API_IMAGE="${API_IMAGE:-latest}"
 
           WORKER_TAGS=$(aws ecr describe-images             --repository-name "nexusdeploy-worker-$ENV"             --region ${{ env.AWS_REGION }}             --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags'             --output text 2>/dev/null || echo "latest")
-          WORKER_IMAGE=$(echo "$WORKER_TAGS" | tr '	' '
-' | grep -v '^latest$' | head -1)
+          WORKER_IMAGE=$(echo "$WORKER_TAGS" | tr $'\t' $'\n' | grep -v '^latest$' | head -1)
           WORKER_IMAGE="${WORKER_IMAGE:-latest}"
 
           echo "api_image=$REGISTRY/nexusdeploy-api-$ENV:$API_IMAGE"       >> $GITHUB_OUTPUT

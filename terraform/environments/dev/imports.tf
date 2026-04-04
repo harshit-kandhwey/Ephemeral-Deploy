@@ -1,5 +1,13 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # imports.tf — Adopt bootstrap-created resources into Terraform state
+
+# Fetch current account ID dynamically — avoids hardcoding and works across
+# any AWS account without modification
+data "aws_caller_identity" "current" {}
+
+locals {
+  account_id = data.aws_caller_identity.current.account_id
+}
 #
 # The GitHub OIDC provider and deploy IAM role are owned by bootstrap.sh.
 # Bootstrap is the source of truth for their permissions — Terraform imports
@@ -16,7 +24,7 @@
 # GitHub OIDC provider — owned by bootstrap.sh, never modified by Terraform
 import {
   to = module.iam.aws_iam_openid_connect_provider.github[0]
-  id = "arn:aws:iam::415838720130:oidc-provider/token.actions.githubusercontent.com"
+  id = "arn:aws:iam::${local.account_id}:oidc-provider/token.actions.githubusercontent.com"
 }
 
 # GitHub Actions deploy IAM role — owned by bootstrap.sh

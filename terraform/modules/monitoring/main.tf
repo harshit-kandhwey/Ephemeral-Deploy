@@ -1,5 +1,7 @@
 # ─────────────────────────────────────────────
 # Monitoring Module
+
+data "aws_caller_identity" "current" {}
 # Prometheus + Grafana on EC2 t3.micro (free tier)
 #
 # Config files are stored in S3 (s3://<state_bucket>/monitoring/config/)
@@ -11,26 +13,42 @@
 # Storing them in S3 avoids the 16KB EC2 user_data size limit.
 locals {
   config_prefix = "monitoring/config"
-  config_files = {
-    "prometheus.yml"          = "${path.module}/files/prometheus.yml"
-    "cloudwatch-exporter.yml" = "${path.module}/files/cloudwatch-exporter.yml"
-    "grafana-datasources.yml" = "${path.module}/files/grafana-datasources.yml"
-    "grafana-dashboards.yml"  = "${path.module}/files/grafana-dashboards.yml"
+
+  # Static config files uploaded as-is
+  static_config_files = {
+    "prometheus.yml"             = "${path.module}/files/prometheus.yml"
+    "cloudwatch-exporter.yml"    = "${path.module}/files/cloudwatch-exporter.yml"
+    "grafana-dashboards.yml"     = "${path.module}/files/grafana-dashboards.yml"
     "nexusdeploy-dashboard.json" = "${path.module}/files/nexusdeploy-dashboard.json"
+  }
+
+  # Rendered config files using templatefile() — region injected at deploy time
+  # so Grafana gets a valid AWS region without relying on runtime shell substitution
+  rendered_config_files = {
+    "grafana-datasources.yml" = templatefile("${path.module}/files/grafana-datasources.yml.tpl", {
+      aws_region = var.aws_region
+    })
   }
 }
 
-resource "aws_s3_object" "monitoring_configs" {
-  for_each = local.config_files
+resource "aws_s3_object" "monitoring_configs_static" {
+  for_each = local.static_config_files
 
   bucket  = var.state_bucket
   key     = "${local.config_prefix}/${each.key}"
   content = file(each.value)
+  etag    = filemd5(each.value)
+  tags    = var.common_tags
+}
 
-  # Force re-upload when file contents change
-  etag = filemd5(each.value)
+resource "aws_s3_object" "monitoring_configs_rendered" {
+  for_each = local.rendered_config_files
 
-  tags = var.common_tags
+  bucket  = var.state_bucket
+  key     = "${local.config_prefix}/${each.key}"
+  content = each.value
+  etag    = md5(each.value)
+  tags    = var.common_tags
 }
 
 # ── IAM Role for the monitoring EC2 instance ─────────────────────────────────
@@ -111,7 +129,7 @@ resource "aws_iam_role_policy" "monitoring_cloudwatch" {
         Sid    = "SSMGrafanaPassword"
         Effect = "Allow"
         Action = ["ssm:GetParameter"]
-        Resource = "arn:aws:ssm:*:*:parameter/${var.project}/${var.environment}/monitoring/grafana_password"
+        Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project}/${var.environment}/monitoring/grafana_password"
       }
     ]
   })
@@ -170,7 +188,10 @@ resource "aws_instance" "monitoring" {
   user_data_replace_on_change = true
 
   # Ensure configs are uploaded to S3 before instance boots
-  depends_on = [aws_s3_object.monitoring_configs]
+  depends_on = [
+    aws_s3_object.monitoring_configs_static,
+    aws_s3_object.monitoring_configs_rendered,
+  ]
 
   tags = merge(var.common_tags, {
     Name = "${var.project}-${var.environment}-monitoring"
@@ -190,7 +211,7 @@ resource "aws_cloudwatch_metric_alarm" "ecs_api_cpu_high" {
   threshold           = 80
   treat_missing_data  = "notBreaching"
   dimensions = {
-    ClusterName = "${var.project}-${var.environment}"
+    ClusterName = var.ecs_cluster_name
     ServiceName = "${var.project}-${var.environment}-api"
   }
   tags = var.common_tags
@@ -240,8 +261,8 @@ resource "aws_cloudwatch_dashboard" "main" {
         properties = {
           title   = "ECS API - CPU & Memory"
           metrics = [
-            ["AWS/ECS", "CPUUtilization",    "ClusterName", "${var.project}-${var.environment}", "ServiceName", "${var.project}-${var.environment}-api"],
-            ["AWS/ECS", "MemoryUtilization", "ClusterName", "${var.project}-${var.environment}", "ServiceName", "${var.project}-${var.environment}-api"]
+            ["AWS/ECS", "CPUUtilization",    "ClusterName", var.ecs_cluster_name, "ServiceName", "${var.project}-${var.environment}-api"],
+            ["AWS/ECS", "MemoryUtilization", "ClusterName", var.ecs_cluster_name, "ServiceName", "${var.project}-${var.environment}-api"]
           ]
           period = 60, stat = "Average", region = var.aws_region
         }

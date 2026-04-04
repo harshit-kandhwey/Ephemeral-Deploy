@@ -136,8 +136,9 @@ mkdir -p /var/lib/grafana/dashboards
 
 aws s3 cp "s3://$STATE_BUCKET/$CONFIG_PREFIX/prometheus.yml"             /etc/prometheus/prometheus.yml                                 --region "$AWS_REGION"
 aws s3 cp "s3://$STATE_BUCKET/$CONFIG_PREFIX/cloudwatch-exporter.yml"   /etc/yace/config.yml                                           --region "$AWS_REGION"
-aws s3 cp "s3://$STATE_BUCKET/$CONFIG_PREFIX/grafana-datasources.yml"   /etc/grafana/provisioning/datasources/datasources.yml          --region "$AWS_REGION"
+
 aws s3 cp "s3://$STATE_BUCKET/$CONFIG_PREFIX/grafana-dashboards.yml"    /etc/grafana/provisioning/dashboards/dashboards.yml            --region "$AWS_REGION"
+aws s3 cp "s3://$STATE_BUCKET/$CONFIG_PREFIX/grafana-datasources.yml"   /etc/grafana/provisioning/datasources/datasources.yml          --region "$AWS_REGION"
 aws s3 cp "s3://$STATE_BUCKET/$CONFIG_PREFIX/nexusdeploy-dashboard.json" /var/lib/grafana/dashboards/nexusdeploy.json                  --region "$AWS_REGION"
 
 echo "Configs downloaded successfully"
@@ -145,7 +146,7 @@ echo "Configs downloaded successfully"
 # ── Substitute placeholders in downloaded configs ─────────────────────────────
 # Config files use NEXUSDEPLOY_* tokens. We escape special sed characters
 # so values like region strings (containing hyphens) don't break substitution.
-escape_sed() { printf '%s\n' "$1" | sed 's/[&/\]/\\&/g'; }
+escape_sed() { printf '%s\n' "$1" | sed -e 's/\\/\\\\/g' -e 's/&/\\&/g' -e 's/\//\\\//g'; }
 
 PROJECT_ESC=$(escape_sed "$PROJECT")
 ENV_ESC=$(escape_sed "$ENVIRONMENT")
@@ -155,7 +156,6 @@ CLUSTER_ESC=$(escape_sed "$ECS_CLUSTER")
 for f in \
   /etc/prometheus/prometheus.yml \
   /etc/yace/config.yml \
-  /etc/grafana/provisioning/datasources/datasources.yml \
   /var/lib/grafana/dashboards/nexusdeploy.json; do
   sed -i \
     -e "s/NEXUSDEPLOY_PROJECT/$PROJECT_ESC/g" \
@@ -198,9 +198,11 @@ echo "*/1 * * * * root /usr/local/bin/ecs-sd.sh" > /etc/cron.d/ecs-sd
 
 # ── Grafana admin password ────────────────────────────────────────────────────
 # Password was fetched from SSM at the top of this script (not embedded).
-sed -i "s/^;admin_password = admin/admin_password = ${GRAFANA_PASSWORD}/" /etc/grafana/grafana.ini
-sed -i "s/^admin_password = admin/admin_password = ${GRAFANA_PASSWORD}/"  /etc/grafana/grafana.ini
-sed -i "s/;allow_sign_up = true/allow_sign_up = false/"                   /etc/grafana/grafana.ini
+# Escape special sed characters in the password (/, &, \ can break sed syntax)
+GRAFANA_PASSWORD_ESC=$(escape_sed "$GRAFANA_PASSWORD")
+sed -i "s/^;admin_password = admin/admin_password = ${GRAFANA_PASSWORD_ESC}/" /etc/grafana/grafana.ini
+sed -i "s/^admin_password = admin/admin_password = ${GRAFANA_PASSWORD_ESC}/"  /etc/grafana/grafana.ini
+sed -i "s/;allow_sign_up = true/allow_sign_up = false/"                       /etc/grafana/grafana.ini
 
 # ── Fix permissions ───────────────────────────────────────────────────────────
 chown -R prometheus:prometheus /etc/prometheus
@@ -221,7 +223,9 @@ systemctl is-active node_exporter && echo "✅ node_exporter running" || echo "�
 systemctl is-active prometheus    && echo "✅ prometheus running"    || echo "❌ prometheus failed"
 systemctl is-active grafana-server && echo "✅ grafana running"      || echo "❌ grafana failed"
 
-PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
+# IMDSv2 — required on instances with HttpTokens=required, resistant to SSRF
+IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token"   -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN"   http://169.254.169.254/latest/meta-data/public-ipv4)
 echo ""
 echo "════════════════════════════════════════════"
 echo " Monitoring Stack Ready!"
