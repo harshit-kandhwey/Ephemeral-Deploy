@@ -65,8 +65,9 @@ echo ""
 
 # ── Verify AWS credentials ────────────────────
 log_info "Verifying AWS credentials..."
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null) \
-  || log_error "AWS credentials not configured. Run 'aws configure' first."
+if ! ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>&1); then
+  log_error "AWS credentials not configured or invalid.\n  Error: $ACCOUNT_ID\n  Run 'aws configure' to fix."
+fi
 log_success "Connected: account=$ACCOUNT_ID region=$REGION"
 
 # ──────────────────────────────────────────────
@@ -245,14 +246,26 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
     {
       "Sid": "SSM",
       "Effect": "Allow",
-      "Action": ["ssm:GetParameter","ssm:GetParameters","ssm:GetParametersByPath","ssm:DescribeParameters","ssm:PutParameter"],
+      "Action": ["ssm:GetParameter","ssm:GetParameters","ssm:GetParametersByPath","ssm:PutParameter"],
       "Resource": "arn:aws:ssm:*:${ACCOUNT_ID}:parameter/${PROJECT}/*"
+    },
+    {
+      "Sid": "SSMDescribe",
+      "Effect": "Allow",
+      "Action": ["ssm:DescribeParameters"],
+      "Resource": "*"
     },
     {
       "Sid": "SecretsManager",
       "Effect": "Allow",
-      "Action": ["secretsmanager:CreateSecret","secretsmanager:UpdateSecret","secretsmanager:PutSecretValue","secretsmanager:GetSecretValue","secretsmanager:DescribeSecret","secretsmanager:DeleteSecret","secretsmanager:ListSecrets","secretsmanager:TagResource"],
+      "Action": ["secretsmanager:CreateSecret","secretsmanager:UpdateSecret","secretsmanager:PutSecretValue","secretsmanager:GetSecretValue","secretsmanager:DescribeSecret","secretsmanager:DeleteSecret","secretsmanager:TagResource"],
       "Resource": "arn:aws:secretsmanager:*:${ACCOUNT_ID}:secret:${PROJECT}/*"
+    },
+    {
+      "Sid": "SecretsManagerList",
+      "Effect": "Allow",
+      "Action": ["secretsmanager:ListSecrets"],
+      "Resource": "*"
     },
     {
       "Sid": "ECRAuth",
@@ -303,10 +316,39 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
       "Resource": "*"
     },
     {
-      "Sid": "IAM",
+      "Sid": "IAMRoles",
       "Effect": "Allow",
-      "Action": ["iam:CreateRole","iam:DeleteRole","iam:GetRole","iam:UpdateAssumeRolePolicy","iam:UpdateRole","iam:TagRole","iam:ListRolePolicies","iam:ListAttachedRolePolicies","iam:PutRolePolicy","iam:GetRolePolicy","iam:DeleteRolePolicy","iam:AttachRolePolicy","iam:DetachRolePolicy","iam:PassRole","iam:CreateInstanceProfile","iam:DeleteInstanceProfile","iam:GetInstanceProfile","iam:AddRoleToInstanceProfile","iam:RemoveRoleFromInstanceProfile","iam:ListInstanceProfilesForRole","iam:CreateOpenIDConnectProvider","iam:DeleteOpenIDConnectProvider","iam:GetOpenIDConnectProvider","iam:UpdateOpenIDConnectProviderThumbprint","iam:ListOpenIDConnectProviders","iam:CreatePolicy","iam:DeletePolicy","iam:GetPolicy","iam:GetPolicyVersion","iam:ListPolicyVersions","iam:CreatePolicyVersion","iam:DeletePolicyVersion"],
-      "Resource": "*"
+      "Action": ["iam:CreateRole","iam:DeleteRole","iam:GetRole","iam:UpdateAssumeRolePolicy","iam:UpdateRole","iam:TagRole","iam:ListRolePolicies","iam:ListAttachedRolePolicies","iam:PutRolePolicy","iam:GetRolePolicy","iam:DeleteRolePolicy","iam:AttachRolePolicy","iam:DetachRolePolicy","iam:AddRoleToInstanceProfile","iam:RemoveRoleFromInstanceProfile","iam:ListInstanceProfilesForRole"],
+      "Resource": "arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT}-*"
+    },
+    {
+      "Sid": "IAMInstanceProfiles",
+      "Effect": "Allow",
+      "Action": ["iam:CreateInstanceProfile","iam:DeleteInstanceProfile","iam:GetInstanceProfile"],
+      "Resource": "arn:aws:iam::${ACCOUNT_ID}:instance-profile/${PROJECT}-*"
+    },
+    {
+      "Sid": "IAMPolicies",
+      "Effect": "Allow",
+      "Action": ["iam:CreatePolicy","iam:DeletePolicy","iam:GetPolicy","iam:GetPolicyVersion","iam:ListPolicyVersions","iam:CreatePolicyVersion","iam:DeletePolicyVersion"],
+      "Resource": "arn:aws:iam::${ACCOUNT_ID}:policy/${PROJECT}-*"
+    },
+    {
+      "Sid": "IAMPassRole",
+      "Effect": "Allow",
+      "Action": ["iam:PassRole"],
+      "Resource": "arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT}-*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": ["ecs-tasks.amazonaws.com","ec2.amazonaws.com","vpc-flow-logs.amazonaws.com"]
+        }
+      }
+    },
+    {
+      "Sid": "IAMOIDCProvider",
+      "Effect": "Allow",
+      "Action": ["iam:CreateOpenIDConnectProvider","iam:DeleteOpenIDConnectProvider","iam:GetOpenIDConnectProvider","iam:UpdateOpenIDConnectProviderThumbprint","iam:ListOpenIDConnectProviders"],
+      "Resource": "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/*"
     },
     {
       "Sid": "AutoScaling",

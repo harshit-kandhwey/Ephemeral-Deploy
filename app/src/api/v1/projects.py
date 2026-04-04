@@ -6,7 +6,24 @@ from ...extensions import db
 from ...models.audit_log import AuditLog
 from ...models.project import Project
 from ...models.user import User
-from ...utils.decorators import role_required
+from ...utils.decorators import get_current_user_or_401, role_required
+
+
+def _get_real_ip():
+    """Return client IP address.
+
+    Behind a load balancer, configure Flask's ProxyFix middleware in app.py:
+        from werkzeug.middleware.proxy_fix import ProxyFix
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
+
+    With ProxyFix configured, request.remote_addr is already set to the real
+    client IP by the time this runs — no manual X-Forwarded-For parsing needed.
+    Without ProxyFix, reading X-Forwarded-For directly is an IP spoofing risk
+    because any client can set that header.
+
+    For this project (ECS behind no public ALB), remote_addr is safe as-is.
+    """
+    return request.remote_addr
 
 
 @api_v1.route("/projects", methods=["GET"])
@@ -23,14 +40,9 @@ def get_projects():
       200:
         description: List of projects
     """
-    try:
-        user_id = int(get_jwt_identity())
-    except (ValueError, TypeError):
-        return jsonify({"error": "Invalid authentication"}), 400
-
-    user = db.session.get(User, user_id)
-    if not user:
-        return jsonify({"error": "User not found"}), 401
+    user, error_response = get_current_user_or_401()
+    if error_response:
+        return error_response
 
     if user.role == "admin":
         projects = Project.query.all()
@@ -46,7 +58,16 @@ def get_projects():
 @jwt_required()
 def get_project(project_id):
     """Get project by ID"""
+    user, error_response = get_current_user_or_401()
+    if error_response:
+        return error_response
+
     project = db.get_or_404(Project, project_id)
+
+    # Enforce team-based access — admins see all, others only their team's projects
+    if user.role != "admin" and (not user.team or project.team_id != user.team.id):
+        return jsonify({"error": "Access denied"}), 403
+
     return jsonify(project.to_dict()), 200
 
 
@@ -94,7 +115,7 @@ def create_project():
     )
 
     db.session.add(project)
-    db.session.commit()
+    db.session.flush()  # assigns project.id without committing
 
     audit = AuditLog(
         user_id=user_id,
@@ -102,7 +123,7 @@ def create_project():
         entity_type="project",
         entity_id=project.id,
         changes={"name": project.name, "team_id": project.team_id},
-        ip_address=request.remote_addr,
+        ip_address=_get_real_ip(),
     )
     db.session.add(audit)
     db.session.commit()
@@ -141,10 +162,17 @@ def update_project(project_id):
       200:
         description: Project updated
     """
-    user_id = get_jwt_identity()
-    project = db.get_or_404(Project, project_id)
-    data = request.get_json(silent=True)
+    user, error_response = get_current_user_or_401()
+    if error_response:
+        return error_response
 
+    project = db.get_or_404(Project, project_id)
+
+    # Admins can update any project; managers only their team's projects
+    if user.role != "admin" and (not user.team or project.team_id != user.team.id):
+        return jsonify({"error": "Access denied"}), 403
+
+    data = request.get_json(silent=True)
     if not data:
         return jsonify({"error": "No data provided"}), 400
 
@@ -153,22 +181,25 @@ def update_project(project_id):
         changes["name"] = {"old": project.name, "new": data["name"]}
         project.name = data["name"]
     if "description" in data:
+        changes["description"] = {"old": project.description, "new": data["description"]}
         project.description = data["description"]
     if "status" in data:
         changes["status"] = {"old": project.status, "new": data["status"]}
         project.status = data["status"]
 
-    db.session.commit()
+    db.session.flush()  # persist changes without committing
 
-    audit = AuditLog(
-        user_id=user_id,
-        action="updated",
-        entity_type="project",
-        entity_id=project.id,
-        changes=changes,
-        ip_address=request.remote_addr,
-    )
-    db.session.add(audit)
-    db.session.commit()
+    # Only write audit log when something actually changed
+    if changes:
+        audit = AuditLog(
+            user_id=user.id,
+            action="updated",
+            entity_type="project",
+            entity_id=project.id,
+            changes=changes,
+            ip_address=_get_real_ip(),
+        )
+        db.session.add(audit)
 
+    db.session.commit()
     return jsonify(project.to_dict()), 200

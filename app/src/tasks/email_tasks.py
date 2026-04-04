@@ -18,8 +18,9 @@ def send_task_assignment_email(task_id, user_id):
         )
         return
 
-    current_app.logger.info(f"[EMAIL] Task '{task.title}' assigned to {user.email}")
-    return f"Email sent to {user.email}"
+    # Log user_id instead of email — PII compliance (GDPR/CCPA)
+    current_app.logger.info(f"[EMAIL] Task '{task.title}' assigned to user_id={user.id}")
+    return f"Email sent to user_id={user.id}"
 
 
 @celery.task(name="tasks.send_comment_notification")
@@ -34,22 +35,28 @@ def send_comment_notification(comment_id, user_id):
         )
         return
 
+    # Log user_id instead of email — PII compliance (GDPR/CCPA)
     current_app.logger.info(
-        f"[EMAIL] New comment on task {comment.task_id} for {user.email}"
+        f"[EMAIL] New comment on task {comment.task_id} for user_id={user.id}"
     )
-    return f"Notification sent to {user.email}"
+    return f"Notification sent to user_id={user.id}"
 
 
 @celery.task(name="tasks.send_daily_digest")
 def send_daily_digest():
     """Send daily digest of tasks to all users"""
-    users = User.query.filter_by(is_active=True).all()
+    users = db.session.execute(
+        db.select(User).filter_by(is_active=True)
+    ).scalars().all()
 
     for user in users:
-        pending_tasks = Task.query.filter(
-            Task.assignee_id == user.id,
-            Task.status != "done",
-        ).count()
-        current_app.logger.info(f"[DIGEST] {user.email}: {pending_tasks} pending tasks")
+        pending_tasks = db.session.execute(
+            db.select(db.func.count(Task.id)).where(
+                Task.assignee_id == user.id,
+                Task.status != "done",
+            )
+        ).scalar()
+        # Log user_id instead of email — PII compliance (GDPR/CCPA)
+        current_app.logger.info(f"[DIGEST] user_id={user.id}: {pending_tasks} pending tasks")
 
     return f"Digest sent to {len(users)} users"

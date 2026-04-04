@@ -67,7 +67,7 @@ jobs:
         continue-on-error: true  # Non-blocking — shows awareness
 
       - name: Run safety (dependency vulnerability scan)
-        run: safety scan -r app/requirements.txt
+        run: safety scan --target app/
         continue-on-error: true  # Non-blocking — shows awareness
 
   # ─────────────────────────────────────────────

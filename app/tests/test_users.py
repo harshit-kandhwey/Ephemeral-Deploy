@@ -132,6 +132,7 @@ def test_admin_can_assign_team(client, admin_headers, dev_user_id):
     r = client.put(f'/api/v1/users/{dev_user_id}', headers=admin_headers,
                    json={'team_id': None})
     assert r.status_code == 200
+    assert r.json.get('team_id') is None
 
 
 def test_admin_assign_nonexistent_team(client, admin_headers, dev_user_id):

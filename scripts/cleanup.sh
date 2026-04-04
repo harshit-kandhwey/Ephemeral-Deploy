@@ -10,11 +10,12 @@
 #
 # The script cleans up in dependency order:
 #   ECS Services → ECS Tasks → ECS Cluster → ECR Images
-#   → RDS → ElastiCache → Security Groups → NAT GW → Subnets
-#   → Route Tables → Internet GW → VPC → Secrets Manager
+#   → RDS → ElastiCache → Secrets Manager → VPC (NAT GW → IGW → Subnets
+#   → Route Tables → Security Groups) → EIPs → CloudWatch → IAM
 # ─────────────────────────────────────────────────────────────────────────────
 
-set -euo pipefail
+# set -e intentionally omitted: cleanup must continue past individual failures
+set -uo pipefail
 
 # Temp file for passing JSON to AWS CLI (e.g. ECR image IDs).
 # mktemp avoids the fixed /tmp path race condition when multiple instances run.
@@ -95,8 +96,9 @@ ERRORS=0
 # ─────────────────────────────────────────────
 log_info "Step 1/10: Scaling down ECS services..."
 
-CLUSTER_ARN=$(get_resources_by_tag "ecs:cluster" | head -1)
-if [[ -n "$CLUSTER_ARN" ]]; then
+CLUSTER_ARNS=$(get_resources_by_tag "ecs:cluster")
+for CLUSTER_ARN in $CLUSTER_ARNS; do
+  [[ -z "$CLUSTER_ARN" ]] && continue
   CLUSTER_NAME=$(echo "$CLUSTER_ARN" | awk -F'/' '{print $NF}')
   log_info "Found cluster: $CLUSTER_NAME"
 
@@ -113,28 +115,35 @@ if [[ -n "$CLUSTER_ARN" ]]; then
       --service "$svc" \
       --desired-count 0 \
       --region "$REGION" \
-      --output none
+      --no-cli-pager
 
     run aws ecs delete-service \
       --cluster "$CLUSTER_NAME" \
       --service "$svc" \
       --force \
       --region "$REGION" \
-      --output none
+      --no-cli-pager
   done
 
-  # Wait for tasks to drain
-  log_info "Waiting for ECS tasks to drain (max 60s)..."
-  [[ "$DRY_RUN" != "true" ]] && sleep 30 || true
+  # Wait for all services to become inactive (tasks fully drained)
+  log_info "Waiting for ECS tasks to fully stop..."
+  if [[ "$DRY_RUN" != "true" && -n "${SERVICES:-}" ]]; then
+    # shellcheck disable=SC2086  # word splitting intentional for multiple service ARNs
+    aws ecs wait services-inactive       --cluster "$CLUSTER_NAME"       --services $SERVICES       --region "$REGION" 2>/dev/null || {
+      log_warn "Waiter timed out; some tasks may still be stopping — proceeding anyway"
+      sleep 30
+    }
+  fi
 
   log_delete "Deleting ECS cluster: $CLUSTER_NAME"
   run aws ecs delete-cluster \
     --cluster "$CLUSTER_NAME" \
     --region "$REGION" \
-    --output none
+    --no-cli-pager
 
-  log_success "ECS cluster cleaned up"
-else
+  log_success "ECS cluster cleaned up: $CLUSTER_NAME"
+done
+if [[ -z "${CLUSTER_ARNS:-}" ]]; then
   log_warn "No ECS cluster found for $PROJECT/$ENV"
 fi
 
@@ -145,7 +154,7 @@ log_info "Step 2/10: Cleaning ECR repositories..."
 
 for repo_suffix in "api" "worker"; do
   REPO_NAME="${PROJECT}-${repo_suffix}-${ENV}"
-  
+
   if aws ecr describe-repositories --repository-names "$REPO_NAME" --region "$REGION" 2>/dev/null; then
     # Delete all images first
     IMAGE_IDS=$(aws ecr list-images \
@@ -163,14 +172,14 @@ for repo_suffix in "api" "worker"; do
         --repository-name "$REPO_NAME" \
         --image-ids "file://$TMPFILE" \
         --region "$REGION" \
-        --output none
+        --no-cli-pager
     fi
 
     log_delete "Deleting ECR repository: $REPO_NAME"
     run aws ecr delete-repository \
       --repository-name "$REPO_NAME" \
       --region "$REGION" \
-      --output none
+      --no-cli-pager
     log_success "Deleted ECR: $REPO_NAME"
   else
     log_warn "ECR repository $REPO_NAME not found"
@@ -192,7 +201,7 @@ if aws rds describe-db-instances \
     --db-instance-identifier "$DB_IDENTIFIER" \
     --skip-final-snapshot \
     --region "$REGION" \
-    --output none
+    --no-cli-pager
 
   log_info "Waiting for RDS deletion (this takes a few minutes)..."
   [[ "$DRY_RUN" != "true" ]] && \
@@ -219,7 +228,7 @@ if aws elasticache describe-cache-clusters \
   run aws elasticache delete-cache-cluster \
     --cache-cluster-id "$CACHE_ID" \
     --region "$REGION" \
-    --output none
+    --no-cli-pager
 
   [[ "$DRY_RUN" != "true" ]] && \
     aws elasticache wait cache-cluster-deleted \
@@ -248,12 +257,20 @@ for secret_arn in $SECRETS; do
     --secret-id "$secret_arn" \
     --force-delete-without-recovery \
     --region "$REGION" \
-    --output none
+    --no-cli-pager
 done
 log_success "Secrets cleaned up"
 
 # ─────────────────────────────────────────────
 # STEP 6: Find and cleanup VPC resources
+#
+# Dependency order within the VPC:
+#   NAT Gateways → (wait for deletion) → Internet Gateways
+#   → Subnets → Route Tables (disassociate first) → Security Groups → VPC
+#
+# Security groups MUST be deleted after NAT gateways are fully gone.
+# NAT gateways hold ENIs that reference security groups — deleting SGs
+# before NAT GW deletion completes causes dependency errors.
 # ─────────────────────────────────────────────
 log_info "Step 6/10: Cleaning up VPC resources..."
 
@@ -268,32 +285,21 @@ VPC_ID=$(aws ec2 describe-vpcs \
 if [[ "$VPC_ID" != "None" && -n "$VPC_ID" ]]; then
   log_info "Found VPC: $VPC_ID - cleaning dependent resources..."
 
-  # Delete Security Groups (not default)
-  SG_IDS=$(aws ec2 describe-security-groups \
-    --region "$REGION" \
-    --filters "Name=vpc-id,Values=$VPC_ID" \
-    --query 'SecurityGroups[?GroupName!=`default`].GroupId' \
-    --output text)
-  for sg in $SG_IDS; do
-    log_delete "Deleting security group: $sg"
-    run aws ec2 delete-security-group --group-id "$sg" --region "$REGION" 2>/dev/null || {
-      log_warn "Could not delete SG $sg (may have dependencies)"
-      ((ERRORS++)) || true
-    }
-  done
-
-  # Release and delete NAT Gateways
-  NAT_GWS=$(aws ec2 describe-nat-gateways \
-    --region "$REGION" \
-    --filter "Name=vpc-id,Values=$VPC_ID" "Name=state,Values=available" \
-    --query 'NatGateways[].NatGatewayId' \
-    --output text)
+  # ── 6a: NAT Gateways (must go first — they hold ENIs that reference SGs) ──
+  # Include pending/deleting states — stuck NAT GWs from prior runs still
+  # block VPC deletion even though they can't be deleted again
+  NAT_GWS=$(aws ec2 describe-nat-gateways     --region "$REGION"     --filter "Name=vpc-id,Values=$VPC_ID"       "Name=state,Values=pending,available,deleting"     --query 'NatGateways[].NatGatewayId'     --output text)
   for nat in $NAT_GWS; do
-    log_delete "Deleting NAT Gateway: $nat"
-    run aws ec2 delete-nat-gateway --nat-gateway-id "$nat" --region "$REGION" --output none
+    STATE=$(aws ec2 describe-nat-gateways       --nat-gateway-ids "$nat"       --region "$REGION"       --query 'NatGateways[0].State'       --output text 2>/dev/null || echo "unknown")
+    if [[ "$STATE" == "available" || "$STATE" == "pending" ]]; then
+      log_delete "Deleting NAT Gateway: $nat (state: $STATE)"
+      run aws ec2 delete-nat-gateway --nat-gateway-id "$nat" --region "$REGION" --no-cli-pager
+    else
+      log_info "NAT Gateway $nat already in state: $STATE — waiting for it to finish"
+    fi
   done
 
-  # NAT Gateways take 60–90 s to fully delete. Subnets and the VPC cannot be
+  # NAT Gateways take 60-90s to fully delete. Subnets, SGs, and VPC cannot be
   # removed while a NAT GW is still in 'deleting' state, so we wait here.
   if [[ -n "$NAT_GWS" && "$DRY_RUN" != "true" ]]; then
     log_info "Waiting for NAT Gateways to finish deleting..."
@@ -305,7 +311,7 @@ if [[ "$VPC_ID" != "None" && -n "$VPC_ID" ]]; then
     log_success "NAT Gateways deleted"
   fi
 
-  # Detach and delete Internet Gateways
+  # ── 6b: Internet Gateways ─────────────────────────────────────────────────
   IGW_IDS=$(aws ec2 describe-internet-gateways \
     --region "$REGION" \
     --filters "Name=attachment.vpc-id,Values=$VPC_ID" \
@@ -313,11 +319,11 @@ if [[ "$VPC_ID" != "None" && -n "$VPC_ID" ]]; then
     --output text)
   for igw in $IGW_IDS; do
     log_delete "Detaching and deleting IGW: $igw"
-    run aws ec2 detach-internet-gateway --internet-gateway-id "$igw" --vpc-id "$VPC_ID" --region "$REGION"
-    run aws ec2 delete-internet-gateway --internet-gateway-id "$igw" --region "$REGION"
+    run aws ec2 detach-internet-gateway --internet-gateway-id "$igw" --vpc-id "$VPC_ID" --region "$REGION" --no-cli-pager
+    run aws ec2 delete-internet-gateway --internet-gateway-id "$igw" --region "$REGION" --no-cli-pager
   done
 
-  # Delete Subnets
+  # ── 6c: Subnets ───────────────────────────────────────────────────────────
   SUBNET_IDS=$(aws ec2 describe-subnets \
     --region "$REGION" \
     --filters "Name=vpc-id,Values=$VPC_ID" \
@@ -328,18 +334,45 @@ if [[ "$VPC_ID" != "None" && -n "$VPC_ID" ]]; then
     run aws ec2 delete-subnet --subnet-id "$subnet" --region "$REGION"
   done
 
-  # Delete Route Tables (non-main)
+  # ── 6d: Route Tables (disassociate before deleting) ───────────────────────
   RT_IDS=$(aws ec2 describe-route-tables \
     --region "$REGION" \
     --filters "Name=vpc-id,Values=$VPC_ID" \
     --query 'RouteTables[?Associations[?Main!=`true`]].RouteTableId' \
     --output text)
   for rt in $RT_IDS; do
+    # Disassociate all non-main associations first — route tables with active
+    # subnet associations cannot be deleted directly
+    ASSOC_IDS=$(aws ec2 describe-route-tables \
+      --route-table-ids "$rt" \
+      --region "$REGION" \
+      --query 'RouteTables[].Associations[?Main!=`true`].RouteTableAssociationId' \
+      --output text 2>/dev/null || echo "")
+    for assoc in $ASSOC_IDS; do
+      [[ -z "$assoc" ]] && continue
+      run aws ec2 disassociate-route-table --association-id "$assoc" --region "$REGION"
+    done
     log_delete "Deleting route table: $rt"
     run aws ec2 delete-route-table --route-table-id "$rt" --region "$REGION" 2>/dev/null || true
   done
 
-  # Delete VPC
+  # ── 6e: Security Groups (AFTER NAT GW wait — see note above) ─────────────
+  SG_IDS=$(aws ec2 describe-security-groups \
+    --region "$REGION" \
+    --filters "Name=vpc-id,Values=$VPC_ID" \
+    --query 'SecurityGroups[?GroupName!=`default`].GroupId' \
+    --output text)
+  for sg in $SG_IDS; do
+    log_delete "Deleting security group: $sg"
+    if ! run aws ec2 delete-security-group --group-id "$sg" --region "$REGION" --no-cli-pager 2>/dev/null; then
+      if [[ "$DRY_RUN" != "true" ]]; then
+        log_warn "Could not delete SG $sg (may have dependencies)"
+        ((ERRORS++)) || true
+      fi
+    fi
+  done
+
+  # ── 6f: VPC ───────────────────────────────────────────────────────────────
   log_delete "Deleting VPC: $VPC_ID"
   run aws ec2 delete-vpc --vpc-id "$VPC_ID" --region "$REGION"
   log_success "VPC $VPC_ID deleted"
@@ -398,6 +431,22 @@ log_info "Step 9/10: Cleaning env-specific IAM roles..."
 for role_suffix in "ecs-execution" "ecs-task" "vpc-flow-log"; do
   ROLE_NAME="${PROJECT}-${ENV}-${role_suffix}"
   if aws iam get-role --role-name "$ROLE_NAME" 2>/dev/null; then
+
+    # Remove from instance profiles first — delete-role fails with
+    # DeleteConflict if the role is still attached to a profile
+    INSTANCE_PROFILES=$(aws iam list-instance-profiles-for-role \
+      --role-name "$ROLE_NAME" \
+      --query 'InstanceProfiles[].InstanceProfileName' \
+      --output text 2>/dev/null || echo "")
+    for profile in $INSTANCE_PROFILES; do
+      [[ -z "$profile" ]] && continue
+      run aws iam remove-role-from-instance-profile \
+        --instance-profile-name "$profile" \
+        --role-name "$ROLE_NAME"
+      run aws iam delete-instance-profile \
+        --instance-profile-name "$profile"
+    done
+
     # Detach all managed policies
     POLICIES=$(aws iam list-attached-role-policies \
       --role-name "$ROLE_NAME" \
@@ -440,7 +489,7 @@ if [[ "$REMAINING" == "0" || -z "$REMAINING" ]]; then
   echo -e "${GREEN} Cleanup Complete - 0 tagged resources remaining${NC}"
 else
   echo -e "${YELLOW} Cleanup finished with $REMAINING resources still tagged${NC}"
-  echo "  Run with --dry-run=false --force to investigate"
+  echo "  Re-run without --dry-run to investigate, or check AWS console"
   aws resourcegroupstaggingapi get-resources \
     --tag-filters "Key=$TAG_KEY,Values=$TAG_VAL" "Key=$ENV_KEY,Values=$ENV_VAL" \
     --region "$REGION" \

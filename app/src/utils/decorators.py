@@ -29,21 +29,18 @@ def get_current_user_or_401():
 
 def role_required(roles):
     """
-    Decorator to require specific roles
+    Decorator to require specific roles.
+    Reuses get_current_user_or_401() to avoid duplicating JWT/user lookup logic.
     Usage: @role_required(['admin', 'manager'])
     """
-
     def decorator(f):
         @wraps(f)
         def wrapper(*args, **kwargs):
-            try:
-                user_id = int(get_jwt_identity())
-            except (ValueError, TypeError):
-                return jsonify({"error": "Invalid authentication"}), 401
+            user, error_response = get_current_user_or_401()
+            if error_response:
+                return error_response
 
-            user = db.session.get(User, user_id)
-
-            if not user or user.role not in roles:
+            if user.role not in roles:
                 return (
                     jsonify({"error": "Insufficient permissions", "required_roles": roles}),
                     403,
