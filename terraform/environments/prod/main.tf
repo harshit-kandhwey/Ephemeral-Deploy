@@ -44,7 +44,7 @@ locals {
 
   # Blue-green: determine active slot from variable
   # deploy.yml sets this based on what's currently running
-  active_slot   = var.deployment_slot # "blue" or "green"
+  active_slot = var.deployment_slot # "blue" or "green"
 
   common_tags = {
     Project     = local.project
@@ -126,8 +126,8 @@ resource "aws_secretsmanager_secret_version" "app" {
 module "iam" {
   source = "../../modules/iam"
 
-  project               = local.project
-  environment           = local.environment
+  project              = local.project
+  environment          = local.environment
   github_org           = var.github_org
   github_repo          = var.github_repo
   tf_state_bucket      = var.tf_state_bucket
@@ -147,7 +147,7 @@ module "vpc" {
   enable_nat_gateway    = false # Still off for cost; enable if workers need internet
   flow_log_role_arn     = module.iam.vpc_flow_log_role_arn
   flow_log_traffic_type = "ALL" # Full visibility in prod for compliance/security auditing
-  log_retention_days    = 14 # Longer retention in prod
+  log_retention_days    = 14    # Longer retention in prod
   common_tags           = local.common_tags
 }
 
