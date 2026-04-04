@@ -12,9 +12,8 @@
 #   First apply  → imports existing resource into state, no changes made
 #   Subsequent   → resource already in state, import block silently ignored
 #
-# NOTE: import block `id` values must be literal strings — expressions like
-# data.aws_caller_identity.current.account_id are not supported here.
-# The account ID 415838720130 is hardcoded intentionally for this reason.
+# NOTE: import block `id` values must be literal strings — expressions are
+# not supported. Account ID 415838720130 is hardcoded intentionally.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # GitHub OIDC provider — owned by bootstrap.sh, never modified by Terraform
@@ -29,10 +28,10 @@ import {
   id = "nexusdeploy-github-actions-deploy"
 }
 
-# Inline policy — owned by bootstrap.sh, permissions managed there
+# Inline policy — policy name matches bootstrap.sh: ${PROJECT}-github-actions-full-deploy
 import {
   to = module.iam.aws_iam_role_policy.github_actions_deploy
-  id = "nexusdeploy-github-actions-deploy:nexusdeploy-github-actions-deploy-policy"
+  id = "nexusdeploy-github-actions-deploy:nexusdeploy-github-actions-full-deploy"
 }
 
 # ECR repositories — created by ecr-provision job on first deploy
