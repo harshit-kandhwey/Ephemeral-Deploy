@@ -97,8 +97,8 @@ jobs:
 
       - name: Get current image URIs (infra-only deploy)
         id: current_images
-        # When app hasn't changed, look up the currently deployed image from ECR
-        # so Terraform apply gets the real image URI not an empty string
+        # When app has not changed, look up the currently deployed image from ECR.
+        # If ECR is empty (e.g. after cleanup), force a build by setting app_changed=true.
         if: steps.changed.outputs.app_changed == 'false'
         env:
           ENV: ${{ github.event.inputs.environment }}
@@ -107,19 +107,39 @@ jobs:
           REGISTRY="$ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
           ENV="${{ github.event.inputs.environment }}"
 
-          # Get the latest image digest currently in ECR
-          # Prefer SHA-tagged image over 'latest' — imageTags[0] order is not guaranteed
-          API_TAGS=$(aws ecr describe-images             --repository-name "nexusdeploy-api-$ENV"             --region ${{ env.AWS_REGION }}             --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags'             --output text 2>/dev/null || echo "latest")
-          API_IMAGE=$(echo "$API_TAGS" | tr $'\t' $'\n' | grep -v '^latest$' | head -1)
-          API_IMAGE="${API_IMAGE:-latest}"
+          # Check if images exist in ECR — empty repo means build is required
+          IMAGE_COUNT=$(aws ecr describe-images \
+            --repository-name "nexusdeploy-api-$ENV" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'length(imageDetails)' \
+            --output text 2>/dev/null || echo "0")
 
-          WORKER_TAGS=$(aws ecr describe-images             --repository-name "nexusdeploy-worker-$ENV"             --region ${{ env.AWS_REGION }}             --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags'             --output text 2>/dev/null || echo "latest")
-          WORKER_IMAGE=$(echo "$WORKER_TAGS" | tr $'\t' $'\n' | grep -v '^latest$' | head -1)
-          WORKER_IMAGE="${WORKER_IMAGE:-latest}"
+          if [[ "$IMAGE_COUNT" == "0" || -z "$IMAGE_COUNT" ]]; then
+            echo "No images in ECR - forcing build despite no app code change"
+            echo "app_changed=true" >> $GITHUB_OUTPUT
+            echo "api_image="      >> $GITHUB_OUTPUT
+            echo "worker_image="   >> $GITHUB_OUTPUT
+          else
+            API_TAGS=$(aws ecr describe-images \
+              --repository-name "nexusdeploy-api-$ENV" \
+              --region ${{ env.AWS_REGION }} \
+              --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags' \
+              --output text 2>/dev/null || echo "latest")
+            API_IMAGE=$(echo "$API_TAGS" | tr $'\t' $'\n' | grep -v '^latest$' | head -1)
+            API_IMAGE="${API_IMAGE:-latest}"
 
-          echo "api_image=$REGISTRY/nexusdeploy-api-$ENV:$API_IMAGE"       >> $GITHUB_OUTPUT
-          echo "worker_image=$REGISTRY/nexusdeploy-worker-$ENV:$WORKER_IMAGE" >> $GITHUB_OUTPUT
-          echo "ℹ️  Using existing images: api=$API_IMAGE worker=$WORKER_IMAGE"
+            WORKER_TAGS=$(aws ecr describe-images \
+              --repository-name "nexusdeploy-worker-$ENV" \
+              --region ${{ env.AWS_REGION }} \
+              --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags' \
+              --output text 2>/dev/null || echo "latest")
+            WORKER_IMAGE=$(echo "$WORKER_TAGS" | tr $'\t' $'\n' | grep -v '^latest$' | head -1)
+            WORKER_IMAGE="${WORKER_IMAGE:-latest}"
+
+            echo "api_image=$REGISTRY/nexusdeploy-api-$ENV:$API_IMAGE"       >> $GITHUB_OUTPUT
+            echo "worker_image=$REGISTRY/nexusdeploy-worker-$ENV:$WORKER_IMAGE" >> $GITHUB_OUTPUT
+            echo "Using existing images: api=$API_IMAGE worker=$WORKER_IMAGE"
+          fi
 
   # ─────────────────────────────────────────────
   # Phase 1a: Provision ECR repositories

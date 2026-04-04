@@ -173,6 +173,27 @@ else
 fi
 
 # ──────────────────────────────────────────────
+# STEP 3b: ECS SERVICE-LINKED ROLE
+# Required for ECS to manage Fargate capacity providers.
+# This is a one-time account-level setup — safe to run repeatedly.
+# ──────────────────────────────────────────────
+log_info "Ensuring ECS service-linked role exists..."
+if aws iam get-role   --role-name "AWSServiceRoleForECS" 2>/dev/null; then
+  log_warn "ECS service-linked role already exists — skipping"
+else
+  aws iam create-service-linked-role     --aws-service-name "ecs.amazonaws.com" 2>/dev/null || true
+  log_success "ECS service-linked role created"
+fi
+
+log_info "Ensuring ElastiCache service-linked role exists..."
+if aws iam get-role   --role-name "AWSServiceRoleForElastiCache" 2>/dev/null; then
+  log_warn "ElastiCache service-linked role already exists — skipping"
+else
+  aws iam create-service-linked-role     --aws-service-name "elasticache.amazonaws.com" 2>/dev/null || true
+  log_success "ElastiCache service-linked role created"
+fi
+
+# ──────────────────────────────────────────────
 # STEP 4: IAM DEPLOY ROLE
 # GitHub Actions assumes this role via OIDC.
 # Trust policy restricts to this specific repo only.
@@ -243,7 +264,7 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
     {
       "Sid": "TerraformState",
       "Effect": "Allow",
-      "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:ListBucket","s3:GetBucketVersioning","s3:GetEncryptionConfiguration"],
+      "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:ListBucket","s3:GetBucketVersioning","s3:GetEncryptionConfiguration","s3:PutObjectTagging","s3:GetObjectTagging","s3:DeleteObjectTagging"],
       "Resource": ["arn:aws:s3:::${STATE_BUCKET}","arn:aws:s3:::${STATE_BUCKET}/*"]
     },
     {
@@ -261,7 +282,7 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
     {
       "Sid": "SecretsManager",
       "Effect": "Allow",
-      "Action": ["secretsmanager:CreateSecret","secretsmanager:UpdateSecret","secretsmanager:PutSecretValue","secretsmanager:GetSecretValue","secretsmanager:DescribeSecret","secretsmanager:DeleteSecret","secretsmanager:TagResource"],
+      "Action": ["secretsmanager:CreateSecret","secretsmanager:UpdateSecret","secretsmanager:PutSecretValue","secretsmanager:GetSecretValue","secretsmanager:DescribeSecret","secretsmanager:DeleteSecret","secretsmanager:TagResource","secretsmanager:GetResourcePolicy"],
       "Resource": "arn:aws:secretsmanager:*:${ACCOUNT_ID}:secret:${PROJECT}/*"
     },
     {
@@ -291,7 +312,7 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
     {
       "Sid": "EC2Network",
       "Effect": "Allow",
-      "Action": ["ec2:CreateVpc","ec2:DeleteVpc","ec2:DescribeVpcs","ec2:ModifyVpcAttribute","ec2:CreateSubnet","ec2:DeleteSubnet","ec2:DescribeSubnets","ec2:ModifySubnetAttribute","ec2:CreateRouteTable","ec2:DeleteRouteTable","ec2:DescribeRouteTables","ec2:AssociateRouteTable","ec2:DisassociateRouteTable","ec2:CreateRoute","ec2:DeleteRoute","ec2:CreateInternetGateway","ec2:DeleteInternetGateway","ec2:DescribeInternetGateways","ec2:AttachInternetGateway","ec2:DetachInternetGateway","ec2:CreateNatGateway","ec2:DeleteNatGateway","ec2:DescribeNatGateways","ec2:AllocateAddress","ec2:ReleaseAddress","ec2:DescribeAddresses","ec2:AssociateAddress","ec2:DisassociateAddress","ec2:CreateFlowLogs","ec2:DeleteFlowLogs","ec2:DescribeFlowLogs","ec2:CreateSecurityGroup","ec2:DeleteSecurityGroup","ec2:DescribeSecurityGroups","ec2:AuthorizeSecurityGroupIngress","ec2:RevokeSecurityGroupIngress","ec2:AuthorizeSecurityGroupEgress","ec2:RevokeSecurityGroupEgress"],
+      "Action": ["ec2:CreateVpc","ec2:DeleteVpc","ec2:DescribeVpcs","ec2:ModifyVpcAttribute","ec2:DescribeVpcAttribute","ec2:DescribeAddressesAttribute","ec2:CreateSubnet","ec2:DeleteSubnet","ec2:DescribeSubnets","ec2:ModifySubnetAttribute","ec2:CreateRouteTable","ec2:DeleteRouteTable","ec2:DescribeRouteTables","ec2:AssociateRouteTable","ec2:DisassociateRouteTable","ec2:CreateRoute","ec2:DeleteRoute","ec2:CreateInternetGateway","ec2:DeleteInternetGateway","ec2:DescribeInternetGateways","ec2:AttachInternetGateway","ec2:DetachInternetGateway","ec2:CreateNatGateway","ec2:DeleteNatGateway","ec2:DescribeNatGateways","ec2:AllocateAddress","ec2:ReleaseAddress","ec2:DescribeAddresses","ec2:AssociateAddress","ec2:DisassociateAddress","ec2:CreateFlowLogs","ec2:DeleteFlowLogs","ec2:DescribeFlowLogs","ec2:CreateSecurityGroup","ec2:DeleteSecurityGroup","ec2:DescribeSecurityGroups","ec2:AuthorizeSecurityGroupIngress","ec2:RevokeSecurityGroupIngress","ec2:AuthorizeSecurityGroupEgress","ec2:RevokeSecurityGroupEgress"],
       "Resource": "*"
     },
     {
@@ -315,7 +336,7 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
     {
       "Sid": "Observability",
       "Effect": "Allow",
-      "Action": ["cloudwatch:PutMetricAlarm","cloudwatch:DeleteAlarms","cloudwatch:DescribeAlarms","cloudwatch:GetMetricData","cloudwatch:GetMetricStatistics","cloudwatch:ListMetrics","cloudwatch:PutDashboard","cloudwatch:DeleteDashboards","cloudwatch:GetDashboard","cloudwatch:ListDashboards","cloudwatch:TagResource","logs:CreateLogGroup","logs:DeleteLogGroup","logs:DescribeLogGroups","logs:PutRetentionPolicy","logs:DeleteRetentionPolicy","logs:TagLogGroup","logs:TagResource","logs:CreateLogStream","logs:DeleteLogStream","logs:DescribeLogStreams","logs:PutLogEvents","logs:GetLogEvents","logs:FilterLogEvents","logs:PutResourcePolicy","logs:DeleteResourcePolicy","logs:DescribeResourcePolicies"],
+      "Action": ["cloudwatch:PutMetricAlarm","cloudwatch:DeleteAlarms","cloudwatch:DescribeAlarms","cloudwatch:GetMetricData","cloudwatch:GetMetricStatistics","cloudwatch:ListMetrics","cloudwatch:PutDashboard","cloudwatch:DeleteDashboards","cloudwatch:GetDashboard","cloudwatch:ListDashboards","cloudwatch:TagResource","cloudwatch:ListTagsForResource","logs:CreateLogGroup","logs:DeleteLogGroup","logs:DescribeLogGroups","logs:PutRetentionPolicy","logs:DeleteRetentionPolicy","logs:TagLogGroup","logs:TagResource","logs:ListTagsForResource","logs:CreateLogStream","logs:DeleteLogStream","logs:DescribeLogStreams","logs:PutLogEvents","logs:GetLogEvents","logs:FilterLogEvents","logs:PutResourcePolicy","logs:DeleteResourcePolicy","logs:DescribeResourcePolicies"],
       "Resource": "*"
     },
     {
@@ -327,7 +348,7 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
     {
       "Sid": "IAMInstanceProfiles",
       "Effect": "Allow",
-      "Action": ["iam:CreateInstanceProfile","iam:DeleteInstanceProfile","iam:GetInstanceProfile"],
+      "Action": ["iam:CreateInstanceProfile","iam:DeleteInstanceProfile","iam:GetInstanceProfile","iam:TagInstanceProfile","iam:UntagInstanceProfile","iam:AddRoleToInstanceProfile","iam:RemoveRoleFromInstanceProfile","iam:ListInstanceProfilesForRole"],
       "Resource": "arn:aws:iam::${ACCOUNT_ID}:instance-profile/${PROJECT}-*"
     },
     {
@@ -356,7 +377,7 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
     {
       "Sid": "AutoScaling",
       "Effect": "Allow",
-      "Action": ["application-autoscaling:RegisterScalableTarget","application-autoscaling:DeregisterScalableTarget","application-autoscaling:DescribeScalableTargets","application-autoscaling:PutScalingPolicy","application-autoscaling:DeleteScalingPolicy","application-autoscaling:DescribeScalingPolicies"],
+      "Action": ["application-autoscaling:RegisterScalableTarget","application-autoscaling:DeregisterScalableTarget","application-autoscaling:DescribeScalableTargets","application-autoscaling:PutScalingPolicy","application-autoscaling:DeleteScalingPolicy","application-autoscaling:DescribeScalingPolicies","application-autoscaling:TagResource","application-autoscaling:UntagResource","application-autoscaling:ListTagsForResource"],
       "Resource": "*"
     },
     {
