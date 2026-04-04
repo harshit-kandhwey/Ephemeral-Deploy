@@ -394,8 +394,8 @@ cat > /var/lib/grafana/dashboards/nexusdeploy.json << DASHEOF
       "type": "timeseries", "title": "RDS CPU & Connections (CloudWatch)",
       "datasource": "CloudWatch",
       "targets": [
-        { "queryMode": "Metrics", "namespace": "AWS/RDS", "metricName": "CPUUtilization",      "dimensions": {"DBInstanceIdentifier": "${PROJECT}-${ENVIRONMENT}-postgres"} },
-        { "queryMode": "Metrics", "namespace": "AWS/RDS", "metricName": "DatabaseConnections", "dimensions": {"DBInstanceIdentifier": "${PROJECT}-${ENVIRONMENT}-postgres"} }
+        { "queryMode": "Metrics", "namespace": "AWS/RDS", "metricName": "CPUUtilization",      "dimensions": {"DBInstanceIdentifier": "$${PROJECT}-$${ENVIRONMENT}-postgres"} },
+        { "queryMode": "Metrics", "namespace": "AWS/RDS", "metricName": "DatabaseConnections", "dimensions": {"DBInstanceIdentifier": "$${PROJECT}-$${ENVIRONMENT}-postgres"} }
       ]
     }
   ]
