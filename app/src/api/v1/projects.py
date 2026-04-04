@@ -1,12 +1,12 @@
 from flask import jsonify, request
 from flask_jwt_extended import get_jwt_identity, jwt_required
 
-from . import api_v1
 from ...extensions import db
 from ...models.audit_log import AuditLog
 from ...models.project import Project
 from ...models.user import User
 from ...utils.decorators import get_current_user_or_401, role_required
+from . import api_v1
 
 
 def _get_real_ip():

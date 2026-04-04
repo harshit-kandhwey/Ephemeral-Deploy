@@ -33,6 +33,7 @@ def role_required(roles):
     Reuses get_current_user_or_401() to avoid duplicating JWT/user lookup logic.
     Usage: @role_required(['admin', 'manager'])
     """
+
     def decorator(f):
         @wraps(f)
         def wrapper(*args, **kwargs):

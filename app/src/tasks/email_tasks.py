@@ -13,9 +13,7 @@ def send_task_assignment_email(task_id, user_id):
     user = db.session.get(User, user_id)
 
     if not task or not user:
-        current_app.logger.warning(
-            f"send_task_assignment_email: task {task_id} or user {user_id} not found"
-        )
+        current_app.logger.warning(f"send_task_assignment_email: task {task_id} or user {user_id} not found")
         return
 
     # Log user_id instead of email — PII compliance (GDPR/CCPA)
@@ -30,24 +28,18 @@ def send_comment_notification(comment_id, user_id):
     user = db.session.get(User, user_id)
 
     if not comment or not user:
-        current_app.logger.warning(
-            f"send_comment_notification: comment {comment_id} or user {user_id} not found"
-        )
+        current_app.logger.warning(f"send_comment_notification: comment {comment_id} or user {user_id} not found")
         return
 
     # Log user_id instead of email — PII compliance (GDPR/CCPA)
-    current_app.logger.info(
-        f"[EMAIL] New comment on task {comment.task_id} for user_id={user.id}"
-    )
+    current_app.logger.info(f"[EMAIL] New comment on task {comment.task_id} for user_id={user.id}")
     return f"Notification sent to user_id={user.id}"
 
 
 @celery.task(name="tasks.send_daily_digest")
 def send_daily_digest():
     """Send daily digest of tasks to all users"""
-    users = db.session.execute(
-        db.select(User).filter_by(is_active=True)
-    ).scalars().all()
+    users = db.session.execute(db.select(User).filter_by(is_active=True)).scalars().all()
 
     for user in users:
         pending_tasks = db.session.execute(
