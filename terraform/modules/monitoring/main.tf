@@ -130,16 +130,16 @@ resource "aws_iam_role_policy" "monitoring_cloudwatch" {
       },
       {
         # Download monitoring configs at boot — scoped to monitoring prefix only
-        Sid    = "S3MonitoringConfigs"
-        Effect = "Allow"
-        Action = ["s3:GetObject"]
+        Sid      = "S3MonitoringConfigs"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
         Resource = "arn:aws:s3:::${var.state_bucket}/monitoring/*"
       },
       {
         # Fetch Grafana password at runtime — avoids embedding secrets in user_data
-        Sid    = "SSMGrafanaPassword"
-        Effect = "Allow"
-        Action = ["ssm:GetParameter"]
+        Sid      = "SSMGrafanaPassword"
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
         Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project}/${var.environment}/monitoring/grafana_password"
       }
     ]
@@ -270,9 +270,9 @@ resource "aws_cloudwatch_dashboard" "main" {
       {
         type = "metric", x = 0, y = 0, width = 8, height = 6
         properties = {
-          title   = "ECS API - CPU & Memory"
+          title = "ECS API - CPU & Memory"
           metrics = [
-            ["AWS/ECS", "CPUUtilization",    "ClusterName", var.ecs_cluster_name, "ServiceName", "${var.project}-${var.environment}-api"],
+            ["AWS/ECS", "CPUUtilization", "ClusterName", var.ecs_cluster_name, "ServiceName", "${var.project}-${var.environment}-api"],
             ["AWS/ECS", "MemoryUtilization", "ClusterName", var.ecs_cluster_name, "ServiceName", "${var.project}-${var.environment}-api"]
           ]
           period = 60, stat = "Average", region = var.aws_region
@@ -281,9 +281,9 @@ resource "aws_cloudwatch_dashboard" "main" {
       {
         type = "metric", x = 8, y = 0, width = 8, height = 6
         properties = {
-          title   = "RDS - CPU & Connections"
+          title = "RDS - CPU & Connections"
           metrics = [
-            ["AWS/RDS", "CPUUtilization",      "DBInstanceIdentifier", "${var.project}-${var.environment}-postgres"],
+            ["AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${var.project}-${var.environment}-postgres"],
             ["AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "${var.project}-${var.environment}-postgres"]
           ]
           period = 60, stat = "Average", region = var.aws_region
@@ -292,10 +292,10 @@ resource "aws_cloudwatch_dashboard" "main" {
       {
         type = "metric", x = 16, y = 0, width = 8, height = 6
         properties = {
-          title   = "Redis - Memory & Connections"
+          title = "Redis - Memory & Connections"
           metrics = [
             ["AWS/ElastiCache", "DatabaseMemoryUsagePercentage", "CacheClusterId", "${var.project}-${var.environment}-redis"],
-            ["AWS/ElastiCache", "CurrConnections",               "CacheClusterId", "${var.project}-${var.environment}-redis"]
+            ["AWS/ElastiCache", "CurrConnections", "CacheClusterId", "${var.project}-${var.environment}-redis"]
           ]
           period = 60, stat = "Average", region = var.aws_region
         }
