@@ -24,7 +24,7 @@ variable "worker_image" {
 }
 
 variable "git_commit" {
-  description = "Git commit SHA — injected as VERSION env var into containers"
+  description = "Git commit SHA injected as VERSION env var into containers"
   type        = string
   default     = "unknown"
 }

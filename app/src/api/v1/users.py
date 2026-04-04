@@ -100,7 +100,7 @@ def update_user(user_id):
                 except (ValueError, TypeError):
                     return jsonify({"error": "team_id must be an integer"}), 400
 
-                team = Team.query.get(team_id)
+                team = db.session.get(Team, team_id)
                 if not team:
                     return (
                         jsonify({"error": f"Team with id {team_id} does not exist"}),
