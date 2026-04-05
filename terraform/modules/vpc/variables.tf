@@ -4,7 +4,7 @@ variable "project" {
 }
 
 variable "environment" {
-  description = "Environment (dev, prod)"
+  description = "Environment (dev, staging, prod)"
   type        = string
 }
 
@@ -49,4 +49,10 @@ variable "log_retention_days" {
 variable "common_tags" {
   description = "Common tags applied to all resources"
   type        = map(string)
+}
+
+variable "aws_region" {
+  description = "AWS region for VPC endpoint service names"
+  type        = string
+  default     = "us-east-1"
 }

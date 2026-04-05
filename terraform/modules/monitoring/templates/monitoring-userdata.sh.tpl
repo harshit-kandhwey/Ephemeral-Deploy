@@ -21,7 +21,12 @@ echo "Project: $PROJECT | Environment: $ENVIRONMENT | Region: $AWS_REGION"
 echo "Installing system packages..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq wget curl jq unzip awscli
+apt-get install -y -qq wget curl jq unzip
+# awscli not in Ubuntu 24.04 apt repos — install v2 via official installer
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+unzip -q /tmp/awscliv2.zip -d /tmp
+/tmp/aws/install
+rm -rf /tmp/awscliv2.zip /tmp/aws
 echo "✅ System packages installed"
 
 # ── Fetch Grafana password from SSM ──────────────────────────────────────────

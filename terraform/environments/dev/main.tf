@@ -168,7 +168,8 @@ module "vpc" {
   environment           = local.environment
   vpc_cidr              = var.vpc_cidr
   availability_zones    = var.availability_zones
-  enable_nat_gateway    = false # Saves ~$1/day in dev
+  enable_nat_gateway    = false # VPC endpoints used instead — saves ~$1/day
+  aws_region            = var.aws_region
   flow_log_role_arn     = module.iam.vpc_flow_log_role_arn
   flow_log_traffic_type = "REJECT" # Cost-optimised: capture security events only
   log_retention_days    = 3

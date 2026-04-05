@@ -1,68 +1,61 @@
-region: NEXUSDEPLOY_REGION
-metrics:
-  - aws_namespace: AWS/ECS
-    aws_metric_name: CPUUtilization
-    aws_dimensions: [ClusterName, ServiceName]
-    aws_dimension_select:
-      ClusterName: [NEXUSDEPLOY_CLUSTER]
-      ServiceName: [NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-api, NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-worker]
-    aws_statistics: [Average]
-    period_seconds: 300
-    set_timestamp: false
-    metrics:
-      - name: ecs_cpu_utilization
-        help: ECS service CPU utilization percentage
-        type: gauge
+apiVersion: v1alpha1
+discovery:
+  exportedTagsOnMetrics:
+    AWS/ECS:
+      - ClusterName
+      - ServiceName
+    AWS/RDS:
+      - DBInstanceIdentifier
+    AWS/ElastiCache:
+      - CacheClusterId
+  jobs:
+    - regions:
+        - NEXUSDEPLOY_REGION
+      type: AWS/ECS
+      period: 300
+      length: 300
+      metrics:
+        - name: CPUUtilization
+          statistics: [Average]
+          nilToZero: true
+        - name: MemoryUtilization
+          statistics: [Average]
+          nilToZero: true
+      searchTags:
+        - key: Project
+          value: NEXUSDEPLOY_PROJECT
 
-  - aws_namespace: AWS/ECS
-    aws_metric_name: MemoryUtilization
-    aws_dimensions: [ClusterName, ServiceName]
-    aws_dimension_select:
-      ClusterName: [NEXUSDEPLOY_CLUSTER]
-      ServiceName: [NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-api, NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-worker]
-    aws_statistics: [Average]
-    period_seconds: 300
-    set_timestamp: false
-    metrics:
-      - name: ecs_memory_utilization
-        help: ECS service memory utilization percentage
-        type: gauge
+    - regions:
+        - NEXUSDEPLOY_REGION
+      type: AWS/RDS
+      period: 300
+      length: 300
+      metrics:
+        - name: CPUUtilization
+          statistics: [Average]
+          nilToZero: true
+        - name: DatabaseConnections
+          statistics: [Average]
+          nilToZero: true
+        - name: FreeStorageSpace
+          statistics: [Average]
+          nilToZero: true
+      searchTags:
+        - key: Project
+          value: NEXUSDEPLOY_PROJECT
 
-  - aws_namespace: AWS/RDS
-    aws_metric_name: CPUUtilization
-    aws_dimensions: [DBInstanceIdentifier]
-    aws_dimension_select:
-      DBInstanceIdentifier: [NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-postgres]
-    aws_statistics: [Average]
-    period_seconds: 300
-    set_timestamp: false
-    metrics:
-      - name: rds_cpu_utilization
-        help: RDS database CPU utilization percentage
-        type: gauge
-
-  - aws_namespace: AWS/RDS
-    aws_metric_name: DatabaseConnections
-    aws_dimensions: [DBInstanceIdentifier]
-    aws_dimension_select:
-      DBInstanceIdentifier: [NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-postgres]
-    aws_statistics: [Average]
-    period_seconds: 300
-    set_timestamp: false
-    metrics:
-      - name: rds_database_connections
-        help: RDS active database connections
-        type: gauge
-
-  - aws_namespace: AWS/ElastiCache
-    aws_metric_name: DatabaseMemoryUsagePercentage
-    aws_dimensions: [CacheClusterId]
-    aws_dimension_select:
-      CacheClusterId: [NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-redis]
-    aws_statistics: [Average]
-    period_seconds: 300
-    set_timestamp: false
-    metrics:
-      - name: redis_memory_usage_percentage
-        help: Redis memory usage percentage
-        type: gauge
+    - regions:
+        - NEXUSDEPLOY_REGION
+      type: AWS/ElastiCache
+      period: 300
+      length: 300
+      metrics:
+        - name: DatabaseMemoryUsagePercentage
+          statistics: [Average]
+          nilToZero: true
+        - name: CurrConnections
+          statistics: [Average]
+          nilToZero: true
+      searchTags:
+        - key: Project
+          value: NEXUSDEPLOY_PROJECT

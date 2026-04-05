@@ -103,16 +103,27 @@ resource "aws_iam_role_policy" "monitoring_cloudwatch" {
         Resource = "*"
       },
       {
-        Sid    = "ECSServiceDiscovery"
+        # YACE needs tag:GetResources to discover resources via searchTags
+        # Plus describe APIs for ECS, RDS, ElastiCache metric collection
+        Sid    = "YACEDiscovery"
         Effect = "Allow"
         Action = [
+          "tag:GetResources",
+          "iam:ListAccountAliases",
           "ecs:ListTasks",
           "ecs:DescribeTasks",
           "ecs:ListServices",
           "ecs:DescribeServices",
           "ecs:DescribeTaskDefinition",
+          "ecs:ListClusters",
+          "ecs:DescribeClusters",
           "ec2:DescribeInstances",
-          "ec2:DescribeNetworkInterfaces"
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DescribeRegions",
+          "rds:DescribeDBInstances",
+          "rds:ListTagsForResource",
+          "elasticache:DescribeCacheClusters",
+          "elasticache:ListTagsForResource"
         ]
         Resource = "*"
       },

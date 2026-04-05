@@ -190,3 +190,79 @@ resource "aws_flow_log" "main" {
     Name = "${var.project}-${var.environment}-flow-logs"
   })
 }
+
+# ── VPC Endpoints ─────────────────────────────────────────────────────────────
+# Interface endpoints allow ECS tasks in private subnets to reach AWS APIs
+# without a NAT Gateway. Cheaper than NAT (~$0.01/hr each vs $0.045/hr NAT).
+#
+# Required for ECS Fargate:
+#   ecr.api       — image pull authentication
+#   ecr.dkr       — image layer download
+#   logs          — CloudWatch log streaming from containers
+#   secretsmanager— app secrets fetched at task startup
+#   ssm           — SSM parameter store access
+#   s3 (Gateway)  — ECR image layer storage; free, no hourly charge
+
+resource "aws_security_group" "vpc_endpoints" {
+  name        = "${var.project}-${var.environment}-vpc-endpoints-sg"
+  description = "Allow HTTPS from within VPC to AWS service endpoints"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-vpc-endpoints-sg"
+  })
+}
+
+locals {
+  # Interface endpoints — one per service, shared across all private subnets
+  interface_endpoints = {
+    ecr_api        = "com.amazonaws.${var.aws_region}.ecr.api"
+    ecr_dkr        = "com.amazonaws.${var.aws_region}.ecr.dkr"
+    logs           = "com.amazonaws.${var.aws_region}.logs"
+    secretsmanager = "com.amazonaws.${var.aws_region}.secretsmanager"
+    ssm            = "com.amazonaws.${var.aws_region}.ssm"
+    ssmmessages    = "com.amazonaws.${var.aws_region}.ssmmessages"
+    ec2messages    = "com.amazonaws.${var.aws_region}.ec2messages"
+  }
+}
+
+resource "aws_vpc_endpoint" "interface" {
+  for_each = local.interface_endpoints
+
+  vpc_id              = aws_vpc.main.id
+  service_name        = each.value
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private_app[*].id
+  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  private_dns_enabled = true
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-endpoint-${each.key}"
+  })
+}
+
+# S3 Gateway endpoint — free, no hourly charge, routes S3 traffic via AWS backbone
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${var.aws_region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [aws_route_table.private.id]
+
+  tags = merge(var.common_tags, {
+    Name = "${var.project}-${var.environment}-endpoint-s3"
+  })
+}
