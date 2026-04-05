@@ -264,7 +264,7 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
     {
       "Sid": "TerraformState",
       "Effect": "Allow",
-      "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:ListBucket","s3:ListBucketVersions","s3:GetBucketVersioning","s3:GetEncryptionConfiguration","s3:PutObjectTagging","s3:GetObjectTagging","s3:DeleteObjectTagging","s3:DeleteObjectVersion","s3:GetObjectVersion"],
+      "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:ListBucket","s3:ListBucketVersions","s3:GetBucketVersioning","s3:GetEncryptionConfiguration","s3:PutObjectTagging","s3:GetObjectTagging","s3:DeleteObjectTagging","s3:GetObjectVersion"],
       "Resource": ["arn:aws:s3:::${STATE_BUCKET}","arn:aws:s3:::${STATE_BUCKET}/*"]
     },
     {
@@ -495,7 +495,7 @@ echo -e "${GREEN}═════════════════════
 echo -e "${GREEN} Bootstrap Complete!${NC}"
 echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
 echo ""
-echo "  S3 State Bucket : s3://$STATE_BUCKET  (encrypted, versioning disabled for demo)"
+echo "  S3 State Bucket : s3://$STATE_BUCKET  (versioned + encrypted)"
 echo "  OIDC Provider   : $OIDC_ARN"
 echo "  IAM Role        : $ROLE_ARN"
 echo "  IAM Policy      : least-privilege inline (covers deploy + cleanup)"

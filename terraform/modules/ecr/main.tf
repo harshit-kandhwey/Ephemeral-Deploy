@@ -14,7 +14,7 @@ terraform {
 # ─────────────────────────────────────────────
 
 resource "aws_ecr_repository" "api" {
-  force_delete         = true # Allows destroy even when images exist
+  force_delete         = var.environment != "prod" # Protect prod images from accidental deletion
   name                 = "${var.project}-api-${var.environment}"
   image_tag_mutability = "MUTABLE"
 
@@ -30,7 +30,7 @@ resource "aws_ecr_repository" "api" {
 }
 
 resource "aws_ecr_repository" "worker" {
-  force_delete         = true # Allows destroy even when images exist
+  force_delete         = var.environment != "prod" # Protect prod images from accidental deletion
   name                 = "${var.project}-worker-${var.environment}"
   image_tag_mutability = "MUTABLE"
 

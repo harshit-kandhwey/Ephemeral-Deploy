@@ -51,7 +51,7 @@ jobs:
       - name: Wait for TTL delay
         if: github.event.inputs.delay_minutes != '0' && github.event.inputs.delay_minutes != ''
         run: |
-          DELAY=${{ github.event.inputs.delay_minutes || 0 }}
+          DELAY='${{ github.event.inputs.delay_minutes || 0 }}'
           if ! [[ "$DELAY" =~ ^[0-9]+$ ]]; then
             echo "❌ Invalid delay_minutes: must be a non-negative integer, got: $DELAY"
             exit 1
@@ -59,7 +59,6 @@ jobs:
           echo "⏳ Waiting ${DELAY} minutes before cleanup..."
           echo "Reason: ${{ github.event.inputs.reason }}"
           sleep $((DELAY * 60))
-
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -179,5 +178,5 @@ jobs:
           echo "| Reason | ${{ github.event.inputs.reason || 'Scheduled nightly cleanup' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Terraform Destroy | ${{ steps.tf_destroy.outputs.tf_destroy_exit == '0' && '✅ Success' || '⚠️ Used fallback script' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| ECR Images | ✅ Managed by lifecycle policy |" >> $GITHUB_STEP_SUMMARY
-          echo "| S3 Bucket | ✅ Preserved (bootstrap resource) |
-          echo "| State File | 🗑️ Deleted (backed up) |" >> $GITHUB_STEP_SUMMARY" >> $GITHUB_STEP_SUMMARY
+          echo "| S3 Bucket | ✅ Preserved (bootstrap resource) |" >> $GITHUB_STEP_SUMMARY
+          echo "| State File | 🗑️ Deleted (backed up) |" >> $GITHUB_STEP_SUMMARY

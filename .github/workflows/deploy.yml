@@ -51,7 +51,8 @@ jobs:
       environment:    ${{ steps.ctx.outputs.environment }}
       tf_action:      ${{ steps.ctx.outputs.tf_action }}
       image_tag:      ${{ github.sha }}
-      app_changed:    ${{ steps.changed.outputs.app_changed }}
+      # current_images step overrides app_changed to 'true' when ECR is empty
+      app_changed:    ${{ steps.current_images.outputs.app_changed || steps.changed.outputs.app_changed }}
       current_api:    ${{ steps.current_images.outputs.api_image }}
       current_worker: ${{ steps.current_images.outputs.worker_image }}
 
