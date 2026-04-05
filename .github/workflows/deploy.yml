@@ -20,7 +20,7 @@ on:
       app_changed:
         description: "Whether app code changed (passed from CI)"
         required: false
-        default: "true" # default true so manual triggers always build
+        default: "false" # default false — CI passes the real value; manual triggers skip build if images exist
 
 concurrency:
   group: deploy-${{ github.ref_name }}
