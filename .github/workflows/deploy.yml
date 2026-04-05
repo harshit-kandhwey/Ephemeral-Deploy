@@ -216,7 +216,7 @@ jobs:
           echo "✅ ECR repositories provisioned"
 
       - name: Set ECR registry output
-        id: ecr-login
+        id: ecr-registry
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           echo "registry=$ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com" >> $GITHUB_OUTPUT
