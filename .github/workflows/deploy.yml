@@ -215,6 +215,49 @@ jobs:
           terraform apply             -target=module.ecr             -var-file=terraform.tfvars             -auto-approve
           echo "✅ ECR repositories provisioned"
 
+      - name: Ensure ECR lifecycle policies exist
+        # Lifecycle policies may have been deleted manually or by a failed cleanup.
+        # Create them via AWS CLI if missing — idempotent, safe to run every time.
+        # This guarantees the import block in imports.tf never fails.
+        run: |
+          ENV="${{ needs.setup.outputs.environment }}"
+          REGION="${{ env.AWS_REGION }}"
+
+          for repo in nexusdeploy-api-$ENV nexusdeploy-worker-$ENV; do
+            if ! aws ecr get-lifecycle-policy                 --repository-name "$repo"                 --region "$REGION" 2>/dev/null; then
+              echo "⚠️  Lifecycle policy missing for $repo — creating..."
+              aws ecr put-lifecycle-policy                 --repository-name "$repo"                 --region "$REGION"                 --lifecycle-policy-text '{
+                  "rules": [
+                    {
+                      "rulePriority": 1,
+                      "description": "Keep last 3 tagged images",
+                      "selection": {
+                        "tagStatus": "tagged",
+                        "tagPrefixList": ["v", "sha"],
+                        "countType": "imageCountMoreThan",
+                        "countNumber": 3
+                      },
+                      "action": { "type": "expire" }
+                    },
+                    {
+                      "rulePriority": 2,
+                      "description": "Delete untagged images after 1 day",
+                      "selection": {
+                        "tagStatus": "untagged",
+                        "countType": "sinceImagePushed",
+                        "countUnit": "days",
+                        "countNumber": 1
+                      },
+                      "action": { "type": "expire" }
+                    }
+                  ]
+                }'
+              echo "✅ Lifecycle policy created for $repo"
+            else
+              echo "✅ Lifecycle policy already exists for $repo"
+            fi
+          done
+
       - name: Set ECR registry output
         id: ecr-registry
         run: |
