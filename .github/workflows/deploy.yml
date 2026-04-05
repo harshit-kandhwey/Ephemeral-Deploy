@@ -200,25 +200,6 @@ jobs:
             echo "🏗️  ECR repos missing — will provision via Terraform"
           fi
 
-      - name: Import ECR repos into state (if repos exist but state is fresh)
-        # After cleanup wipes the state file, repos still exist in AWS but
-        # Terraform has no memory of them. Import them so apply does not try to create.
-        if: steps.ecr-check.outputs.repos_exist == 'true'
-        working-directory: terraform/environments/${{ needs.setup.outputs.environment }}
-        env:
-          TF_VAR_api_image: "placeholder"
-          TF_VAR_worker_image: "placeholder"
-          TF_VAR_git_commit: ${{ github.sha }}
-        run: |
-          ENV="${{ needs.setup.outputs.environment }}"
-          terraform import -var-file=terraform.tfvars \
-            module.ecr.aws_ecr_repository.api \
-            "nexusdeploy-api-$ENV" 2>/dev/null || true
-          terraform import -var-file=terraform.tfvars \
-            module.ecr.aws_ecr_repository.worker \
-            "nexusdeploy-worker-$ENV" 2>/dev/null || true
-          echo "ECR repos imported into state"
-
       - name: Terraform Apply — ECR only
         # Only runs when repos don't exist yet (first deploy or after full teardown).
         # Skipped when repos already exist — avoids redundant Terraform runs.
