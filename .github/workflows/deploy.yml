@@ -186,10 +186,26 @@ jobs:
             -backend-config="region=${{ env.AWS_REGION }}" \
             -backend-config="encrypt=true"
 
+      - name: Check if ECR repositories already exist
+        id: ecr-check
+        run: |
+          ENV="${{ needs.setup.outputs.environment }}"
+          API_EXISTS=$(aws ecr describe-repositories             --repository-names "nexusdeploy-api-$ENV"             --region ${{ env.AWS_REGION }}             --query 'repositories[0].repositoryName'             --output text 2>/dev/null || echo "")
+          WORKER_EXISTS=$(aws ecr describe-repositories             --repository-names "nexusdeploy-worker-$ENV"             --region ${{ env.AWS_REGION }}             --query 'repositories[0].repositoryName'             --output text 2>/dev/null || echo "")
+
+          if [[ -n "$API_EXISTS" && -n "$WORKER_EXISTS" ]]; then
+            echo "repos_exist=true" >> $GITHUB_OUTPUT
+            echo "ℹ️  ECR repos already exist — skipping terraform apply"
+            echo "registry=$(aws sts get-caller-identity --query Account --output text).dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com" >> $GITHUB_OUTPUT
+          else
+            echo "repos_exist=false" >> $GITHUB_OUTPUT
+            echo "🏗️  ECR repos missing — will provision via Terraform"
+          fi
+
       - name: Terraform Apply — ECR only
-        # Creates ECR repositories before images are pushed.
-        # -target=module.ecr is intentional — only ECR is needed at this stage.
-        # The full apply (with ECS, RDS etc.) runs after images are pushed.
+        # Only runs when repos don't exist yet (first deploy or after full teardown).
+        # Skipped when repos already exist — avoids redundant Terraform runs.
+        if: steps.ecr-check.outputs.repos_exist == 'false'
         working-directory: terraform/environments/${{ needs.setup.outputs.environment }}
         env:
           TF_VAR_api_image:    "placeholder"
@@ -197,6 +213,13 @@ jobs:
           TF_VAR_git_commit:   ${{ github.sha }}
         run: |
           terraform apply             -target=module.ecr             -var-file=terraform.tfvars             -auto-approve
+          echo "✅ ECR repositories provisioned"
+
+      - name: Set ECR registry output
+        id: ecr-login
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "registry=$ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com" >> $GITHUB_OUTPUT
           echo "✅ ECR repositories ready"
 
       - name: Login to ECR
