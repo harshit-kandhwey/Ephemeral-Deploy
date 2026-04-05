@@ -495,7 +495,7 @@ echo -e "${GREEN}═════════════════════
 echo -e "${GREEN} Bootstrap Complete!${NC}"
 echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
 echo ""
-echo "  S3 State Bucket : s3://$STATE_BUCKET  (versioned + encrypted)"
+echo "  S3 State Bucket : s3://$STATE_BUCKET  (encrypted, versioning disabled)"
 echo "  OIDC Provider   : $OIDC_ARN"
 echo "  IAM Role        : $ROLE_ARN"
 echo "  IAM Policy      : least-privilege inline (covers deploy + cleanup)"
