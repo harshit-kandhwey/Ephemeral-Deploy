@@ -81,19 +81,36 @@ jobs:
       - name: Detect changed files
         id: changed
         run: |
-          # Get list of changed files — fetch-depth: 2 ensures HEAD~1 is available
-          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "app/")
+          # git diff is unreliable on workflow_dispatch (no push context).
+          # Use GITHUB_EVENT_NAME to detect dispatch and fall back to ECR check.
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # On manual/dispatched deploys, check if image for this SHA already exists.
+            # If it does, no rebuild needed. If not, build is required.
+            ENV="${{ github.event.inputs.environment }}"
+            SHA="${{ github.sha }}"
+            EXISTS=$(aws ecr describe-images               --repository-name "nexusdeploy-api-$ENV"               --region ${{ env.AWS_REGION }}               --image-ids imageTag="$SHA"               --query 'imageDetails[0].imageDigest'               --output text 2>/dev/null || echo "")
 
-          echo "Changed files:"
-          echo "$CHANGED"
-
-          # Check if any app/ files changed
-          if echo "$CHANGED" | grep -q "^app/"; then
-            echo "app_changed=true" >> $GITHUB_OUTPUT
-            echo "✅ App code changed — image build required"
+            if [[ -n "$EXISTS" && "$EXISTS" != "None" ]]; then
+              echo "app_changed=false" >> $GITHUB_OUTPUT
+              echo "⏭️  Image for $SHA already in ECR — skipping build"
+            else
+              echo "app_changed=true" >> $GITHUB_OUTPUT
+              echo "🔨 No image for $SHA in ECR — build required"
+            fi
           else
-            echo "app_changed=false" >> $GITHUB_OUTPUT
-            echo "⏭️  No app code changes — skipping image build"
+            # Push-triggered deploy — use git diff for accurate change detection
+            CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+
+            echo "Changed files:"
+            echo "$CHANGED"
+
+            if echo "$CHANGED" | grep -q "^app/"; then
+              echo "app_changed=true" >> $GITHUB_OUTPUT
+              echo "✅ App code changed — image build required"
+            else
+              echo "app_changed=false" >> $GITHUB_OUTPUT
+              echo "⏭️  No app code changes — skipping image build"
+            fi
           fi
 
       - name: Get current image URIs (infra-only deploy)
@@ -451,8 +468,23 @@ jobs:
           echo "| Prometheus | ${{ steps.outputs.outputs.prometheus_url }} |" >> $GITHUB_STEP_SUMMARY
           echo "| ⚠️ Auto-destroy in | 30 minutes |" >> $GITHUB_STEP_SUMMARY
 
-      # Schedule auto-cleanup after 30 minutes
-      - name: Schedule auto-cleanup
+  # ─────────────────────────────────────────────
+  # POST-DEPLOY: Success → cleanup after 30 min TTL
+  # Runs in PARALLEL with any prod gating steps.
+  # ─────────────────────────────────────────────
+  cleanup-on-success:
+    name: Schedule cleanup (30 min TTL)
+    runs-on: ubuntu-latest
+    needs: [setup, deploy-dev]
+    if: |
+      needs.setup.outputs.environment == 'dev' &&
+      needs.deploy-dev.result == 'success'
+
+    permissions:
+      actions: write
+
+    steps:
+      - name: Trigger cleanup after 30 minutes
         uses: actions/github-script@v7
         with:
           script: |
@@ -460,7 +492,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: 'cleanup.yml',
-              ref: 'dev',
+              ref: context.ref,
               inputs: {
                 environment: 'dev',
                 delay_minutes: '30',
@@ -468,6 +500,39 @@ jobs:
               }
             });
             console.log('⏳ Cleanup scheduled in 30 minutes');
+
+  # ─────────────────────────────────────────────
+  # POST-DEPLOY: Failure → cleanup immediately
+  # Cleans up partial infrastructure on failed deploy.
+  # ─────────────────────────────────────────────
+  cleanup-on-failure:
+    name: Cleanup on failure (immediate)
+    runs-on: ubuntu-latest
+    needs: [setup, deploy-dev]
+    if: |
+      needs.setup.outputs.environment == 'dev' &&
+      needs.deploy-dev.result == 'failure'
+
+    permissions:
+      actions: write
+
+    steps:
+      - name: Trigger immediate cleanup
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'cleanup.yml',
+              ref: context.ref,
+              inputs: {
+                environment: 'dev',
+                delay_minutes: '0',
+                reason: 'Auto-cleanup: deploy failed — removing partial infrastructure'
+              }
+            });
+            console.log('🔥 Immediate cleanup triggered due to deploy failure');
 
   # ─────────────────────────────────────────────
   # PROD DEPLOYMENT — Blue-Green (branch: main)

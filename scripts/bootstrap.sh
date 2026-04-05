@@ -312,7 +312,7 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
     {
       "Sid": "EC2Network",
       "Effect": "Allow",
-      "Action": ["ec2:CreateVpc","ec2:DeleteVpc","ec2:DescribeVpcs","ec2:ModifyVpcAttribute","ec2:DescribeVpcAttribute","ec2:DescribeAddressesAttribute","ec2:CreateSubnet","ec2:DeleteSubnet","ec2:DescribeSubnets","ec2:ModifySubnetAttribute","ec2:CreateRouteTable","ec2:DeleteRouteTable","ec2:DescribeRouteTables","ec2:AssociateRouteTable","ec2:DisassociateRouteTable","ec2:CreateRoute","ec2:DeleteRoute","ec2:CreateInternetGateway","ec2:DeleteInternetGateway","ec2:DescribeInternetGateways","ec2:AttachInternetGateway","ec2:DetachInternetGateway","ec2:CreateNatGateway","ec2:DeleteNatGateway","ec2:DescribeNatGateways","ec2:AllocateAddress","ec2:ReleaseAddress","ec2:DescribeAddresses","ec2:AssociateAddress","ec2:DisassociateAddress","ec2:CreateFlowLogs","ec2:DeleteFlowLogs","ec2:DescribeFlowLogs","ec2:CreateSecurityGroup","ec2:DeleteSecurityGroup","ec2:DescribeSecurityGroups","ec2:AuthorizeSecurityGroupIngress","ec2:RevokeSecurityGroupIngress","ec2:AuthorizeSecurityGroupEgress","ec2:RevokeSecurityGroupEgress"],
+      "Action": ["ec2:CreateVpc","ec2:DeleteVpc","ec2:DescribeVpcs","ec2:ModifyVpcAttribute","ec2:DescribeVpcAttribute","ec2:DescribeAddressesAttribute","ec2:DescribeInstanceAttribute","ec2:CreateSubnet","ec2:DeleteSubnet","ec2:DescribeSubnets","ec2:ModifySubnetAttribute","ec2:CreateRouteTable","ec2:DeleteRouteTable","ec2:DescribeRouteTables","ec2:AssociateRouteTable","ec2:DisassociateRouteTable","ec2:CreateRoute","ec2:DeleteRoute","ec2:CreateInternetGateway","ec2:DeleteInternetGateway","ec2:DescribeInternetGateways","ec2:AttachInternetGateway","ec2:DetachInternetGateway","ec2:CreateNatGateway","ec2:DeleteNatGateway","ec2:DescribeNatGateways","ec2:AllocateAddress","ec2:ReleaseAddress","ec2:DescribeAddresses","ec2:AssociateAddress","ec2:DisassociateAddress","ec2:CreateFlowLogs","ec2:DeleteFlowLogs","ec2:DescribeFlowLogs","ec2:CreateSecurityGroup","ec2:DeleteSecurityGroup","ec2:DescribeSecurityGroups","ec2:AuthorizeSecurityGroupIngress","ec2:RevokeSecurityGroupIngress","ec2:AuthorizeSecurityGroupEgress","ec2:RevokeSecurityGroupEgress"],
       "Resource": "*"
     },
     {
@@ -377,7 +377,7 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
     {
       "Sid": "AutoScaling",
       "Effect": "Allow",
-      "Action": ["application-autoscaling:RegisterScalableTarget","application-autoscaling:DeregisterScalableTarget","application-autoscaling:DescribeScalableTargets","application-autoscaling:PutScalingPolicy","application-autoscaling:DeleteScalingPolicy","application-autoscaling:DescribeScalingPolicies","application-autoscaling:TagResource","application-autoscaling:UntagResource","application-autoscaling:ListTagsForResource"],
+      "Action": ["application-autoscaling:RegisterScalableTarget","application-autoscaling:DeregisterScalableTarget","application-autoscaling:DescribeScalableTargets","application-autoscaling:PutScalingPolicy","application-autoscaling:DeleteScalingPolicy","application-autoscaling:DescribeScalingPolicies","application-autoscaling:TagResource","application-autoscaling:UntagResource","application-autoscaling:ListTagsForResource","iam:CreateServiceLinkedRole"],
       "Resource": "*"
     },
     {
@@ -443,6 +443,9 @@ echo -e "  ${BLUE}💡 Suggested values (copy each one separately):${NC}"
 echo "     SECRET_KEY     : $SUGGESTED_SECRET_KEY"
 echo "     JWT_SECRET_KEY : $SUGGESTED_JWT_KEY"
 echo ""
+echo -e "  ${YELLOW}⚠️  RDS passwords must NOT contain: / @ \" or spaces${NC}"
+echo "     Use letters, numbers, and: ! # \$ % ^ & * ( ) - _ = + [ ] { } | ; : , . < > ?"
+echo ""
 
 create_ssm_param() {
   local path="/$PROJECT/$ENV/$1"
@@ -495,7 +498,7 @@ echo -e "${GREEN}═════════════════════
 echo -e "${GREEN} Bootstrap Complete!${NC}"
 echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
 echo ""
-echo "  S3 State Bucket : s3://$STATE_BUCKET  (encrypted, versioning disabled)"
+echo "  S3 State Bucket : s3://$STATE_BUCKET  (encrypted, versioning disabled for demo)"
 echo "  OIDC Provider   : $OIDC_ARN"
 echo "  IAM Role        : $ROLE_ARN"
 echo "  IAM Policy      : least-privilege inline (covers deploy + cleanup)"
