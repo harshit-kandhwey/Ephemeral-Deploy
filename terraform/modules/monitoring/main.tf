@@ -153,13 +153,15 @@ resource "aws_iam_instance_profile" "monitoring" {
 }
 
 # ── EC2 Instance ──────────────────────────────────────────────────────────────
-data "aws_ami" "amazon_linux_2023" {
+data "aws_ami" "ubuntu" {
   most_recent = true
-  owners      = ["amazon"]
+  owners      = ["099720109477"] # Canonical
+
   filter {
     name   = "name"
-    values = ["al2023-ami-*-x86_64"]
+    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
   }
+
   filter {
     name   = "virtualization-type"
     values = ["hvm"]
@@ -179,7 +181,7 @@ resource "aws_eip_association" "monitoring" {
 }
 
 resource "aws_instance" "monitoring" {
-  ami                    = data.aws_ami.amazon_linux_2023.id
+  ami                    = data.aws_ami.ubuntu.id
   instance_type          = "t3.micro"
   subnet_id              = var.public_subnet_id
   vpc_security_group_ids = [var.monitoring_sg_id]
