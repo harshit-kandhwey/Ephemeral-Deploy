@@ -33,24 +33,3 @@ import {
   to = module.iam.aws_iam_role_policy.github_actions_deploy
   id = "nexusdeploy-github-actions-deploy:nexusdeploy-github-actions-full-deploy"
 }
-
-# ECR repositories — created by ecr-provision job on first deploy
-import {
-  to = module.ecr.aws_ecr_repository.api
-  id = "nexusdeploy-api-dev"
-}
-
-import {
-  to = module.ecr.aws_ecr_repository.worker
-  id = "nexusdeploy-worker-dev"
-}
-
-import {
-  to = module.ecr.aws_ecr_lifecycle_policy.api
-  id = "nexusdeploy-api-dev"
-}
-
-import {
-  to = module.ecr.aws_ecr_lifecycle_policy.worker
-  id = "nexusdeploy-worker-dev"
-}
