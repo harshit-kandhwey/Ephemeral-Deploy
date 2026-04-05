@@ -148,8 +148,9 @@ jobs:
     name: Provision ECR (${{ needs.setup.outputs.environment }})
     runs-on: ubuntu-latest
     needs: setup
-    # Only needed when app changed — ECR repos already exist on infra-only pushes
-    if: needs.setup.outputs.app_changed == 'true'
+    # Always runs — ecr-check step inside skips terraform apply if repos already exist.
+    # This ensures repos are created even on infra-only pushes where repos may be missing.
+    if: always() && needs.setup.result == 'success'
     environment: ${{ needs.setup.outputs.environment }}
 
     permissions:
