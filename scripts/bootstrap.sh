@@ -264,7 +264,7 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
     {
       "Sid": "TerraformState",
       "Effect": "Allow",
-      "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:ListBucket","s3:GetBucketVersioning","s3:GetEncryptionConfiguration","s3:PutObjectTagging","s3:GetObjectTagging","s3:DeleteObjectTagging"],
+      "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:ListBucket","s3:ListBucketVersions","s3:GetBucketVersioning","s3:GetEncryptionConfiguration","s3:PutObjectTagging","s3:GetObjectTagging","s3:DeleteObjectTagging","s3:DeleteObjectVersion","s3:GetObjectVersion"],
       "Resource": ["arn:aws:s3:::${STATE_BUCKET}","arn:aws:s3:::${STATE_BUCKET}/*"]
     },
     {
