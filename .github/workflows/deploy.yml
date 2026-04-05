@@ -432,12 +432,14 @@ jobs:
 
       - name: Get outputs
         id: outputs
+        continue-on-error: true # Non-blocking — URLs are informational only
         working-directory: terraform/environments/dev
         run: |
           echo "grafana_url=$(terraform output -raw grafana_url 2>/dev/null || echo 'deploying...')"    >> $GITHUB_OUTPUT
           echo "prometheus_url=$(terraform output -raw prometheus_url 2>/dev/null || echo 'deploying...')" >> $GITHUB_OUTPUT
 
       - name: Deployment summary
+        continue-on-error: true # Non-blocking — summary failure should not fail the deploy
         run: |
           echo "## ✅ Dev Deployment Complete" >> $GITHUB_STEP_SUMMARY
           echo "| | |" >> $GITHUB_STEP_SUMMARY
