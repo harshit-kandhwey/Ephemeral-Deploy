@@ -2,13 +2,13 @@ name: CI - Test & Build
 
 on:
   push:
-    branches: [ main, dev, 'feature/**' ]
+    branches: [main, dev, "feature/**"]
   pull_request:
-    branches: [ main, dev ]
-  workflow_dispatch:  # allow manual trigger
+    branches: [main, dev]
+  workflow_dispatch: # allow manual trigger
 
 env:
-  PYTHON_VERSION: '3.11'
+  PYTHON_VERSION: "3.11"
   AWS_REGION: us-east-1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -26,7 +26,7 @@ jobs:
     name: Detect Changed Files
     runs-on: ubuntu-latest
     outputs:
-      app_changed:  ${{ steps.filter.outputs.app }}
+      app_changed: ${{ steps.filter.outputs.app }}
       infra_changed: ${{ steps.filter.outputs.infra }}
 
     steps:
@@ -68,7 +68,7 @@ jobs:
     if: needs.detect-changes.outputs.app_changed == 'true'
 
     permissions:
-      contents: write  # needed to push auto-format commits
+      contents: write # needed to push auto-format commits
 
     steps:
       - uses: actions/checkout@v4
@@ -81,7 +81,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+          cache: "pip"
 
       - name: Install lint dependencies
         run: pip install flake8 black isort bandit safety
@@ -163,7 +163,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+          cache: "pip"
 
       - name: Install dependencies
         run: pip install -r app/requirements.txt
@@ -310,9 +310,9 @@ jobs:
           TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/tf-plugin-cache
           # Fake values so terraform plan can evaluate templatefile() and
           # other functions that validate doesn't catch
-          TF_VAR_api_image:    "placeholder"
+          TF_VAR_api_image: "placeholder"
           TF_VAR_worker_image: "placeholder"
-          TF_VAR_git_commit:   "ci-validate"
+          TF_VAR_git_commit: "ci-validate"
         run: |
           mkdir -p "$TF_PLUGIN_CACHE_DIR"
           for env in dev prod; do
@@ -385,7 +385,8 @@ jobs:
               ref: context.ref,
               inputs: {
                 environment: branch === 'main' ? 'prod' : 'dev',
-                action: 'apply'
+                action: 'apply',
+                app_changed: '${{ needs.detect-changes.outputs.app_changed }}'
               }
             });
             console.log(`🚀 Deploy triggered for ${branch}`);

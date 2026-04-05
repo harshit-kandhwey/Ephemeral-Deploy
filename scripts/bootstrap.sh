@@ -264,7 +264,7 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
     {
       "Sid": "TerraformState",
       "Effect": "Allow",
-      "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:ListBucket","s3:GetBucketVersioning","s3:GetEncryptionConfiguration","s3:PutObjectTagging","s3:GetObjectTagging","s3:DeleteObjectTagging"],
+      "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:ListBucket","s3:ListBucketVersions","s3:GetBucketVersioning","s3:GetEncryptionConfiguration","s3:PutObjectTagging","s3:GetObjectTagging","s3:DeleteObjectTagging","s3:GetObjectVersion"],
       "Resource": ["arn:aws:s3:::${STATE_BUCKET}","arn:aws:s3:::${STATE_BUCKET}/*"]
     },
     {
@@ -312,7 +312,7 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
     {
       "Sid": "EC2Network",
       "Effect": "Allow",
-      "Action": ["ec2:CreateVpc","ec2:DeleteVpc","ec2:DescribeVpcs","ec2:ModifyVpcAttribute","ec2:DescribeVpcAttribute","ec2:DescribeAddressesAttribute","ec2:CreateSubnet","ec2:DeleteSubnet","ec2:DescribeSubnets","ec2:ModifySubnetAttribute","ec2:CreateRouteTable","ec2:DeleteRouteTable","ec2:DescribeRouteTables","ec2:AssociateRouteTable","ec2:DisassociateRouteTable","ec2:CreateRoute","ec2:DeleteRoute","ec2:CreateInternetGateway","ec2:DeleteInternetGateway","ec2:DescribeInternetGateways","ec2:AttachInternetGateway","ec2:DetachInternetGateway","ec2:CreateNatGateway","ec2:DeleteNatGateway","ec2:DescribeNatGateways","ec2:AllocateAddress","ec2:ReleaseAddress","ec2:DescribeAddresses","ec2:AssociateAddress","ec2:DisassociateAddress","ec2:CreateFlowLogs","ec2:DeleteFlowLogs","ec2:DescribeFlowLogs","ec2:CreateSecurityGroup","ec2:DeleteSecurityGroup","ec2:DescribeSecurityGroups","ec2:AuthorizeSecurityGroupIngress","ec2:RevokeSecurityGroupIngress","ec2:AuthorizeSecurityGroupEgress","ec2:RevokeSecurityGroupEgress"],
+      "Action": ["ec2:CreateVpc","ec2:DeleteVpc","ec2:DescribeVpcs","ec2:ModifyVpcAttribute","ec2:DescribeVpcAttribute","ec2:DescribeAddressesAttribute","ec2:DescribeInstanceAttribute","ec2:DescribeInstanceCreditSpecifications","ec2:CreateSubnet","ec2:DeleteSubnet","ec2:DescribeSubnets","ec2:ModifySubnetAttribute","ec2:CreateRouteTable","ec2:DeleteRouteTable","ec2:DescribeRouteTables","ec2:AssociateRouteTable","ec2:DisassociateRouteTable","ec2:CreateRoute","ec2:DeleteRoute","ec2:CreateInternetGateway","ec2:DeleteInternetGateway","ec2:DescribeInternetGateways","ec2:AttachInternetGateway","ec2:DetachInternetGateway","ec2:CreateNatGateway","ec2:DeleteNatGateway","ec2:DescribeNatGateways","ec2:AllocateAddress","ec2:ReleaseAddress","ec2:DescribeAddresses","ec2:AssociateAddress","ec2:DisassociateAddress","ec2:CreateFlowLogs","ec2:DeleteFlowLogs","ec2:DescribeFlowLogs","ec2:CreateSecurityGroup","ec2:DeleteSecurityGroup","ec2:DescribeSecurityGroups","ec2:AuthorizeSecurityGroupIngress","ec2:RevokeSecurityGroupIngress","ec2:AuthorizeSecurityGroupEgress","ec2:RevokeSecurityGroupEgress"],
       "Resource": "*"
     },
     {
@@ -377,7 +377,7 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
     {
       "Sid": "AutoScaling",
       "Effect": "Allow",
-      "Action": ["application-autoscaling:RegisterScalableTarget","application-autoscaling:DeregisterScalableTarget","application-autoscaling:DescribeScalableTargets","application-autoscaling:PutScalingPolicy","application-autoscaling:DeleteScalingPolicy","application-autoscaling:DescribeScalingPolicies","application-autoscaling:TagResource","application-autoscaling:UntagResource","application-autoscaling:ListTagsForResource"],
+      "Action": ["application-autoscaling:RegisterScalableTarget","application-autoscaling:DeregisterScalableTarget","application-autoscaling:DescribeScalableTargets","application-autoscaling:PutScalingPolicy","application-autoscaling:DeleteScalingPolicy","application-autoscaling:DescribeScalingPolicies","application-autoscaling:TagResource","application-autoscaling:UntagResource","application-autoscaling:ListTagsForResource","iam:CreateServiceLinkedRole"],
       "Resource": "*"
     },
     {
@@ -442,6 +442,9 @@ SUGGESTED_JWT_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>
 echo -e "  ${BLUE}💡 Suggested values (copy each one separately):${NC}"
 echo "     SECRET_KEY     : $SUGGESTED_SECRET_KEY"
 echo "     JWT_SECRET_KEY : $SUGGESTED_JWT_KEY"
+echo ""
+echo -e "  ${YELLOW}⚠️  RDS passwords must NOT contain: / @ \" or spaces${NC}"
+echo "     Use letters, numbers, and: ! # \$ % ^ & * ( ) - _ = + [ ] { } | ; : , . < > ?"
 echo ""
 
 create_ssm_param() {

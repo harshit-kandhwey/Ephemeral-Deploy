@@ -34,7 +34,15 @@ import {
   id = "nexusdeploy-github-actions-deploy:nexusdeploy-github-actions-full-deploy"
 }
 
-# ECR repositories — created by ecr-provision job on first deploy
+# ECR repositories and lifecycle policies are managed by the ecr-provision job.
+# Import blocks are NOT used for ECR because:
+#   - If repos exist → ecr-provision skips terraform apply, main apply creates them fresh
+#   - If repos missing → ecr-provision creates them via terraform apply -target=module.ecr
+# Import blocks for ECR would fail when repos don't exist (e.g. after fallback cleanup).
+
+# ECR repositories — always exist after first ecr-provision job run.
+# ecr-provision job guarantees these exist in AWS before deploy-dev runs.
+# Import blocks are idempotent — silently no-op if already in state.
 import {
   to = module.ecr.aws_ecr_repository.api
   id = "nexusdeploy-api-dev"
@@ -42,15 +50,5 @@ import {
 
 import {
   to = module.ecr.aws_ecr_repository.worker
-  id = "nexusdeploy-worker-dev"
-}
-
-import {
-  to = module.ecr.aws_ecr_lifecycle_policy.api
-  id = "nexusdeploy-api-dev"
-}
-
-import {
-  to = module.ecr.aws_ecr_lifecycle_policy.worker
   id = "nexusdeploy-worker-dev"
 }

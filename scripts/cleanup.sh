@@ -150,41 +150,12 @@ fi
 # ─────────────────────────────────────────────
 # STEP 2: Delete ECR images and repositories
 # ─────────────────────────────────────────────
-log_info "Step 2/10: Cleaning ECR repositories..."
-
-for repo_suffix in "api" "worker"; do
-  REPO_NAME="${PROJECT}-${repo_suffix}-${ENV}"
-
-  if aws ecr describe-repositories --repository-names "$REPO_NAME" --region "$REGION" 2>/dev/null; then
-    # Delete all images first
-    IMAGE_IDS=$(aws ecr list-images \
-      --repository-name "$REPO_NAME" \
-      --region "$REGION" \
-      --query 'imageIds[*]' \
-      --output json)
-
-    if [[ "$IMAGE_IDS" != "[]" && -n "$IMAGE_IDS" ]]; then
-      log_delete "Deleting images from $REPO_NAME..."
-      # Write JSON to a temp file and pass via file:// — the AWS CLI's inline
-      # JSON argument parsing is fragile with arrays; file:// is reliable.
-      echo "$IMAGE_IDS" > "$TMPFILE"
-      run aws ecr batch-delete-image \
-        --repository-name "$REPO_NAME" \
-        --image-ids "file://$TMPFILE" \
-        --region "$REGION" \
-        --no-cli-pager
-    fi
-
-    log_delete "Deleting ECR repository: $REPO_NAME"
-    run aws ecr delete-repository \
-      --repository-name "$REPO_NAME" \
-      --region "$REGION" \
-      --no-cli-pager
-    log_success "Deleted ECR: $REPO_NAME"
-  else
-    log_warn "ECR repository $REPO_NAME not found"
-  fi
-done
+log_info "Step 2/10: Skipping ECR repositories..."
+# ECR repos and images are intentionally preserved:
+#   - Repos are bootstrap/Terraform-managed and reused across deploys
+#   - Images are managed by the lifecycle policy (keeps last 3, deletes untagged after 1 day)
+#   - Deleting repos would break the next deploy until ecr-provision re-creates them
+log_warn "ECR repositories preserved — managed by lifecycle policy"
 
 # ─────────────────────────────────────────────
 # STEP 3: Delete RDS instance

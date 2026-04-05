@@ -7,23 +7,27 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Target environment'
+        description: "Target environment"
         required: true
         type: choice
-        options: [ dev, prod ]
+        options: [dev, prod]
       action:
-        description: 'Action'
+        description: "Action"
         required: true
         type: choice
-        options: [ plan, apply ]
+        options: [plan, apply]
         default: apply
+      app_changed:
+        description: "Whether app code changed (passed from CI)"
+        required: false
+        default: "false" # default false — CI passes the real value; manual triggers skip build if images exist
 
 concurrency:
   group: deploy-${{ github.ref_name }}
   cancel-in-progress: false
 
 permissions:
-  actions: write   # needed to dispatch cleanup.yml
+  actions: write # needed to dispatch cleanup.yml
   contents: read
 
 env:
@@ -44,15 +48,15 @@ jobs:
     environment: ${{ github.event.inputs.environment || 'dev' }}
 
     permissions:
-      id-token: write   # needed for AWS credentials on infra-only image lookup
+      id-token: write # needed for AWS credentials on infra-only image lookup
       contents: read
 
     outputs:
-      environment:    ${{ steps.ctx.outputs.environment }}
-      tf_action:      ${{ steps.ctx.outputs.tf_action }}
-      image_tag:      ${{ github.sha }}
-      app_changed:    ${{ steps.changed.outputs.app_changed }}
-      current_api:    ${{ steps.current_images.outputs.api_image }}
+      environment: ${{ steps.ctx.outputs.environment }}
+      tf_action: ${{ steps.ctx.outputs.tf_action }}
+      image_tag: ${{ github.sha }}
+      app_changed: ${{ steps.changed.outputs.app_changed }}
+      current_api: ${{ steps.current_images.outputs.api_image }}
       current_worker: ${{ steps.current_images.outputs.worker_image }}
 
     steps:
@@ -65,7 +69,7 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2   # needed for git diff HEAD~1 HEAD in changed-files detection
+          fetch-depth: 2 # needed for git diff HEAD~1 HEAD in changed-files detection
 
       - name: Determine context
         id: ctx
@@ -80,66 +84,60 @@ jobs:
       - name: Detect changed files
         id: changed
         run: |
-          # Get list of changed files — fetch-depth: 2 ensures HEAD~1 is available
-          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "app/")
+          # Decision logic:
+          #   app_changed=true  → build image
+          #   app_changed=false → check ECR
+          #     ECR empty       → build image
+          #     ECR has images  → skip build
+          APP_CHANGED="${{ github.event.inputs.app_changed }}"
+          ENV="${{ github.event.inputs.environment }}"
 
-          echo "Changed files:"
-          echo "$CHANGED"
-
-          # Check if any app/ files changed
-          if echo "$CHANGED" | grep -q "^app/"; then
+          if [[ -z "$APP_CHANGED" || "$APP_CHANGED" == "true" ]]; then
+            # App code changed or manual trigger — always build
             echo "app_changed=true" >> $GITHUB_OUTPUT
-            echo "✅ App code changed — image build required"
+            echo "🔨 App changed — image build required"
           else
-            echo "app_changed=false" >> $GITHUB_OUTPUT
-            echo "⏭️  No app code changes — skipping image build"
+            # No app change — check if ECR has any images
+            IMAGE_COUNT=$(aws ecr describe-images               --repository-name "nexusdeploy-api-$ENV"               --region ${{ env.AWS_REGION }}               --query 'length(imageDetails)'               --output text 2>/dev/null || echo "0")
+
+            if [[ "$IMAGE_COUNT" == "0" || -z "$IMAGE_COUNT" ]]; then
+              echo "app_changed=true" >> $GITHUB_OUTPUT
+              echo "⚠️  ECR empty — forcing build despite no app code change"
+            else
+              echo "app_changed=false" >> $GITHUB_OUTPUT
+              echo "⏭️  No app changes + images exist in ECR — skipping build"
+            fi
           fi
 
       - name: Get current image URIs (infra-only deploy)
         id: current_images
-        # When app has not changed, look up the currently deployed image from ECR.
-        # If ECR is empty (e.g. after cleanup), force a build by setting app_changed=true.
+        # Only runs when app unchanged AND ECR has images (detect step guarantees this).
+        # Simply fetches the most recently pushed image URI for Terraform to use.
         if: steps.changed.outputs.app_changed == 'false'
-        env:
-          ENV: ${{ github.event.inputs.environment }}
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           REGISTRY="$ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
           ENV="${{ github.event.inputs.environment }}"
 
-          # Check if images exist in ECR — empty repo means build is required
-          IMAGE_COUNT=$(aws ecr describe-images \
+          API_TAGS=$(aws ecr describe-images \
             --repository-name "nexusdeploy-api-$ENV" \
             --region ${{ env.AWS_REGION }} \
-            --query 'length(imageDetails)' \
-            --output text 2>/dev/null || echo "0")
+            --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags' \
+            --output text 2>/dev/null || echo "latest")
+          API_IMAGE=$(echo "$API_TAGS" | tr $'\t' $'\n' | grep -v '^latest$' | head -1)
+          API_IMAGE="${API_IMAGE:-latest}"
 
-          if [[ "$IMAGE_COUNT" == "0" || -z "$IMAGE_COUNT" ]]; then
-            echo "No images in ECR - forcing build despite no app code change"
-            echo "app_changed=true" >> $GITHUB_OUTPUT
-            echo "api_image="      >> $GITHUB_OUTPUT
-            echo "worker_image="   >> $GITHUB_OUTPUT
-          else
-            API_TAGS=$(aws ecr describe-images \
-              --repository-name "nexusdeploy-api-$ENV" \
-              --region ${{ env.AWS_REGION }} \
-              --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags' \
-              --output text 2>/dev/null || echo "latest")
-            API_IMAGE=$(echo "$API_TAGS" | tr $'\t' $'\n' | grep -v '^latest$' | head -1)
-            API_IMAGE="${API_IMAGE:-latest}"
+          WORKER_TAGS=$(aws ecr describe-images \
+            --repository-name "nexusdeploy-worker-$ENV" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags' \
+            --output text 2>/dev/null || echo "latest")
+          WORKER_IMAGE=$(echo "$WORKER_TAGS" | tr $'\t' $'\n' | grep -v '^latest$' | head -1)
+          WORKER_IMAGE="${WORKER_IMAGE:-latest}"
 
-            WORKER_TAGS=$(aws ecr describe-images \
-              --repository-name "nexusdeploy-worker-$ENV" \
-              --region ${{ env.AWS_REGION }} \
-              --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags' \
-              --output text 2>/dev/null || echo "latest")
-            WORKER_IMAGE=$(echo "$WORKER_TAGS" | tr $'\t' $'\n' | grep -v '^latest$' | head -1)
-            WORKER_IMAGE="${WORKER_IMAGE:-latest}"
-
-            echo "api_image=$REGISTRY/nexusdeploy-api-$ENV:$API_IMAGE"       >> $GITHUB_OUTPUT
-            echo "worker_image=$REGISTRY/nexusdeploy-worker-$ENV:$WORKER_IMAGE" >> $GITHUB_OUTPUT
-            echo "Using existing images: api=$API_IMAGE worker=$WORKER_IMAGE"
-          fi
+          echo "api_image=$REGISTRY/nexusdeploy-api-$ENV:$API_IMAGE"       >> $GITHUB_OUTPUT
+          echo "worker_image=$REGISTRY/nexusdeploy-worker-$ENV:$WORKER_IMAGE" >> $GITHUB_OUTPUT
+          echo "ℹ️  Using existing images: api=$API_IMAGE worker=$WORKER_IMAGE"
 
   # ─────────────────────────────────────────────
   # Phase 1a: Provision ECR repositories
@@ -150,8 +148,9 @@ jobs:
     name: Provision ECR (${{ needs.setup.outputs.environment }})
     runs-on: ubuntu-latest
     needs: setup
-    # Only needed when app changed — ECR repos already exist on infra-only pushes
-    if: needs.setup.outputs.app_changed == 'true'
+    # Always runs — ecr-check step inside skips terraform apply if repos already exist.
+    # This ensures repos are created even on infra-only pushes where repos may be missing.
+    if: always() && needs.setup.result == 'success'
     environment: ${{ needs.setup.outputs.environment }}
 
     permissions:
@@ -185,62 +184,91 @@ jobs:
             -backend-config="region=${{ env.AWS_REGION }}" \
             -backend-config="encrypt=true"
 
+      - name: Check if ECR repositories already exist
+        id: ecr-check
+        run: |
+          ENV="${{ needs.setup.outputs.environment }}"
+          API_EXISTS=$(aws ecr describe-repositories             --repository-names "nexusdeploy-api-$ENV"             --region ${{ env.AWS_REGION }}             --query 'repositories[0].repositoryName'             --output text 2>/dev/null || echo "")
+          WORKER_EXISTS=$(aws ecr describe-repositories             --repository-names "nexusdeploy-worker-$ENV"             --region ${{ env.AWS_REGION }}             --query 'repositories[0].repositoryName'             --output text 2>/dev/null || echo "")
+
+          if [[ -n "$API_EXISTS" && -n "$WORKER_EXISTS" ]]; then
+            echo "repos_exist=true" >> $GITHUB_OUTPUT
+            echo "ℹ️  ECR repos already exist — skipping terraform apply"
+            echo "registry=$(aws sts get-caller-identity --query Account --output text).dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com" >> $GITHUB_OUTPUT
+          else
+            echo "repos_exist=false" >> $GITHUB_OUTPUT
+            echo "🏗️  ECR repos missing — will provision via Terraform"
+          fi
+
       - name: Terraform Apply — ECR only
-        # Creates ECR repositories before images are pushed.
-        # -target=module.ecr is intentional — only ECR is needed at this stage.
-        # The full apply (with ECS, RDS etc.) runs after images are pushed.
+        # Only runs when repos don't exist yet (first deploy or after full teardown).
+        # Skipped when repos already exist — avoids redundant Terraform runs.
+        if: steps.ecr-check.outputs.repos_exist == 'false'
         working-directory: terraform/environments/${{ needs.setup.outputs.environment }}
         env:
-          TF_VAR_api_image:    "placeholder"
+          TF_VAR_api_image: "placeholder"
           TF_VAR_worker_image: "placeholder"
-          TF_VAR_git_commit:   ${{ github.sha }}
+          TF_VAR_git_commit: ${{ github.sha }}
         run: |
           terraform apply             -target=module.ecr             -var-file=terraform.tfvars             -auto-approve
+          echo "✅ ECR repositories provisioned"
+
+      - name: Ensure ECR lifecycle policies exist
+        # Lifecycle policies may have been deleted manually or by a failed cleanup.
+        # Create them via AWS CLI if missing — idempotent, safe to run every time.
+        # This guarantees the import block in imports.tf never fails.
+        run: |
+          ENV="${{ needs.setup.outputs.environment }}"
+          REGION="${{ env.AWS_REGION }}"
+
+          for repo in nexusdeploy-api-$ENV nexusdeploy-worker-$ENV; do
+            if ! aws ecr get-lifecycle-policy                 --repository-name "$repo"                 --region "$REGION" 2>/dev/null; then
+              echo "⚠️  Lifecycle policy missing for $repo — creating..."
+              aws ecr put-lifecycle-policy                 --repository-name "$repo"                 --region "$REGION"                 --lifecycle-policy-text '{
+                  "rules": [
+                    {
+                      "rulePriority": 1,
+                      "description": "Keep last 3 tagged images",
+                      "selection": {
+                        "tagStatus": "tagged",
+                        "tagPrefixList": ["v", "sha"],
+                        "countType": "imageCountMoreThan",
+                        "countNumber": 3
+                      },
+                      "action": { "type": "expire" }
+                    },
+                    {
+                      "rulePriority": 2,
+                      "description": "Delete untagged images after 1 day",
+                      "selection": {
+                        "tagStatus": "untagged",
+                        "countType": "sinceImagePushed",
+                        "countUnit": "days",
+                        "countNumber": 1
+                      },
+                      "action": { "type": "expire" }
+                    }
+                  ]
+                }'
+              echo "✅ Lifecycle policy created for $repo"
+            else
+              echo "✅ Lifecycle policy already exists for $repo"
+            fi
+          done
+
+      - name: Set ECR registry output
+        id: ecr-registry
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "registry=$ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com" >> $GITHUB_OUTPUT
           echo "✅ ECR repositories ready"
 
       - name: Login to ECR
         id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
-  # ─────────────────────────────────────────────
-  # Phase 1b: Build Docker images
-  # Runs in parallel with ECR provisioning.
-  # Does NOT push — push happens after ECR exists.
-  # ─────────────────────────────────────────────
-  build-image:
-    name: Build Images (${{ needs.setup.outputs.environment }})
-    runs-on: ubuntu-latest
-    needs: setup
-    # Skip when only infra/terraform files changed — saves ~3 minutes per deploy
-    if: needs.setup.outputs.app_changed == 'true'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build API image (cache only — no push yet)
-        uses: docker/build-push-action@v6
-        with:
-          context: ./app
-          file: ./app/Dockerfile
-          push: false
-          load: false
-          tags: nexusdeploy-api-${{ needs.setup.outputs.environment }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          build-args: GIT_COMMIT=${{ github.sha }}
-
-      - name: Build Worker image (cache only — no push yet)
-        uses: docker/build-push-action@v6
-        with:
-          context: ./app
-          file: ./app/Dockerfile.worker
-          push: false
-          load: false
-          tags: nexusdeploy-worker-${{ needs.setup.outputs.environment }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+  # Phase 1b removed — build-image was redundant.
+  # push-image builds and pushes in one step using GHA cache.
 
   # ─────────────────────────────────────────────
   # Phase 2: Push images to ECR
@@ -250,20 +278,18 @@ jobs:
   push-image:
     name: Push Images (${{ needs.setup.outputs.environment }})
     runs-on: ubuntu-latest
-    needs: [setup, ecr-provision, build-image]
+    needs: [setup, ecr-provision]
     if: |
       always() &&
       needs.setup.outputs.app_changed == 'true' &&
-      needs.ecr-provision.result == 'success' &&
-      needs.build-image.result == 'success'
+      needs.ecr-provision.result == 'success'
     environment: ${{ needs.setup.outputs.environment }}
-
     permissions:
       id-token: write
       contents: read
 
     outputs:
-      api_image:    ${{ steps.push.outputs.api_image }}
+      api_image: ${{ steps.push.outputs.api_image }}
       worker_image: ${{ steps.push.outputs.worker_image }}
 
     steps:
@@ -293,6 +319,7 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             --cache-from type=gha \
+            --cache-to   type=gha,mode=max \
             --build-arg GIT_COMMIT=$TAG \
             --tag $REGISTRY/nexusdeploy-api-$ENV:$TAG \
             --tag $REGISTRY/nexusdeploy-api-$ENV:latest \
@@ -302,6 +329,7 @@ jobs:
             --platform linux/amd64 \
             --file ./app/Dockerfile.worker \
             --cache-from type=gha \
+            --cache-to   type=gha,mode=max \
             --tag $REGISTRY/nexusdeploy-worker-$ENV:$TAG \
             --tag $REGISTRY/nexusdeploy-worker-$ENV:latest \
             --push ./app
@@ -325,7 +353,6 @@ jobs:
       (needs.ecr-provision.result == 'success' || needs.ecr-provision.result == 'skipped') &&
       (needs.push-image.result == 'success' || needs.setup.outputs.app_changed == 'false')
     environment: dev
-
     permissions:
       id-token: write
       contents: read
@@ -362,19 +389,25 @@ jobs:
         working-directory: terraform/environments/dev
         env:
           # Use newly pushed image if app changed, otherwise use current ECR image
-          TF_VAR_api_image:    ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}
+          TF_VAR_api_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}
           TF_VAR_worker_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.worker_image || needs.setup.outputs.current_worker }}
-          TF_VAR_git_commit:   ${{ github.sha }}
+          TF_VAR_git_commit: ${{ github.sha }}
         run: terraform apply -var-file=terraform.tfvars -auto-approve
 
       - name: Get outputs
         id: outputs
+        continue-on-error: true # Non-blocking — URLs are informational only
         working-directory: terraform/environments/dev
         run: |
-          echo "grafana_url=$(terraform output -raw grafana_url 2>/dev/null || echo 'deploying...')"    >> $GITHUB_OUTPUT
-          echo "prometheus_url=$(terraform output -raw prometheus_url 2>/dev/null || echo 'deploying...')" >> $GITHUB_OUTPUT
+          # Redirect ALL terraform output to /dev/null — only capture the raw value
+          # terraform output can print warnings/banners that corrupt GITHUB_OUTPUT format
+          GRAFANA_URL=$(terraform output -raw grafana_url 2>/dev/null) || GRAFANA_URL="deploying..."
+          PROMETHEUS_URL=$(terraform output -raw prometheus_url 2>/dev/null) || PROMETHEUS_URL="deploying..."
+          echo "grafana_url=${GRAFANA_URL:-deploying...}"       >> $GITHUB_OUTPUT
+          echo "prometheus_url=${PROMETHEUS_URL:-deploying...}" >> $GITHUB_OUTPUT
 
       - name: Deployment summary
+        continue-on-error: true # Non-blocking — summary failure should not fail the deploy
         run: |
           echo "## ✅ Dev Deployment Complete" >> $GITHUB_STEP_SUMMARY
           echo "| | |" >> $GITHUB_STEP_SUMMARY
@@ -384,8 +417,24 @@ jobs:
           echo "| Prometheus | ${{ steps.outputs.outputs.prometheus_url }} |" >> $GITHUB_STEP_SUMMARY
           echo "| ⚠️ Auto-destroy in | 30 minutes |" >> $GITHUB_STEP_SUMMARY
 
-      # Schedule auto-cleanup after 30 minutes
-      - name: Schedule auto-cleanup
+  # ─────────────────────────────────────────────
+  # POST-DEPLOY: Success → cleanup after 30 min TTL
+  # Runs in PARALLEL with any prod gating steps.
+  # ─────────────────────────────────────────────
+  cleanup-on-success:
+    name: Schedule cleanup (30 min TTL)
+    runs-on: ubuntu-latest
+    needs: [setup, deploy-dev]
+    if: |
+      always() &&
+      needs.setup.outputs.environment == 'dev' &&
+      needs.deploy-dev.result == 'success'
+
+    permissions:
+      actions: write
+
+    steps:
+      - name: Trigger cleanup after 30 minutes
         uses: actions/github-script@v7
         with:
           script: |
@@ -393,7 +442,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: 'cleanup.yml',
-              ref: 'dev',
+              ref: context.ref,
               inputs: {
                 environment: 'dev',
                 delay_minutes: '30',
@@ -401,6 +450,40 @@ jobs:
               }
             });
             console.log('⏳ Cleanup scheduled in 30 minutes');
+
+  # ─────────────────────────────────────────────
+  # POST-DEPLOY: Failure → cleanup immediately
+  # Cleans up partial infrastructure on failed deploy.
+  # ─────────────────────────────────────────────
+  cleanup-on-failure:
+    name: Cleanup on failure (immediate)
+    runs-on: ubuntu-latest
+    needs: [setup, deploy-dev]
+    if: |
+      always() &&
+      needs.setup.outputs.environment == 'dev' &&
+      needs.deploy-dev.result == 'failure'
+
+    permissions:
+      actions: write
+
+    steps:
+      - name: Trigger immediate cleanup
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'cleanup.yml',
+              ref: context.ref,
+              inputs: {
+                environment: 'dev',
+                delay_minutes: '0',
+                reason: 'Auto-cleanup: deploy failed — removing partial infrastructure'
+              }
+            });
+            console.log('🔥 Immediate cleanup triggered due to deploy failure');
 
   # ─────────────────────────────────────────────
   # PROD DEPLOYMENT — Blue-Green (branch: main)
@@ -422,8 +505,7 @@ jobs:
       needs.setup.outputs.tf_action == 'apply' &&
       (needs.ecr-provision.result == 'success' || needs.ecr-provision.result == 'skipped') &&
       (needs.push-image.result == 'success' || needs.setup.outputs.app_changed == 'false')
-    environment: prod   # Requires manual approval in GitHub Environments settings
-
+    environment: prod # Requires manual approval in GitHub Environments settings
     permissions:
       id-token: write
       contents: read
@@ -494,13 +576,13 @@ jobs:
         id: tf_apply
         working-directory: terraform/environments/prod
         env:
-          TF_VAR_api_image:    ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}
+          TF_VAR_api_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}
           TF_VAR_worker_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.worker_image || needs.setup.outputs.current_worker }}
-          TF_VAR_git_commit:   ${{ github.sha }}
+          TF_VAR_git_commit: ${{ github.sha }}
           # The NEW slot becomes active in this apply
           TF_VAR_deployment_slot: ${{ steps.slot.outputs.new_slot }}
           # Previous images stay on old slot (already running)
-          TF_VAR_previous_api_image:    ${{ steps.prev_images.outputs.api }}
+          TF_VAR_previous_api_image: ${{ steps.prev_images.outputs.api }}
           TF_VAR_previous_worker_image: ${{ steps.prev_images.outputs.worker }}
         run: |
           terraform apply -var-file=terraform.tfvars -auto-approve

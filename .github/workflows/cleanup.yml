@@ -55,10 +55,10 @@ jobs:
           if ! [[ "$DELAY" =~ ^[0-9]+$ ]]; then
             echo "❌ Invalid delay_minutes: must be a non-negative integer, got: $DELAY"
             exit 1
-          fi          echo "⏳ Waiting ${DELAY} minutes before cleanup..."
-          echo "Reason: ${{ github.event.inputs.reason || 'Manual cleanup' }}"
+          fi
+          echo "⏳ Waiting ${DELAY} minutes before cleanup..."
+          echo "Reason: ${{ github.event.inputs.reason }}"
           sleep $((DELAY * 60))
-
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -96,8 +96,18 @@ jobs:
             -var-file="terraform.tfvars" \
             -auto-approve \
             -no-color \
+            -target=module.ecs \
+            -target=module.rds \
+            -target=module.elasticache \
+            -target=module.vpc \
+            -target=module.security_groups \
+            -target=module.monitoring \
+            -target=aws_secretsmanager_secret.app \
+            -target=aws_secretsmanager_secret_version.app \
             2>&1 | tee destroy_output.txt
           echo "tf_destroy_exit=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+          # NOTE: module.iam (OIDC + deploy role) and module.ecr are excluded.
+          # They are bootstrap-owned and must survive cleanup. See bootstrap.sh.
         continue-on-error: true  # fallback script runs if this fails
 
       # ── Step 2: Fallback — tag-based nuke script ─────────────────────────
@@ -111,40 +121,22 @@ jobs:
             --region ${{ env.AWS_REGION }} \
             --force
 
-      # ── Step 3: Clean ECR images ─────────────────────────────────────────
-      - name: Delete ECR images
+      # ECR images are intentionally NOT deleted during cleanup.
+      # The lifecycle policy on each repo handles image retention automatically:
+      #   - Keeps last 3 tagged images
+      #   - Deletes untagged images after 1 day
+      # Manually deleting images would incur unnecessary API calls and would
+      # force a full image rebuild on the next deploy even if app code unchanged.
+
+      # ── Step 3: Clean monitoring configs from S3 ────────────────────────
+      # Delete the monitoring config objects uploaded by Terraform.
+      # The S3 bucket itself is NEVER deleted — it is bootstrap infrastructure
+      # and holds all Terraform state. Only the monitoring/config/ prefix is cleaned.
+      - name: Clean monitoring config objects from S3
         run: |
-          echo "🧹 Cleaning ECR images for ${{ env.TF_ENV }}..."
-          for repo in nexusdeploy-api-${{ env.TF_ENV }} nexusdeploy-worker-${{ env.TF_ENV }}; do
-            echo "Cleaning repo: $repo"
-            if aws ecr describe-repositories \
-                --repository-names "$repo" \
-                --region ${{ env.AWS_REGION }} 2>/dev/null; then
-
-              IMAGES=$(aws ecr list-images \
-                --repository-name "$repo" \
-                --region ${{ env.AWS_REGION }} \
-                --query 'imageIds[*]' \
-                --output json)
-
-              if [[ "$IMAGES" != "[]" && -n "$IMAGES" ]]; then
-                # Write to temp file — inline JSON arrays are fragile with AWS CLI
-                TMPFILE=$(mktemp)
-                echo "$IMAGES" > "$TMPFILE"
-                aws ecr batch-delete-image \
-                  --repository-name "$repo" \
-                  --region ${{ env.AWS_REGION }} \
-                  --image-ids "file://$TMPFILE" \
-                  --no-cli-pager
-                rm -f "$TMPFILE"
-                echo "✅ Deleted all images from $repo"
-              else
-                echo "ℹ️ No images found in $repo"
-              fi
-            else
-              echo "ℹ️ Repository $repo does not exist, skipping"
-            fi
-          done
+          echo "🧹 Cleaning monitoring config objects from S3..."
+          aws s3 rm             "s3://${{ env.TF_STATE_BUCKET }}/monitoring/config/"             --recursive             --region "${{ env.AWS_REGION }}" 2>/dev/null || true
+          echo "✅ Monitoring configs cleaned (bucket itself preserved)"
 
       # ── Step 4: Delete Terraform state from S3 ───────────────────────────
       - name: Delete Terraform state from S3
@@ -185,5 +177,6 @@ jobs:
           echo "| Triggered By | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Reason | ${{ github.event.inputs.reason || 'Scheduled nightly cleanup' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Terraform Destroy | ${{ steps.tf_destroy.outputs.tf_destroy_exit == '0' && '✅ Success' || '⚠️ Used fallback script' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| ECR Images | 🗑️ Deleted |" >> $GITHUB_STEP_SUMMARY
+          echo "| ECR Images | ✅ Managed by lifecycle policy |" >> $GITHUB_STEP_SUMMARY
+          echo "| S3 Bucket | ✅ Preserved (bootstrap resource) |" >> $GITHUB_STEP_SUMMARY
           echo "| State File | 🗑️ Deleted (backed up) |" >> $GITHUB_STEP_SUMMARY
