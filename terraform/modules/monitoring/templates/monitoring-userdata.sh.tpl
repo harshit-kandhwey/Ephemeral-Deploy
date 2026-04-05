@@ -138,7 +138,7 @@ aws s3 cp "s3://$STATE_BUCKET/$CONFIG_PREFIX/nexusdeploy-dashboard.json" /var/li
 echo "✅ Configs downloaded"
 
 # ── Substitute placeholders ───────────────────────────────────────────────────
-escape_sed() { printf '%s\n' "$1" | sed -e 's/[\/&]/\\&/g'; }
+escape_sed() { printf '%s\n' "$1" | sed -e 's/[]\/$*.^[&]/\\&/g'; }
 PROJECT_ESC=$(escape_sed "$PROJECT")
 ENV_ESC=$(escape_sed "$ENVIRONMENT")
 REGION_ESC=$(escape_sed "$AWS_REGION")
@@ -156,11 +156,13 @@ echo "✅ Placeholders substituted"
 
 # ── Grafana password via env override (avoids ini parsing issues) ─────────────
 mkdir -p /etc/systemd/system/grafana-server.service.d
+chmod 700 /etc/systemd/system/grafana-server.service.d
 cat > /etc/systemd/system/grafana-server.service.d/override.conf << EOF
 [Service]
 Environment="GF_SECURITY_ADMIN_PASSWORD=$GRAFANA_PASSWORD"
 Environment="GF_USERS_ALLOW_SIGN_UP=false"
 EOF
+chmod 600 /etc/systemd/system/grafana-server.service.d/override.conf
 echo "✅ Grafana password configured via systemd env"
 
 # ── Permissions ───────────────────────────────────────────────────────────────
