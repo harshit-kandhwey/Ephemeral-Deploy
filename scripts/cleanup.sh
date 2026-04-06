@@ -256,6 +256,14 @@ VPC_ID=$(aws ec2 describe-vpcs \
 if [[ "$VPC_ID" != "None" && -n "$VPC_ID" ]]; then
   log_info "Found VPC: $VPC_ID - cleaning dependent resources..."
 
+  # ── 6a0: VPC Endpoints (delete before NAT GW and subnets) ──────────────────
+  ENDPOINT_IDS=$(aws ec2 describe-vpc-endpoints     --region "$REGION"     --filters "Name=vpc-id,Values=$VPC_ID" "Name=vpc-endpoint-state,Values=pending,available"     --query 'VpcEndpoints[].VpcEndpointId'     --output text 2>/dev/null || echo "")
+  if [[ -n "$ENDPOINT_IDS" ]]; then
+    log_delete "Deleting VPC endpoints: $ENDPOINT_IDS"
+    run aws ec2 delete-vpc-endpoints       --vpc-endpoint-ids $ENDPOINT_IDS       --region "$REGION" --no-cli-pager
+    log_success "VPC endpoints deleted"
+  fi
+
   # ── 6a: NAT Gateways (must go first — they hold ENIs that reference SGs) ──
   # Include pending/deleting states — stuck NAT GWs from prior runs still
   # block VPC deletion even though they can't be deleted again

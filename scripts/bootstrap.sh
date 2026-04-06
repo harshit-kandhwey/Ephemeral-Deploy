@@ -312,7 +312,7 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
     {
       "Sid": "EC2Network",
       "Effect": "Allow",
-      "Action": ["ec2:CreateVpc","ec2:DeleteVpc","ec2:DescribeVpcs","ec2:ModifyVpcAttribute","ec2:DescribeVpcAttribute","ec2:CreateVpcEndpoint","ec2:DeleteVpcEndpoints","ec2:DescribeVpcEndpoints","ec2:ModifyVpcEndpoint","ec2:DescribeVpcEndpointServices","ec2:DescribeAddressesAttribute","ec2:DescribeInstanceAttribute","ec2:DescribeInstanceCreditSpecifications","ec2:CreateSubnet","ec2:DeleteSubnet","ec2:DescribeSubnets","ec2:ModifySubnetAttribute","ec2:CreateRouteTable","ec2:DeleteRouteTable","ec2:DescribeRouteTables","ec2:AssociateRouteTable","ec2:DisassociateRouteTable","ec2:CreateRoute","ec2:DeleteRoute","ec2:CreateInternetGateway","ec2:DeleteInternetGateway","ec2:DescribeInternetGateways","ec2:AttachInternetGateway","ec2:DetachInternetGateway","ec2:CreateNatGateway","ec2:DeleteNatGateway","ec2:DescribeNatGateways","ec2:AllocateAddress","ec2:ReleaseAddress","ec2:DescribeAddresses","ec2:AssociateAddress","ec2:DisassociateAddress","ec2:CreateFlowLogs","ec2:DeleteFlowLogs","ec2:DescribeFlowLogs","ec2:CreateSecurityGroup","ec2:DeleteSecurityGroup","ec2:DescribeSecurityGroups","ec2:AuthorizeSecurityGroupIngress","ec2:RevokeSecurityGroupIngress","ec2:AuthorizeSecurityGroupEgress","ec2:RevokeSecurityGroupEgress"],
+      "Action": ["ec2:CreateVpc","ec2:DeleteVpc","ec2:DescribeVpcs","ec2:ModifyVpcAttribute","ec2:DescribeVpcAttribute","ec2:CreateVpcEndpoint","ec2:DeleteVpcEndpoints","ec2:DescribeVpcEndpoints","ec2:ModifyVpcEndpoint","ec2:DescribeVpcEndpointServices","ec2:DescribePrefixLists","ec2:DescribeManagedPrefixLists","ec2:DescribeSecurityGroupRules","ec2:DescribeVpcEndpointConnections","ec2:DescribeVpcEndpointServiceConfigurations","ec2:DescribeAddressesAttribute","ec2:DescribeInstanceAttribute","ec2:DescribeInstanceCreditSpecifications","ec2:CreateSubnet","ec2:DeleteSubnet","ec2:DescribeSubnets","ec2:ModifySubnetAttribute","ec2:CreateRouteTable","ec2:DeleteRouteTable","ec2:DescribeRouteTables","ec2:AssociateRouteTable","ec2:DisassociateRouteTable","ec2:CreateRoute","ec2:DeleteRoute","ec2:CreateInternetGateway","ec2:DeleteInternetGateway","ec2:DescribeInternetGateways","ec2:AttachInternetGateway","ec2:DetachInternetGateway","ec2:CreateNatGateway","ec2:DeleteNatGateway","ec2:DescribeNatGateways","ec2:AllocateAddress","ec2:ReleaseAddress","ec2:DescribeAddresses","ec2:AssociateAddress","ec2:DisassociateAddress","ec2:CreateFlowLogs","ec2:DeleteFlowLogs","ec2:DescribeFlowLogs","ec2:CreateSecurityGroup","ec2:DeleteSecurityGroup","ec2:DescribeSecurityGroups","ec2:AuthorizeSecurityGroupIngress","ec2:RevokeSecurityGroupIngress","ec2:AuthorizeSecurityGroupEgress","ec2:RevokeSecurityGroupEgress"],
       "Resource": "*"
     },
     {
@@ -427,6 +427,19 @@ fi
 #   /<project>/<env>/monitoring/grafana_password  Grafana password  (SecureString)
 # ──────────────────────────────────────────────
 echo ""
+# Check if all SSM params already exist — if so, skip the whole section
+SSM_ALL_EXIST=true
+for param in db/master_username db/master_password db/app_username db/app_password \
+             app/secret_key app/jwt_secret_key monitoring/grafana_password; do
+  if ! aws ssm get-parameter --name "/$PROJECT/$ENV/$param" --region "$REGION" &>/dev/null; then
+    SSM_ALL_EXIST=false
+    break
+  fi
+done
+
+if [[ "$SSM_ALL_EXIST" == "true" ]]; then
+  log_success "All SSM parameters already exist — skipping interactive setup"
+else
 echo "════════════════════════════════════════════════════════"
 echo " SSM Secrets Setup — ENV=$ENV"
 echo " You will be prompted for each value."
@@ -472,15 +485,9 @@ create_ssm_param() {
     return 0
   fi
 
-  aws ssm put-parameter \
-    --name "$path" \
-    --value "$value" \
-    --type "$param_type" \
-    --description "$description" \
-    --region "$REGION" \
-    --tags Key=Project,Value="$PROJECT" Key=Environment,Value="$ENV" \
-           Key=ManagedBy,Value=bootstrap \
-    --no-cli-pager
+  aws ssm put-parameter     --name "$path"     --value "$value"     --type "$param_type"     --description "$description"     --region "$REGION"     --no-cli-pager
+  # Tag separately — avoids MSYS path conversion mangling Key=Value on Windows
+  aws ssm add-tags-to-resource     --resource-type "Parameter"     --resource-id "$path"     --tags "Key=Project,Value=$PROJECT" "Key=Environment,Value=$ENV" "Key=ManagedBy,Value=bootstrap"     --region "$REGION"     --no-cli-pager 2>/dev/null || true
   log_success "  Stored: $path"
 }
 
@@ -491,6 +498,7 @@ create_ssm_param "db/app_password"             "App DB user password — use a s
 create_ssm_param "app/secret_key"              "Flask SECRET_KEY — use the suggested hex above"  true
 create_ssm_param "app/jwt_secret_key"          "JWT signing key — use a different hex value"     true
 create_ssm_param "monitoring/grafana_password" "Grafana admin UI password"                       true
+fi  # end of SSM_ALL_EXIST check
 
 # ── Summary ───────────────────────────────────
 echo ""
