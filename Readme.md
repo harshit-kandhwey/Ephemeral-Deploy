@@ -60,9 +60,9 @@ main       ──push─▶ deploy.yml ─▶  prod environment         (blue-gr
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  GitHub Actions                                                             │
 │                                                                             │
-│  ci.yml      ▶  lint ▶ pytest ▶ Grype container scan ▶ terraform validate  │
-│  deploy.yml  ▶  OIDC auth ▶ docker buildx ▶ ECR push ▶ terraform apply     │
-│  cleanup.yml ▶  terraform destroy ▶ tag-based fallback ▶ S3 state wipe     │
+│  ci.yml      ▶  lint ▶ pytest ▶ Grype container scan ▶ terraform validate │
+│  deploy.yml  ▶  OIDC auth ▶ docker buildx ▶ ECR push ▶ terraform apply    │
+│  cleanup.yml ▶  terraform destroy ▶ tag-based fallback ▶ S3 state wipe    │
 └────────────────────────────────┬────────────────────────────────────────────┘
                                  │ OIDC (no long-lived keys)
 ┌────────────────────────────────▼────────────────────────────────────────────┐
@@ -78,11 +78,11 @@ main       ──push─▶ deploy.yml ─▶  prod environment         (blue-gr
 │  │  [ ALB lives here when enabled — see §14 Commented Features ]        │   │
 │  │                                                                      │   │
 │  │  ── Tier 2: Private App Subnets ───────────────────────────────────  │   │
-│  │  ┌─────────────────┐  ┌─────────────────┐  ┌──────────────────┐     │   │
-│  │  │  ECS: API       │  │  ECS: Worker    │  │  ECS: Beat       │     │   │
-│  │  │  Flask/Gunicorn │  │  Celery         │  │  Celery Beat     │     │   │
-│  │  │  FARGATE_SPOT   │  │  FARGATE_SPOT   │  │  Singleton       │     │   │
-│  │  └─────────────────┘  └─────────────────┘  └──────────────────┘     │   │
+│  │  ┌─────────────────┐  ┌─────────────────┐  ┌──────────────────┐      │   │
+│  │  │  ECS: API       │  │  ECS: Worker    │  │  ECS: Beat       │      │   │
+│  │  │  Flask/Gunicorn │  │  Celery         │  │  Celery Beat     │      │   │
+│  │  │  FARGATE_SPOT   │  │  FARGATE_SPOT   │  │  Singleton       │      │   │
+│  │  └─────────────────┘  └─────────────────┘  └──────────────────┘      │   │
 │  │  prod: two complete sets of the above (blue slot + green slot)       │   │
 │  │                                                                      │   │
 │  │  ── Tier 3: Private DB Subnets ────────────────────────────────────  │   │
@@ -114,7 +114,7 @@ ephemeral-deploy/
 │   │   ├── extensions.py             Flask extensions init (db, jwt, redis, celery)
 │   │   ├── celery_worker.py          Celery app factory
 │   │   └── init_db.py                DB schema creation + seed data script
-│   ├── tests/                        56 tests (pytest + coverage)
+│   ├── tests/                        77 tests (pytest + coverage)
 │   ├── Dockerfile                    API image: Gunicorn, non-root user, 2 workers
 │   ├── Dockerfile.worker             Worker image: Celery, non-root user, concurrency=2
 │   └── pyproject.toml                black (120 line length) + isort (black profile)
