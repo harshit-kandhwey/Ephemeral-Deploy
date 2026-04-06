@@ -199,7 +199,7 @@ REDIS_OUT=$(aws_q elasticache describe-cache-clusters \
 if [[ -z "$REDIS_OUT" ]]; then
   row "Redis: ${PROJECT}-${ENV}-redis" "MISSING"
 else
-  read -r engine node_type status <<< "$REDIS_OUT"
+  read -r engine status node_type <<< "$REDIS_OUT"
   row "Redis: ${PROJECT}-${ENV}-redis" "$status" "redis=$engine $node_type"
 fi
 
@@ -420,8 +420,11 @@ OIDC=$(aws_q iam list-open-id-connect-providers \
 divider "Bootstrap Infrastructure"
 
 # S3 state bucket
-S3=$(aws_q s3api head-bucket --bucket "${PROJECT}-terraform-state" 2>/dev/null \
-  && echo "exists" || echo "")
+if aws s3api head-bucket --bucket "${PROJECT}-terraform-state" 2>/dev/null; then
+  S3="exists"
+else
+  S3=""
+fi
 [[ -n "$S3" ]] \
   && row "S3: ${PROJECT}-terraform-state" "exists" \
   || row "S3: ${PROJECT}-terraform-state" "MISSING"
