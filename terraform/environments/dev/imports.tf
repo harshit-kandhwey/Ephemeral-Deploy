@@ -28,11 +28,17 @@ import {
   id = "nexusdeploy-github-actions-deploy"
 }
 
-# Inline policy — policy name matches bootstrap.sh: ${PROJECT}-github-actions-full-deploy
+# Inline policies — split into two to stay under 10240 char limit per policy
 import {
   to = module.iam.aws_iam_role_policy.github_actions_deploy
-  id = "nexusdeploy-github-actions-deploy:nexusdeploy-github-actions-full-deploy"
+  id = "nexusdeploy-github-actions-deploy:nexusdeploy-github-actions-deploy-1"
 }
+
+import {
+  to = module.iam.aws_iam_role_policy.github_actions_deploy_2
+  id = "nexusdeploy-github-actions-deploy:nexusdeploy-github-actions-deploy-2"
+}
+
 
 # ECR repositories and lifecycle policies are managed by the ecr-provision job.
 # Import blocks are NOT used for ECR because:
@@ -52,3 +58,5 @@ import {
   to = module.ecr.aws_ecr_repository.worker
   id = "nexusdeploy-worker-dev"
 }
+
+

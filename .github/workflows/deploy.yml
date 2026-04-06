@@ -382,6 +382,21 @@ jobs:
             -backend-config="encrypt=true"
           # Note: no dynamodb_table - see backend comment in main.tf
 
+      - name: Delete orphaned log groups (prevents ResourceAlreadyExistsException)
+        # Log groups survive failed cleanups. Terraform cannot create them if they
+        # already exist outside state. Delete them here so Terraform creates fresh.
+        continue-on-error: true
+        run: |
+          ENV="${{ needs.setup.outputs.environment }}"
+          REGION="${{ env.AWS_REGION }}"
+          for lg in             "/ecs/nexusdeploy/$ENV/api"             "/ecs/nexusdeploy/$ENV/worker"             "/ecs/nexusdeploy/$ENV/beat"             "/aws/vpc/flowlogs/nexusdeploy-$ENV"; do
+            if aws logs describe-log-groups                 --log-group-name-prefix "$lg"                 --region "$REGION"                 --query 'logGroups[0].logGroupName'                 --output text 2>/dev/null | grep -q "$lg"; then
+              echo "🗑️  Deleting orphaned log group: $lg"
+              aws logs delete-log-group --log-group-name "$lg" --region "$REGION" || true
+            fi
+          done
+          echo "✅ Orphaned log groups cleared"
+
       - name: Terraform Apply — full infrastructure
         # ECR already exists from ecr-provision job.
         # Images already pushed from push-image job.

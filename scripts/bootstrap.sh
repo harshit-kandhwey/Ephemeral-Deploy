@@ -257,7 +257,7 @@ fi
 # ──────────────────────────────────────────────
 log_info "Applying least-privilege inline policy to $ROLE_NAME..."
 
-DEPLOY_POLICY=$(cat <<ENDPOLICY
+DEPLOY_POLICY1=$(cat <<ENDPOLICY1
 {
   "Version": "2012-10-17",
   "Statement": [
@@ -267,6 +267,7 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
       "Action": [
         "s3:DeleteObject",
         "s3:DeleteObjectTagging",
+        "s3:DeleteObjectVersion",
         "s3:GetBucketLocation",
         "s3:GetBucketVersioning",
         "s3:GetEncryptionConfiguration",
@@ -492,7 +493,16 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
         "ec2:TerminateInstances"
       ],
       "Resource": "*"
-    },
+    }
+  ]
+}
+ENDPOLICY1
+)
+
+DEPLOY_POLICY2=$(cat <<ENDPOLICY2
+{
+  "Version": "2012-10-17",
+  "Statement": [
     {
       "Sid": "RDS",
       "Effect": "Allow",
@@ -711,14 +721,26 @@ DEPLOY_POLICY=$(cat <<ENDPOLICY
     }
   ]
 }
-ENDPOLICY
+ENDPOLICY2
 )
 
 aws iam put-role-policy \
   --role-name "$ROLE_NAME" \
-  --policy-name "${PROJECT}-github-actions-full-deploy" \
-  --policy-document "$DEPLOY_POLICY" \
+  --policy-name "${PROJECT}-github-actions-deploy-1" \
+  --policy-document "$DEPLOY_POLICY1" \
   --no-cli-pager
+
+aws iam put-role-policy \
+  --role-name "$ROLE_NAME" \
+  --policy-name "${PROJECT}-github-actions-deploy-2" \
+  --policy-document "$DEPLOY_POLICY2" \
+  --no-cli-pager
+
+# Remove old single policy if it exists (migration from single to split)
+aws iam delete-role-policy \
+  --role-name "$ROLE_NAME" \
+  --policy-name "${PROJECT}-github-actions-full-deploy" \
+  --no-cli-pager 2>/dev/null || true
 
 log_success "Least-privilege policy applied to $ROLE_NAME"
 

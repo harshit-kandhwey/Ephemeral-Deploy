@@ -260,6 +260,28 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
   }
 }
 
+# Second inline policy — split from github_actions_deploy to stay under 10240 char limit
+resource "aws_iam_role_policy" "github_actions_deploy_2" {
+  name = "${var.project}-github-actions-deploy-2"
+  role = aws_iam_role.github_actions_deploy.id
+
+  # Placeholder — real policy managed by bootstrap.sh
+  # This resource exists only so Terraform can import and track it in state.
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid      = "Placeholder"
+      Effect   = "Allow"
+      Action   = ["sts:GetCallerIdentity"]
+      Resource = "*"
+    }]
+  })
+
+  lifecycle {
+    ignore_changes = all
+  }
+}
+
 # ── ECS Task Execution Role ───────────────────
 # This role allows ECS to pull images from ECR and
 # write logs to CloudWatch. The ECS agent needs this.
