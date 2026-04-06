@@ -78,11 +78,11 @@ for svc in api worker beat; do
     bad "Service: $SVC_NAME — NOT FOUND"
     ((MISSING++))
   else
-    read -r svc_status running desired failed <<< "$STATUS"
-    if [[ "$svc_status" == "ACTIVE" && "$running" -eq "$desired" && "$running" -gt 0 ]]; then
+    read -r desired failed running svc_status <<< "$STATUS"
+    if [[ "$svc_status" == "ACTIVE" && "${running:-0}" -eq "$desired" && "${running:-0}" -gt 0 ]]; then
       ok "Service: $SVC_NAME — $svc_status ($running/$desired running)"
       ((RUNNING++))
-    elif [[ "$svc_status" == "DRAINING" || "$running" -eq 0 ]]; then
+    elif [[ "$svc_status" == "DRAINING" || "${running:-0}" -eq 0 ]]; then
       warn "Service: $SVC_NAME — $svc_status ($running/$desired running, ${failed:-0} failed)"
       ((STOPPED++))
     else
@@ -220,7 +220,7 @@ if [[ "$INSTANCE" == "None" || -z "$INSTANCE" ]]; then
   bad "Monitoring EC2 — NOT FOUND"
   ((MISSING++))
 else
-  read -r inst_id state public_ip <<< "$INSTANCE"
+  read -r inst_id public_ip state <<< "$INSTANCE"
   if [[ "$state" == "running" ]]; then
     ok "Monitoring EC2: $inst_id ($state) — http://${public_ip}:3000"
     ((RUNNING++))
@@ -232,21 +232,21 @@ fi
 
 # ── Secrets Manager ───────────────────────────────────────────────────────────
 hdr "Secrets Manager"
-SECRET=$(aws secretsmanager describe-secret \
+DELETED=$(aws secretsmanager describe-secret \
   --secret-id "${PROJECT}/${ENV}/app-secrets" \
   --region "$REGION" \
-  --query '{name:Name,deleted:DeletedDate}' \
+  --query 'DeletedDate' \
   --output text 2>/dev/null || echo "NOT_FOUND")
 
 ((TOTAL++))
-if [[ "$SECRET" == "NOT_FOUND" ]]; then
+if [[ "$DELETED" == "NOT_FOUND" ]]; then
   bad "App secret — NOT FOUND"
   ((MISSING++))
-elif echo "$SECRET" | grep -q "None"; then
+elif [[ "$DELETED" == "None" ]]; then
   ok "App secret — active"
   ((RUNNING++))
 else
-  warn "App secret — scheduled for deletion"
+  warn "App secret — scheduled for deletion ($DELETED)"
   ((STOPPED++))
 fi
 
