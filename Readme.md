@@ -1,389 +1,682 @@
-# NexusDeploy — Production AWS DevOps Pipeline
+# Ephemeral Deploy — Production AWS DevOps Pipeline
 
-A containerised web API deployed on AWS with a complete, production-grade DevOps pipeline.  
-The application itself is a project management API — it exists as a realistic workload to operate. **Every engineering decision in this repository is an infrastructure or operational decision.**
-
----
-
-## Core Infrastructure Skills Demonstrated
-
-| Pillar                 | Implementation                                                             |
-| ---------------------- | -------------------------------------------------------------------------- |
-| Infrastructure as Code | Modular Terraform, S3 remote state, per-environment isolation              |
-| CI/CD                  | GitHub Actions + OIDC — zero stored AWS credentials, multi-stage pipeline  |
-| Container Platform     | ECS Fargate, ECR image lifecycle, FARGATE_SPOT cost optimisation           |
-| Networking             | 4-tier VPC, least-privilege security groups, VPC flow logs                 |
-| Secrets Management     | SSM Parameter Store → Secrets Manager → ECS runtime injection              |
-| Deployment Strategy    | Blue-green with automated health checks, rollback, and 24 h drain          |
-| Observability          | Prometheus + Grafana on EC2 + CloudWatch alarms + CloudWatch dashboard     |
-| Cost Engineering       | 30-min ephemeral dev environments, Spot pricing, free-tier sizing          |
-| Security Hardening     | Non-root containers, Trivy scanning, least-privilege IAM, REJECT flow logs |
+> A containerised project management API deployed end-to-end on AWS, built to demonstrate a complete, production-grade DevOps pipeline. The application (REST API with teams, projects, tasks, users) exists as a realistic workload to operate — every engineering decision in this repository is an infrastructure or operational decision.
+>
+> **Naming note:** AWS resources (ECS clusters, ECR repos, S3 state bucket, SSM paths, IAM roles) are prefixed with `nexusdeploy` for tagging and identification inside AWS. The repository and project itself is called **Ephemeral Deploy**.
 
 ---
 
-## Branch → Environment Mapping
+## Table of Contents
 
-```
-dev  ──push──▶  deploy.yml  ──▶  dev environment    auto-destroys in 30 minutes
-main ──push──▶  deploy.yml  ──▶  prod environment   blue-green, manual destroy only
-*    ──PR   ──▶  ci.yml      ──▶  lint + test + scan  no infrastructure touched
-```
-
----
-
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  GitHub Actions                                                          │
-│                                                                          │
-│  ci.yml      ▶  lint ▶ pytest ▶ Trivy container scan ▶ tf validate     │
-│  deploy.yml  ▶  OIDC auth ▶ docker buildx ▶ ECR push ▶ tf apply        │
-│  cleanup.yml ▶  tf destroy ▶ tag-based fallback ▶ S3 state wipe        │
-└───────────────────────────┬──────────────────────────────────────────────┘
-                            │  OIDC  (GitHub JWT ──▶ AWS STS AssumeRole)
-                            │  No credentials stored anywhere
-                            ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│  AWS Account                                                             │
-│                                                                          │
-│  ECR (per-environment repos)          S3  nexusdeploy-terraform-state    │
-│  ├── nexusdeploy-api-dev              ├── dev/terraform.tfstate          │
-│  ├── nexusdeploy-api-prod             └── prod/terraform.tfstate         │
-│  ├── nexusdeploy-worker-dev                                              │
-│  └── nexusdeploy-worker-prod          SSM Parameter Store                │
-│                               ┌───── /nexusdeploy/{env}/                 │
-│  Secrets Manager              │      db/master_username  (SecureString)  │
-│  {env}/app-secrets ◀──────────┘      db/master_password  (SecureString)  │
-│  (injected by ECS at launch)         db/app_username     (SecureString)  │
-│                                      db/app_password     (SecureString)  │
-│                                      app/secret_key      (SecureString)  │
-│                                      app/jwt_secret_key  (SecureString)  │
-│                                      monitoring/grafana_password         │
-│                                                                          │
-│  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │  VPC  10.0.0.0/16 (dev)  │  10.1.0.0/16 (prod)                     │  │
-│  │                                                                    │  │
-│  │  ── Tier 1: Public Subnets ───────────────────────────────────     │  │
-│  │  ┌──────────────────────────────────────────────────────────┐      │  │
-│  │  │  Monitoring EC2  t3.micro  +  Elastic IP                 │      │  │
-│  │  │  :9090 Prometheus  :3000 Grafana  :9100 Node Exporter    │      │  │
-│  │  └──────────────────────────────────────────────────────────┘      │  │
-│  │  [ ALB also placed here when enabled — see §Commented Features ]   │  │
-│  │                                                                    │  │
-│  │  ── Tier 2: Private App Subnets ──────────────────────────────     │  │
-│  │  ┌──────────────────┐  ┌──────────────────┐  ┌────────────────┐    │  │
-│  │  │  ECS: API        │  │  ECS: Worker     │  │  ECS: Beat     │    │  │
-│  │  │  Flask/Gunicorn  │  │  Celery          │  │  Celery Beat   │    │  │
-│  │  │  FARGATE_SPOT    │  │  FARGATE_SPOT    │  │  Singleton     │    │  │
-│  │  └──────────────────┘  └──────────────────┘  └────────────────┘    │  │
-│  │  prod runs two sets of the above (blue slot + green slot)          │  │
-│  │                                                                    │  │
-│  │  ── Tier 3: Private DB Subnets ────────────────────────────────    │  │
-│  │  ┌──────────────────────────────────────────────────────────┐      │  │
-│  │  │  RDS PostgreSQL  db.t3.micro  (multi-AZ subnet group)    │      │  │
-│  │  └──────────────────────────────────────────────────────────┘      │  │
-│  │                                                                    │  │
-│  │  ── Tier 4: Private Cache Subnets ─────────────────────────────    │  │
-│  │  ┌──────────────────────────────────────────────────────────┐      │  │
-│  │  │  ElastiCache Redis  cache.t3.micro                       │      │  │
-│  │  └──────────────────────────────────────────────────────────┘      │  │
-│  └────────────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────────────┘
-```
+1. [What This Project Demonstrates](#1-what-this-project-demonstrates)
+2. [How It All Fits Together](#2-how-it-all-fits-together)
+3. [Repository Structure](#3-repository-structure)
+4. [The Application Layer](#4-the-application-layer)
+5. [Infrastructure — Terraform Modules](#5-infrastructure--terraform-modules)
+6. [Networking — 4-Tier VPC](#6-networking--4-tier-vpc)
+7. [Secrets Management](#7-secrets-management)
+8. [CI/CD Pipeline](#8-cicd-pipeline)
+9. [OIDC Authentication — No Stored AWS Keys](#9-oidc-authentication--no-stored-aws-keys)
+10. [Blue-Green Deployment (prod)](#10-blue-green-deployment-prod)
+11. [Auto-Cleanup — 30-Minute Dev TTL](#11-auto-cleanup--30-minute-dev-ttl)
+12. [Monitoring Stack](#12-monitoring-stack)
+13. [Cost Engineering](#13-cost-engineering)
+14. [Commented-Out Features](#14-commented-out-features)
+15. [Getting Started — First Deployment](#15-getting-started--first-deployment)
+16. [Day-to-Day Operations (Makefile Reference)](#16-day-to-day-operations-makefile-reference)
+17. [Local Development](#17-local-development)
 
 ---
 
-## Terraform Module Structure
+## 1. What This Project Demonstrates
 
-Modules are pure infrastructure blueprints — they have no idea which environment calls them. Environments pass different variable values; the modules stay reusable.
+| Pillar                     | Implementation                                                                        |
+| -------------------------- | ------------------------------------------------------------------------------------- |
+| **Infrastructure as Code** | Modular Terraform, S3 remote state, per-environment isolation                         |
+| **CI/CD**                  | GitHub Actions + OIDC — zero stored AWS credentials, multi-stage pipeline             |
+| **Container Platform**     | ECS Fargate, ECR image lifecycle, FARGATE_SPOT cost optimisation                      |
+| **Networking**             | 4-tier VPC, least-privilege security groups, VPC flow logs                            |
+| **Secrets Management**     | SSM Parameter Store → Secrets Manager → ECS runtime injection                         |
+| **Deployment Strategy**    | Blue-green with automated health checks, instant rollback, 24 h drain                 |
+| **Observability**          | Prometheus + Grafana on EC2 + CloudWatch alarms + CloudWatch dashboard                |
+| **Cost Engineering**       | 30-min ephemeral dev environments, Spot pricing, free-tier sizing                     |
+| **Security Hardening**     | Non-root containers, Grype/Trivy scanning, least-privilege IAM, REJECT-only flow logs |
+
+---
+
+## 2. How It All Fits Together
+
+### Branch → Environment Mapping
 
 ```
-terraform/
-├── modules/
-│   ├── vpc/              VPC · 4-tier subnets · IGW · NAT · route tables · VPC flow logs
-│   ├── ecs/              Cluster · task defs (API/worker/beat) · services · auto-scaling · circuit breaker
-│   ├── rds/              PostgreSQL instance · subnet group · parameter group · slow-query logging
-│   ├── elasticache/      Redis cluster · subnet group
-│   ├── ecr/              Two repositories (api + worker) · lifecycle policy (keep last 3 images)
-│   ├── iam/              OIDC provider · deploy role · ECS execution role · ECS task role · flow log role
-│   ├── security-groups/  Per-service least-privilege rules
-│   └── monitoring/       EC2 t3.micro · Prometheus · Grafana · Node Exporter · CW alarms · CW dashboard
-│       └── templates/
-│           └── monitoring-userdata.sh.tpl   full stack installed via EC2 user data at boot
-└── environments/
-    ├── dev/              30-min TTL · FARGATE_SPOT · NAT disabled · 3-day log retention
-    └── prod/             Blue-green slots · manual destroy only · 7-day log retention
+feature/** ──PR──▶  ci.yml   ──▶  lint + test + scan       (no AWS touched)
+dev        ──push─▶ deploy.yml ─▶  dev environment          (auto-destroys in 30 min)
+main       ──push─▶ deploy.yml ─▶  prod environment         (blue-green, manual destroy)
+```
+
+### High-Level Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  GitHub Actions                                                             │
+│                                                                             │
+│  ci.yml      ▶  lint ▶ pytest ▶ Grype container scan ▶ terraform validate  │
+│  deploy.yml  ▶  OIDC auth ▶ docker buildx ▶ ECR push ▶ terraform apply     │
+│  cleanup.yml ▶  terraform destroy ▶ tag-based fallback ▶ S3 state wipe     │
+└────────────────────────────────┬────────────────────────────────────────────┘
+                                 │ OIDC (no long-lived keys)
+┌────────────────────────────────▼────────────────────────────────────────────┐
+│  AWS  (us-east-1)                                                           │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │  VPC  10.0.0.0/16                                                    │   │
+│  │                                                                      │   │
+│  │  ── Tier 1: Public Subnets ────────────────────────────────────────  │   │
+│  │  ┌────────────────────────────────────────────────────────────────┐  │   │
+│  │  │  EC2  t3.micro  +  Elastic IP  (monitoring stack)              │  │   │
+│  │  │  :9090 Prometheus   :3000 Grafana   :9100 Node Exporter        │  │   │
+│  │  └────────────────────────────────────────────────────────────────┘  │   │
+│  │  [ ALB lives here when enabled — see §14 Commented Features ]        │   │
+│  │                                                                      │   │
+│  │  ── Tier 2: Private App Subnets ───────────────────────────────────  │   │
+│  │  ┌─────────────────┐  ┌─────────────────┐  ┌──────────────────┐     │   │
+│  │  │  ECS: API       │  │  ECS: Worker    │  │  ECS: Beat       │     │   │
+│  │  │  Flask/Gunicorn │  │  Celery         │  │  Celery Beat     │     │   │
+│  │  │  FARGATE_SPOT   │  │  FARGATE_SPOT   │  │  Singleton       │     │   │
+│  │  └─────────────────┘  └─────────────────┘  └──────────────────┘     │   │
+│  │  prod: two complete sets of the above (blue slot + green slot)       │   │
+│  │                                                                      │   │
+│  │  ── Tier 3: Private DB Subnets ────────────────────────────────────  │   │
+│  │  ┌────────────────────────────────────────────────────────────────┐  │   │
+│  │  │  RDS PostgreSQL  db.t3.micro  (multi-AZ subnet group)          │  │   │
+│  │  └────────────────────────────────────────────────────────────────┘  │   │
+│  │                                                                      │   │
+│  │  ── Tier 4: Private Cache Subnets ─────────────────────────────────  │   │
+│  │  ┌────────────────────────────────────────────────────────────────┐  │   │
+│  │  │  ElastiCache Redis  cache.t3.micro                             │  │   │
+│  │  └────────────────────────────────────────────────────────────────┘  │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ECR  ·  SSM Parameter Store  ·  Secrets Manager  ·  CloudWatch  ·  S3     │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Secrets — End-to-End Chain
-
-No secret is ever written to a file, an environment variable on a developer's machine, or Terraform state in plaintext.
+## 3. Repository Structure
 
 ```
-bootstrap.sh  (one-time, interactive CLI — run locally)
-    │
-    │  operator types values at prompt, never into a file
-    ▼
-SSM Parameter Store  (KMS-encrypted SecureString per parameter)
-    /nexusdeploy/{env}/db/master_username
-    /nexusdeploy/{env}/db/master_password      ← RDS superuser, Terraform only
-    /nexusdeploy/{env}/db/app_username
-    /nexusdeploy/{env}/db/app_password         ← limited app user, Flask only
-    /nexusdeploy/{env}/app/secret_key
-    /nexusdeploy/{env}/app/jwt_secret_key
-    /nexusdeploy/{env}/monitoring/grafana_password
-    │
-    │  Terraform reads via  data "aws_ssm_parameter"
-    │  values are never written to .tf files or tfvars
-    ▼
-Secrets Manager  ({env}/app-secrets)
-    Terraform assembles one JSON secret from the SSM values above
-    │
-    │  ECS injects at task launch via  secrets: [ valueFrom: ARN ]
-    ▼
-Container environment variables  (DATABASE_URL, SECRET_KEY, JWT_SECRET_KEY …)
-    │
-    │  os.environ.get()  — application has zero knowledge of AWS
-    ▼
-Application runtime
-```
-
-**Two-user database pattern** — RDS master user (superuser, used only by Terraform and `init_db.py` at first boot) and a separate app user (SELECT / INSERT / UPDATE / DELETE only). The app never connects as superuser.
-
----
-
-## CI/CD Pipeline
-
-```
-Every pull request
-    └── ci.yml
-        ├── flake8 + black                   lint
-        ├── pytest                           56 tests, PostgreSQL + Redis
-        │                                    run as GitHub Actions service containers
-        ├── Trivy                            container vulnerability scan
-        └── terraform validate               all environments, -backend=false
-
-Push to dev branch
-    └── deploy.yml
-        ├── OIDC authentication              GitHub JWT → temp AWS credentials
-        ├── docker buildx                    linux/amd64, GitHub Actions layer cache
-        ├── ECR push                         image tagged with git SHA + latest
-        ├── terraform init                   -backend-config flags, no hardcoded bucket
-        ├── terraform apply                  deploys dev environment
-        ├── post Grafana + Prometheus URLs   to GitHub Actions job summary
-        └── schedule cleanup.yml            dispatched with 30-minute delay
-
-Push to main branch
-    └── deploy.yml
-        ├── OIDC authentication
-        ├── docker buildx + ECR push
-        ├── read SSM active_slot            determines blue or green
-        ├── terraform apply                 targets inactive slot only
-        ├── health check loop               polls ECS runningCount every 30 s (5 min max)
-        ├── on pass → update SSM active_slot + schedule old slot drain in 24 h
-        └── on fail → scale failed slot to 0, old slot unchanged (instant rollback)
-```
-
-### OIDC — How the pipeline authenticates with no stored keys
-
-```
-1.  GitHub Actions runner requests a short-lived JWT
-    from token.actions.githubusercontent.com
-
-2.  JWT payload contains: repository, branch, workflow name, run ID
-
-3.  deploy.yml calls  configure-aws-credentials  action
-    which calls  aws sts AssumeRoleWithWebIdentity
-
-4.  AWS validates the JWT signature against GitHub's published public keys
-    and checks the role's trust policy:
-        StringEquals  token.actions…:aud  sts.amazonaws.com
-        StringLike    token.actions…:sub  repo:org/nexusdeploy:ref:refs/heads/dev
-
-5.  AWS returns temporary credentials valid for 1 hour
-
-6.  Credentials are used for ECR push and Terraform apply
-    They expire automatically when the job ends
-    Nothing is ever stored in GitHub Secrets except the role ARN
+ephemeral-deploy/
+│
+├── app/                              The workload — gives the infra something real to operate
+│   ├── src/
+│   │   ├── api/v1/                   REST endpoints: auth, users, teams, projects, tasks, comments
+│   │   ├── models/                   SQLAlchemy models (User, Team, Project, Task, AuditLog)
+│   │   ├── extensions.py             Flask extensions init (db, jwt, redis, celery)
+│   │   ├── celery_worker.py          Celery app factory
+│   │   └── init_db.py                DB schema creation + seed data script
+│   ├── tests/                        56 tests (pytest + coverage)
+│   ├── Dockerfile                    API image: Gunicorn, non-root user, 2 workers
+│   ├── Dockerfile.worker             Worker image: Celery, non-root user, concurrency=2
+│   └── pyproject.toml                black (120 line length) + isort (black profile)
+│
+├── terraform/
+│   ├── modules/                      Reusable blueprints — never run directly
+│   │   ├── vpc/                      VPC, subnets, IGW, NAT, route tables, flow logs, VPC endpoints
+│   │   ├── ecs/                      ECS cluster, task defs (API+worker+beat), services, auto-scaling
+│   │   ├── rds/                      PostgreSQL RDS, subnet group, parameter group
+│   │   ├── elasticache/              Redis cluster, subnet group
+│   │   ├── ecr/                      ECR repos, image lifecycle policy (keep last 3)
+│   │   ├── iam/                      OIDC provider, GitHub Actions role, ECS execution/task roles
+│   │   ├── security-groups/          Per-service least-privilege SGs (ALB, API, worker, RDS, Redis, monitoring)
+│   │   └── monitoring/               EC2 monitoring stack, CloudWatch alarms, CloudWatch dashboard
+│   │       └── files/                Prometheus config, Grafana datasources, dashboard JSON, SD script
+│   └── environments/
+│       ├── dev/                      Calls all modules with dev sizing; TTL tag triggers auto-cleanup
+│       └── prod/                     Calls all modules with prod sizing; instantiates blue + green ECS sets
+│
+├── .github/workflows/
+│   ├── ci.yml                        Lint · format · test · Grype scan · terraform validate
+│   ├── deploy.yml                    OIDC · build · push · apply · blue-green orchestration
+│   └── cleanup.yml                   terraform destroy · tag-based fallback · S3 state wipe
+│
+├── scripts/
+│   ├── bootstrap.sh                  One-time: S3 bucket · OIDC provider · IAM role · SSM secrets
+│   └── cleanup.sh                    14-step dependency-ordered tag-based resource deletion fallback
+│
+├── docs/
+│   └── SETUP.md                      GitHub secrets guide · OIDC explanation · cost breakdown
+│
+├── Makefile                          Operational shortcuts (see §16)
+└── docker-compose.yml                Local dev only: postgres + redis + api + worker + beat + redis-commander
 ```
 
 ---
 
-## Blue-Green Deployment (prod)
+## 4. The Application Layer
+
+The application is a project management REST API. It is the **workload** — its purpose is to give the infrastructure something real to deploy, health-check, scale, and monitor. You wouldn't build this exact app for a portfolio; you run it to show what happens around it.
+
+### API Surface
+
+| Resource | Endpoints                                                                          | Auth                             |
+| -------- | ---------------------------------------------------------------------------------- | -------------------------------- |
+| Auth     | `POST /api/v1/auth/login`, `POST /api/v1/auth/refresh`, `POST /api/v1/auth/logout` | Public / Bearer                  |
+| Users    | `GET/POST /api/v1/users`, `GET/PUT/DELETE /api/v1/users/:id`                       | Bearer + role                    |
+| Teams    | `GET/POST /api/v1/teams`, `GET/PUT/DELETE /api/v1/teams/:id`                       | Bearer + role                    |
+| Projects | `GET/POST /api/v1/projects`, `GET/PUT/DELETE /api/v1/projects/:id`                 | Bearer + role                    |
+| Tasks    | `GET/POST /api/v1/tasks`, `GET/PUT/DELETE /api/v1/tasks/:id`                       | Bearer + role                    |
+| Comments | `GET/POST /api/v1/tasks/:id/comments`                                              | Bearer                           |
+| Health   | `GET /health`, `GET /ready`                                                        | Public                           |
+| Metrics  | `GET /metrics`                                                                     | Public (Prometheus scrapes this) |
+| Docs     | `GET /apidocs`                                                                     | Public (Swagger UI)              |
+
+### Roles and Access Control
+
+Three roles — `admin`, `manager`, `developer` — are enforced via a `@role_required` decorator on every mutating endpoint. Team membership gates data visibility: non-admins only see projects and tasks that belong to their team.
+
+### Audit Logging
+
+Every create/update/delete on any entity writes a record to the `audit_logs` table, storing `user_id`, `action`, `entity_type`, `entity_id`, and client IP. The IP is sourced from `request.remote_addr` — see the `_get_real_ip()` comment in `projects.py` for the ProxyFix note that applies when ALB is enabled.
+
+### Background Tasks (Celery)
+
+Three ECS services handle async work:
+
+- **API** — Flask/Gunicorn, serves HTTP, exposes `/metrics`
+- **Worker** — Celery worker, `concurrency=2`, processes tasks from Redis queue
+- **Beat** — Celery Beat singleton, fires scheduled tasks on a cron-like schedule
+
+All three share the same Docker image base, same environment variables, and same secrets from Secrets Manager. Beat is sized to `desired_count = 1` and never runs more than one instance (running multiple Beat schedulers causes duplicate task firing).
+
+### Database Initialisation
+
+`init_db.py` runs in three ordered steps:
+
+1. **App DB user** — creates a least-privilege `nexusapp` PostgreSQL user (not the RDS superuser) that the API connects as at runtime.
+2. **Schema** — `db.create_all()` via SQLAlchemy.
+3. **Seed data** — demo users, teams, projects, tasks. In non-production environments, seed credentials are printed to stdout. In production, credentials come from `SEED_*_PASSWORD` env vars and nothing is printed.
+
+---
+
+## 5. Infrastructure — Terraform Modules
+
+Terraform is split into **modules** (reusable blueprints) and **environments** (concrete instantiations). Modules have no idea which environment is calling them — they receive variables and produce resources. This means the same `vpc` module runs in dev with smaller CIDR ranges and in prod with flow logs and longer retention.
+
+### Module Responsibilities
+
+| Module            | What It Creates                                                                                                                                             |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `vpc`             | VPC, 4 subnet tiers across 2 AZs, IGW, optional NAT GW, route tables, VPC flow logs, VPC interface endpoints (ECR, S3, Secrets Manager, SSM)                |
+| `ecs`             | ECS cluster, 3 task definitions (api/worker/beat), 3 ECS services, App Auto Scaling (CPU-based), CloudWatch log groups, optional ALB (commented out)        |
+| `rds`             | PostgreSQL `db.t3.micro`, subnet group spanning private DB subnets, parameter group                                                                         |
+| `elasticache`     | Redis `cache.t3.micro`, subnet group, cluster mode disabled (single node)                                                                                   |
+| `ecr`             | Two ECR repos (`nexusdeploy-api-{env}`, `nexusdeploy-worker-{env}`), lifecycle policy keeping last 3 images per tag prefix                                  |
+| `iam`             | GitHub OIDC provider (imported, not owned), GitHub Actions deploy role, ECS execution role, ECS task role, VPC flow log role                                |
+| `security-groups` | One SG per service tier: ALB (commented out), API, worker, RDS, Redis, monitoring EC2                                                                       |
+| `monitoring`      | EC2 t3.micro with Elastic IP, IAM instance role, monitoring config uploaded to S3, CloudWatch alarms (ECS CPU, RDS CPU, Redis memory), CloudWatch dashboard |
+
+### Remote State
+
+Terraform state lives in `s3://nexusdeploy-terraform-state` with per-environment keys:
+
+```
+s3://nexusdeploy-terraform-state/
+  dev/terraform.tfstate
+  prod/terraform.tfstate
+  monitoring/config/          ← Prometheus + Grafana config files
+```
+
+State is encrypted at rest (S3 default encryption). Bucket versioning is disabled for this single-developer project — see §14 for how to add lifecycle policies and DynamoDB locking for team use.
+
+### Provider Pinning
+
+Both environments pin the AWS provider version:
+
+- **dev**: `~> 5.0` — accepts any `5.x` patch update
+- **prod**: `~> 5.40.0` — pinned to a specific minor version, updated deliberately after testing
+
+This prevents a provider upgrade from changing prod behaviour on an unreviewed push.
+
+---
+
+## 6. Networking — 4-Tier VPC
+
+The VPC uses a defence-in-depth layout. Each tier has its own subnet group and its own security group — traffic can only flow between tiers through explicitly defined rules.
+
+```
+┌──────────────────────────────────────────────────┐
+│  Public Subnets (2 AZs)  10.0.0.0/24            │
+│  IGW attached — monitoring EC2 lives here        │
+│  ALB also lives here when enabled                │
+└──────────────────────┬───────────────────────────┘
+                       │ ECS tasks pull images from ECR
+                       │ via VPC Interface Endpoints
+┌──────────────────────▼───────────────────────────┐
+│  Private App Subnets (2 AZs)  10.0.1.0/24       │
+│  ECS Fargate tasks (API, Worker, Beat)           │
+│  No inbound from internet                        │
+└──────────┬────────────────────┬──────────────────┘
+           │ port 5432          │ port 6379
+┌──────────▼──────────┐  ┌─────▼────────────────────┐
+│  Private DB Subnets │  │  Private Cache Subnets   │
+│  10.0.2.0/24        │  │  10.0.3.0/24             │
+│  RDS PostgreSQL      │  │  ElastiCache Redis       │
+└─────────────────────┘  └──────────────────────────┘
+```
+
+### VPC Endpoints (replaces NAT Gateway in dev)
+
+ECS tasks in private subnets need to reach AWS APIs to pull images from ECR and fetch secrets. Instead of routing that traffic through a NAT Gateway (which costs ~$1/day), the VPC module creates Interface Endpoints that let private subnets talk directly to AWS services over the AWS backbone:
+
+- `ecr.api` — ECS authentication with ECR
+- `ecr.dkr` — Docker image layer pulls
+- `secretsmanager` — runtime secret injection
+- `ssm` + `ssmmessages` + `ec2messages` — SSM Session Manager (used by `make shell`)
+- `s3` (Gateway endpoint, free) — S3 access for monitoring config download
+
+### VPC Flow Logs
+
+Flow logs are enabled on the VPC, capturing **REJECT** traffic only (accepted traffic is not logged — that would be very noisy and expensive). Logs go to CloudWatch at `/aws/vpc/flowlogs/nexusdeploy-{env}`. Retention is 3 days in dev and 14 days in prod. Use this to diagnose security group misconfigurations and spot unexpected traffic patterns.
+
+### Security Groups — Least Privilege
+
+Every service has its own security group with the minimum possible rules:
+
+| SG             | Inbound                                          | Outbound                                                                       |
+| -------------- | ------------------------------------------------ | ------------------------------------------------------------------------------ |
+| API            | Port 5000 from VPC CIDR (or ALB SG when enabled) | Port 5432 to RDS SG, port 6379 to Redis SG, port 443 to `0.0.0.0/0` (AWS APIs) |
+| Worker         | None                                             | Port 5432 to RDS SG, port 6379 to Redis SG, port 443 to `0.0.0.0/0`            |
+| RDS            | Port 5432 from API SG + Worker SG                | None                                                                           |
+| Redis          | Port 6379 from API SG + Worker SG                | None                                                                           |
+| Monitoring EC2 | Port 9090 + 3000 + 9100 from VPC CIDR            | Port 443 to `0.0.0.0/0`                                                        |
+
+Workers have **zero inbound rules** — they only reach outward to Redis and PostgreSQL. This is intentional: Celery workers pull jobs from the broker; nothing needs to reach them.
+
+---
+
+## 7. Secrets Management
+
+No secret is ever stored in a file, an environment variable in a Dockerfile, or a GitHub Secret (except the role ARN, which is not a secret).
+
+### Flow: Bootstrap → SSM → Secrets Manager → ECS
+
+```
+1.  bootstrap.sh (one-time, interactive)
+    └─▶ Prompts for each value
+    └─▶ Stores in SSM Parameter Store as SecureString (KMS encrypted)
+        /nexusdeploy/{env}/db/master_password
+        /nexusdeploy/{env}/db/app_password
+        /nexusdeploy/{env}/app/secret_key
+        /nexusdeploy/{env}/app/jwt_secret_key
+        /nexusdeploy/{env}/monitoring/grafana_password
+
+2.  terraform apply
+    └─▶ Reads values from SSM via data.aws_ssm_parameter
+    └─▶ Creates aws_secretsmanager_secret with all runtime secrets
+    └─▶ ECS task definitions reference the secret ARN with field selectors
+
+3.  ECS task startup
+    └─▶ ECS execution role pulls secrets from Secrets Manager
+    └─▶ Injects as environment variables into the container at runtime
+    └─▶ The application container never needs AWS credentials
+```
+
+The application connects to PostgreSQL as a **least-privilege app user** (`nexusapp`), not the RDS master user. `init_db.py` creates this user during first-run initialisation.
+
+---
+
+## 8. CI/CD Pipeline
+
+Three workflow files handle all pipeline logic.
+
+### `ci.yml` — Runs on every push and pull request
+
+```
+Job 0: detect-changes
+  └── Diffs HEAD~1 to decide which jobs actually need to run
+      (app changed? → run lint/test/docker. infra changed? → run terraform validate)
+
+Job 1: lint  (runs if app changed)
+  ├── black  ──write mode──▶  auto-formats code
+  ├── isort  ──write mode──▶  auto-sorts imports
+  ├── Commits formatting changes back with [skip ci] tag
+  └── flake8 + bandit  ──check mode──▶  fails on violations
+
+Job 2: test  (runs if app changed, after lint)
+  ├── PostgreSQL 15 + Redis 7 as GitHub Actions service containers
+  ├── pytest with --cov (fails if coverage < 60%)
+  └── Uploads coverage report to Codecov (non-blocking)
+
+Job 3: docker-build  (runs parallel to test, if app changed)
+  ├── docker buildx build  (linux/amd64, GitHub Actions layer cache)
+  ├── Grype container vulnerability scan
+  │   ├── exit-code: 0  ──▶  non-blocking (shows findings, never fails the build)
+  │   ├── severity: CRITICAL  ──▶  only critical findings reported
+  │   └── Results uploaded to GitHub Security tab as SARIF
+  └── Image not pushed (CI only — no AWS credentials in CI workflow)
+
+Job 4: terraform-lint  (runs if infra changed, parallel to all app jobs)
+  ├── terraform fmt -check -recursive
+  ├── tflint  (non-blocking — shows awareness)
+  └── terraform init -backend=false + terraform validate for each environment
+
+Job 5: ci-summary
+  ├── Gate job — fails if any upstream job failed. Blocks PR merge.
+  └── Triggers the deploy pipeline
+```
+
+**Auto-formatting:** black and isort run in write mode. If they change anything, the bot commits back with `[skip ci]` to avoid a loop. This means formatting is never a reason for a CI failure — it's just fixed automatically.
+
+### `deploy.yml` — Triggered by CI Pipeline on `dev` or `main` branches
+
+```
+Job 1: setup
+  └── Determines: environment (dev/prod), Terraform action (apply/destroy), git SHA
+
+Job 2: build  (uses OIDC to authenticate, always before deploy)
+  ├── Configure AWS credentials via OIDC (no stored keys)
+  ├── Login to ECR
+  ├── docker buildx build (linux/amd64, layer cache from GitHub Actions)
+  └── Push two images:
+      nexusdeploy-api-{env}:{sha}
+      nexusdeploy-api-{env}:latest
+      nexusdeploy-worker-{env}:{sha}
+      nexusdeploy-worker-{env}:latest
+
+Job 3a: deploy-dev  (only on dev branch push)
+  ├── terraform init  (-backend-config flags, no hardcoded values in code)
+  ├── terraform apply (TF_VAR_api_image + TF_VAR_worker_image from build job)
+  ├── Posts Grafana URL + Prometheus URL to Actions job summary
+  └── Dispatches cleanup.yml with delay_minutes=30
+
+Job 3b: deploy-prod  (only on main branch push)
+  ├── terraform init
+  ├── Read active_slot from SSM  (/nexusdeploy/prod/deployment/active_slot)
+  ├── terraform apply targeting inactive slot only
+  ├── Health check loop: poll ECS runningCount every 30s for up to 5 minutes
+  │   PASS ──▶  Update SSM active_slot to new slot
+  │             Store previous image tags in SSM for rollback reference
+  │             Dispatch cleanup.yml with delay_minutes=1440 (24h) to drain old slot
+  │   FAIL ──▶  Scale failed slot desired_count to 0 immediately
+  │             SSM active_slot unchanged → old slot continues serving
+  │             Zero user impact. Next push retries to same inactive slot.
+```
+
+### `cleanup.yml` — Scheduled destruction
+
+```
+Step 1: terraform destroy  (clean path — uses state file)
+Step 2: cleanup.sh fallback  (if terraform destroy fails for any reason)
+         14-step dependency-ordered tag-based deletion
+Step 3: Delete S3 state file
+         aws s3 rm s3://nexusdeploy-terraform-state/{env}/terraform.tfstate
+         Prevents orphaned state confusing future deployments
+```
+
+A nightly GitHub Actions cron also runs cleanup against any forgotten dev environments (useful if a dev deploy ran and the 30-min dispatch was missed).
+
+---
+
+## 9. OIDC Authentication — No Stored AWS Keys
+
+The pipeline never stores AWS credentials anywhere. Instead, GitHub Actions proves its identity to AWS using a short-lived JWT.
+
+```
+Step 1  GitHub Actions runner requests a JWT from:
+        https://token.actions.githubusercontent.com
+
+Step 2  JWT payload contains:
+        - repository:  your-org/ephemeral-deploy
+        - ref:         refs/heads/dev  (or main)
+        - workflow:    deploy.yml
+        - run_id:      unique per run
+
+Step 3  deploy.yml calls the configure-aws-credentials action
+        which calls aws sts AssumeRoleWithWebIdentity
+
+Step 4  AWS validates the JWT signature against GitHub's published public keys
+        and checks the IAM role's trust policy conditions:
+          StringEquals  token.actions.githubusercontent.com:aud  →  sts.amazonaws.com
+          StringLike    token.actions.githubusercontent.com:sub  →  repo:org/ephemeral-deploy:ref:refs/heads/dev
+
+Step 5  AWS issues temporary credentials valid for 1 hour
+        (expire automatically when the job ends, never stored anywhere)
+
+Step 6  Credentials used for ECR login + terraform apply
+        The role ARN itself (not a secret, just an identifier) is the only
+        thing stored in GitHub Secrets: AWS_DEPLOY_ROLE_ARN
+```
+
+The IAM role has a least-privilege inline policy maintained in `bootstrap.sh`. It covers the exact set of actions needed for ECS deploy, Terraform resource management, SSM access, and cleanup — nothing more.
+
+---
+
+## 10. Blue-Green Deployment (prod)
+
+Prod uses a Terraform-native blue-green strategy. Two complete sets of ECS services (`-blue` and `-green`) are defined in Terraform. The inactive set runs at `desired_count = 0` — it costs nothing while standing by.
+
+### Deployment Flow
 
 ```
 State before deploy:
-    blue  desired=1  running=1  ← ACTIVE (serving traffic)
-    green desired=0  running=0  ← IDLE
+  blue   desired=1  running=1  ← ACTIVE (serving traffic)
+  green  desired=0  running=0  ← IDLE
 
-Deploy triggered on push to main:
-    blue  desired=1  running=1  ← still active, traffic unaffected
-    green desired=1  running=1  ← new image deploying to inactive slot
+Push to main:
+  blue   desired=1  running=1  ← unchanged, traffic unaffected
+  green  desired=1  running=1  ← new image deployed to inactive slot
 
-Health check loop (30 s interval, 5 min timeout):
-    polls  aws ecs describe-services  for green runningCount == desiredCount
+Health check loop (every 30s, max 5 minutes):
+  Polls:  aws ecs describe-services  for green.runningCount == green.desiredCount
 
 If health check PASSES:
-    SSM  /nexusdeploy/prod/deployment/active_slot  ←  "green"
-    prev images stored in SSM for next deploy's rollback reference
-    cleanup.yml dispatched with 1440-minute (24 h) delay to drain blue
+  ├── SSM  /nexusdeploy/prod/deployment/active_slot  ←  "green"
+  ├── Previous image tags stored in SSM for rollback reference
+  └── cleanup.yml dispatched with delay=1440min (24h) to drain blue
 
-If health check FAILS or terraform apply fails:
-    green scaled to desired=0 immediately
-    SSM active_slot unchanged  →  blue remains active
-    next deploy will target green again
-    zero user impact
+  After 24h:
+  blue   desired=0  running=0  ← drained, idle for next cycle
+  green  desired=1  running=1  ← active
 
-After 24 h drain:
-    blue  desired=0  running=0  ← drained, ready for next deploy cycle
-    green desired=1  running=1  ← active
+If health check FAILS (or terraform apply itself fails):
+  ├── green scaled to desired=0 immediately
+  ├── SSM active_slot unchanged → blue keeps serving
+  └── Next push targets green again — no manual intervention needed
 ```
 
-Active slot is tracked in SSM at `/nexusdeploy/prod/deployment/active_slot`. The slot value is read at the start of every `deploy.yml` run and written only on a confirmed healthy deployment.
+### Slot Tracking
+
+The active slot is tracked in SSM Parameter Store at:
+
+```
+/nexusdeploy/prod/deployment/active_slot   →   "blue" or "green"
+```
+
+Terraform reads this at plan time to determine which slot gets the new image. The SSM value has `lifecycle { ignore_changes = [value] }` — Terraform creates it on first apply but never overwrites it after that. Only `deploy.yml` writes to it (after a confirmed healthy deploy).
+
+To check the current active slot manually:
+
+```bash
+make prod-active-slot
+```
+
+### Why Not CodeDeploy?
+
+The deployment controller is set to `type = "ECS"` (Terraform-managed). The alternative is `type = "CODE_DEPLOY"` — which provides AWS-console visibility, gradual traffic shifting via ALB listener weights, and approval gates between shift steps. To enable it, ALB must be enabled first (see §14). The current approach is simpler, fully understood, and demonstrates the same concepts without the additional AWS service dependency.
 
 ---
 
-## Auto-Cleanup (dev — 30-minute TTL)
+## 11. Auto-Cleanup — 30-Minute Dev TTL
 
-Dev environments are disposable by design. Every deploy automatically schedules its own destruction.
+Dev environments are designed to be thrown away. Every push to `dev` deploys a fresh environment and schedules its own destruction 30 minutes later via `cleanup.yml`.
+
+### Why 30 minutes?
+
+That's enough time to manually test the deployment, check Grafana, and hit the API. After that, the environment costs nothing because it no longer exists. You can always push to `dev` again to spin it back up in ~5 minutes.
+
+### What the cleanup does
 
 ```
-deploy.yml  dispatches  cleanup.yml  with  delay_minutes=30
+Step 1: terraform destroy  (preferred — uses state, clean and complete)
 
-cleanup.yml  Step 1 — terraform destroy  (clean path, preferred)
+Step 2: If terraform destroy fails for any reason, cleanup.sh runs
+        with tag-based resource deletion in strict dependency order:
 
-cleanup.yml  Step 2 — if terraform destroy fails for any reason,
-             cleanup.sh  runs a tag-based fallback that deletes every
-             resource tagged  Project=nexusdeploy  Environment=dev
-             in strict dependency order:
+   1.  ECS services          scale to 0, wait, deregister
+   2.  ECR images            delete all untagged + old images
+   3.  RDS instance          force-delete, no final snapshot
+   4.  ElastiCache cluster   delete
+   5.  Secrets Manager       force-delete (no recovery window)
+   6.  Security groups       delete
+   7.  NAT Gateway           release Elastic IP
+   8.  Internet Gateway      detach + delete
+   9.  Subnets               delete all 8
+  10.  Route tables          delete
+  11.  VPC                   delete
+  12.  CloudWatch log groups  delete
+  13.  IAM roles + policies   detach + delete
+  14.  Verify                 aws resourcegroupstaggingapi confirms 0 tagged resources
 
-  1.  ECS services        scale to 0 → deregister
-  2.  ECR images          delete all untagged + old images
-  3.  RDS instance        skip final snapshot
-  4.  ElastiCache cluster
-  5.  Secrets Manager     force-delete (no recovery window)
-  6.  Security groups
-  7.  NAT Gateway         release EIP
-  8.  Internet Gateway    detach + delete
-  9.  Subnets
-  10. Route tables
-  11. VPC
-  12. CloudWatch log groups
-  13. IAM roles + policies
-  14. Verify             aws resourcegroupstaggingapi  confirms 0 tagged resources remain
-
-cleanup.yml  Step 3 — delete S3 state file
-             aws s3 rm s3://nexusdeploy-terraform-state/dev/terraform.tfstate
-             prevents orphaned state from confusing future deployments
+Step 3: Delete S3 state file
+        Prevents orphaned state from blocking the next deploy
 ```
 
-A nightly GitHub Actions cron also runs cleanup against any forgotten dev environments.
+### Dry run
+
+```bash
+make cleanup-dry ENV=dev   # shows what would be deleted without deleting anything
+```
 
 ---
 
-## Monitoring Stack
+## 12. Monitoring Stack
 
-Both approaches run simultaneously and are available as datasources in the same Grafana dashboard.
+Two monitoring approaches run simultaneously and are both available as datasources in the same Grafana dashboard. This is intentional — it shows knowledge of both the pull-based (Prometheus) and managed (CloudWatch) models.
 
-### Prometheus + Grafana on EC2 t3.micro (free tier)
+### Prometheus + Grafana on EC2 t3.micro
 
-The entire monitoring stack is installed at EC2 boot time via `monitoring-userdata.sh.tpl` — no manual configuration.
+Everything is installed and configured at EC2 boot time via `monitoring-userdata.sh.tpl`. No manual setup is needed after `terraform apply`.
 
 | Component           | Port | Role                                                  |
 | ------------------- | ---- | ----------------------------------------------------- |
-| Prometheus          | 9090 | Scrapes Flask `/metrics` endpoint on ECS tasks        |
+| Prometheus          | 9090 | Scrapes Flask `/metrics` on ECS tasks every 15s       |
 | Grafana             | 3000 | Visualises Prometheus + CloudWatch in one dashboard   |
 | Node Exporter       | 9100 | System metrics for the monitoring EC2 itself          |
 | CloudWatch Exporter | 9106 | Bridges CloudWatch ECS metrics into Prometheus format |
 
-**ECS service discovery** — a shell script (`ecs-sd.sh`) runs every 60 seconds via cron. It calls `aws ecs list-tasks` + `describe-tasks` to find the private IPs of running API tasks and writes a Prometheus `file_sd` targets JSON. Prometheus reads this file and dynamically updates its scrape targets without a restart.
+**ECS service discovery** works via a shell script (`ecs-sd.sh`) running on a 60-second cron. It calls `aws ecs list-tasks` + `describe-tasks` to find the private IPs of running API tasks and writes a Prometheus `file_sd` targets JSON. Prometheus reads this file and updates its scrape targets without a restart. The EC2's IAM role has `ecs:ListTasks` + `ecs:DescribeTasks` for this purpose.
 
-**Grafana auto-provisioning** — datasources and the dashboard JSON are written to `/etc/grafana/provisioning/` during userdata. Grafana picks them up on first start. No manual dashboard import needed.
+**Grafana auto-provisioning**: datasource configs (`grafana-datasources.yml`) and the dashboard JSON are stored in S3 (alongside Terraform state) and downloaded by the EC2 at boot. Grafana reads from `/etc/grafana/provisioning/` on startup — no manual dashboard import needed.
 
-Pre-built dashboard panels: HTTP request rate · p50/p95/p99 latency · 5xx error rate · ECS running task count · RDS CPU + connections (CloudWatch) · Redis memory (CloudWatch).
+**Monitoring configs in S3**: The user_data script has a 16 KB size limit. All config files (prometheus.yml, cloudwatch-exporter.yml, grafana configs, dashboard JSON) are stored as S3 objects under `s3://nexusdeploy-terraform-state/monitoring/config/` and downloaded at boot. This keeps user_data small and makes config updates easy without reprovisioning the EC2.
 
-### CloudWatch (AWS-native, always on)
+**Pre-built Grafana dashboard panels:**
 
-| What          | Detail                                                                              |
-| ------------- | ----------------------------------------------------------------------------------- |
-| Log groups    | `/ecs/nexusdeploy/{env}/api` · `/worker` · `/beat` · VPC flow logs                  |
-| Log retention | 3 days (dev) · 7 days (prod)                                                        |
-| Dashboard     | Provisioned by Terraform — ECS CPU, RDS CPU, Redis memory, error log Insights query |
-| Alarms        | ECS API CPU > 80% · RDS CPU > 75% · Redis memory > 80%                              |
-| VPC flow logs | REJECT traffic only — routed to CloudWatch for security auditing                    |
+- HTTP request rate (req/s)
+- p50 / p95 / p99 latency (histograms from Flask `/metrics`)
+- 5xx error rate
+- ECS running task count (from CloudWatch)
+- RDS CPU + connection count
+- Redis memory usage percentage
 
----
+### CloudWatch (always on, AWS-native)
 
-## Cost Engineering
+| What          | Detail                                                                                                                                 |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Log groups    | `/ecs/nexusdeploy/{env}/api` · `/ecs/nexusdeploy/{env}/worker` · `/ecs/nexusdeploy/{env}/beat` · `/aws/vpc/flowlogs/nexusdeploy-{env}` |
+| Retention     | 3 days (dev) · 7 days (prod)                                                                                                           |
+| Dashboard     | Provisioned by Terraform — ECS CPU, RDS CPU, Redis memory, error log Insights query                                                    |
+| Alarms        | ECS API CPU > 80% for 4 min · RDS CPU > 75% · Redis memory > 80%                                                                       |
+| VPC flow logs | REJECT-only — routed to CloudWatch for security auditing                                                                               |
 
-Every sizing and configuration decision is deliberate.
+### Accessing monitoring
 
-| Resource           | Configuration                   | Why                                               | Cost                     |
-| ------------------ | ------------------------------- | ------------------------------------------------- | ------------------------ |
-| ECS Fargate (dev)  | FARGATE_SPOT, 256 CPU / 512 MB  | Spot = 70% cheaper, dev can tolerate interruption | ~$0.02 per 30-min run    |
-| ECS Fargate (prod) | FARGATE on-demand, same size    | Spot not acceptable for prod                      | ~$0.05/hr while running  |
-| RDS                | db.t3.micro                     | Free tier                                         | Free (750 hrs/month)     |
-| ElastiCache        | cache.t3.micro                  | Free tier                                         | Free (750 hrs/month)     |
-| Monitoring EC2     | t3.micro                        | Free tier                                         | Free (750 hrs/month)     |
-| NAT Gateway        | Disabled in dev, single in prod | Per-AZ NAT = ~$1/day each                         | $0 dev · ~$0.045/hr prod |
-| ECR lifecycle      | Keep last 3 images              | Prevents unbounded storage growth                 | <$0.01/month             |
-| Log retention      | 3 d dev · 7 d prod              | CloudWatch storage is $0.03/GB/month              | Negligible               |
-| **Total dev run**  |                                 |                                                   | **~$0.02**               |
+After a deploy, `deploy.yml` prints the Grafana and Prometheus URLs to the Actions job summary. Or:
 
----
-
-## Commented-Out Features — Production-Ready, Cost-Disabled
-
-These features are **fully implemented** in the codebase. They are commented out only to avoid cost during demo use. Each can be enabled with a small, targeted change.
+```bash
+make monitoring-url ENV=prod      # prints Grafana URL from Terraform output
+make monitoring-logs ENV=prod     # tails the EC2 setup log via SSM Session Manager
+```
 
 ---
 
-### Application Load Balancer
+## 13. Cost Engineering
+
+Every sizing and configuration decision is deliberate. Nothing is over-provisioned.
+
+| Resource           | Configuration                      | Why                                                 | Cost                    |
+| ------------------ | ---------------------------------- | --------------------------------------------------- | ----------------------- |
+| ECS Fargate (dev)  | FARGATE_SPOT, 256 CPU / 512 MB     | Spot = 70% cheaper; dev tolerates interruption      | ~$0.02 per 30-min run   |
+| ECS Fargate (prod) | FARGATE on-demand, same size       | On-demand required for prod reliability             | ~$0.05/hr while running |
+| RDS                | db.t3.micro, 20 GB                 | Free tier                                           | Free (750 hrs/month)    |
+| ElastiCache        | cache.t3.micro                     | Free tier                                           | Free (750 hrs/month)    |
+| Monitoring EC2     | t3.micro + Elastic IP              | Free tier                                           | Free (750 hrs/month)    |
+| NAT Gateway        | Disabled in dev, single GW in prod | $0.045/hr + data; VPC endpoints used instead in dev | $0 dev · ~$33/mo prod   |
+| ECR lifecycle      | Keep last 3 images                 | Prevents unbounded storage growth                   | <$0.01/month            |
+| Log retention      | 3d dev · 7d prod                   | CloudWatch storage costs $0.03/GB/month             | Negligible              |
+| **Total dev run**  |                                    |                                                     | **~$0.02**              |
+
+**Fargate Spot** — in dev, ECS services use the `FARGATE_SPOT` capacity provider. Spot capacity is unused Fargate capacity sold at a ~70% discount. AWS can reclaim it with a 2-minute notice. Dev environments tolerate this; prod uses on-demand.
+
+**Auto Scaling** — the API ECS service has an App Auto Scaling policy targeting 70% CPU utilisation, with scale-out cooldown of 60s and scale-in of 300s. Min capacity equals the `api_desired_count` variable. This is always configured — even in dev — to show the pattern.
+
+---
+
+## 14. Commented-Out Features
+
+These features are **fully implemented** in the codebase. They are commented out only because they cost money during demo use. Each can be enabled with a small, targeted change — the code is ready.
+
+---
+
+### Application Load Balancer + HTTPS
 
 **Files:** `terraform/modules/ecs/main.tf` · `terraform/modules/security-groups/main.tf`
 
-Complete ALB stack written and commented:
+The complete ALB stack is written and commented:
 
-- `aws_lb` — internet-facing, deletion protection enabled in prod, access logs to S3
+- `aws_lb` — internet-facing, deletion protection in prod, access logs to S3
 - `aws_lb_target_group` — IP mode (required for Fargate), `/health` check, 2 healthy / 3 unhealthy thresholds
-- `aws_lb_listener` HTTP :80 — uses a `dynamic` block to redirect to HTTPS in prod and forward directly in non-prod
-- `aws_lb_listener` HTTPS :443 — TLS 1.3 security policy (`ELBSecurityPolicy-TLS13-1-2-2021-06`), ACM certificate
-- `aws_security_group.alb` — :80/:443 from `0.0.0.0/0`, egress scoped to app security group only
+- `aws_lb_listener` HTTP :80 — uses `dynamic` block to redirect to HTTPS in prod and forward in non-prod
+- `aws_lb_listener` HTTPS :443 — TLS 1.3 security policy, ACM certificate
+- `aws_security_group.alb` — :80/:443 from `0.0.0.0/0`, egress scoped to API SG only
 - ECS service `load_balancer {}` block — wires API containers to the target group on port 5000
-- API security group ingress — comment shows how to switch from VPC CIDR to `security_groups = [alb_sg_id]`
+- API SG note — shows how to switch from VPC CIDR to `security_groups = [alb_sg_id]`
 
-**To enable:** uncomment the ALB blocks in both files, provide `var.acm_certificate_arn` and `var.alb_logs_bucket` in tfvars.
-**Cost:** ~$16/month for the ALB.
+**To enable:**
+
+1. Uncomment ALB blocks in `terraform/modules/ecs/main.tf` and `terraform/modules/security-groups/main.tf`
+2. Add `acm_certificate_arn` and `alb_logs_bucket` to your environment's `terraform.tfvars`
+
+**Cost when enabled:** ~$16/month for the ALB.
 
 ---
 
 ### DynamoDB State Locking
 
-**Files:** `scripts/bootstrap.sh` · `terraform/environments/dev/main.tf` · `terraform/environments/prod/main.tf` · `.github/workflows/deploy.yml`
+**Files:** `scripts/bootstrap.sh` · `terraform/environments/*/main.tf` · `.github/workflows/deploy.yml`
 
-Terraform state locking prevents two concurrent `terraform apply` runs from corrupting the state file. Disabled because this is a single-developer project with sequential deployments — concurrent state writes cannot occur.
+Terraform state locking prevents two concurrent `terraform apply` runs from corrupting the state file. It's disabled because this is a single-developer project — concurrent state writes cannot happen.
 
-Enabled in three steps:
+**To enable (3 steps):**
 
 1. Uncomment the `aws dynamodb create-table` block in `bootstrap.sh` and re-run `make bootstrap`
-2. Add `dynamodb_table = "nexusdeploy-terraform-locks"` to the `backend "s3"` block in each environment's `main.tf`
+2. Add `dynamodb_table = "nexusdeploy-terraform-locks"` to the `backend "s3"` block in `dev/main.tf` and `prod/main.tf`
 3. Uncomment `TF_LOCK_TABLE: nexusdeploy-terraform-locks` in `deploy.yml`
 
-**Cost when enabled:** $0 — DynamoDB PAY_PER_REQUEST, lock volume at this scale is negligible.
+**Cost when enabled:** $0 — DynamoDB PAY_PER_REQUEST at this scale is negligible.
 
 ---
 
-### S3 State Bucket — Explicit Encryption + Lifecycle Policy
+### S3 State Bucket Hardening
 
 **File:** `scripts/bootstrap.sh`
 
-Two hardening blocks are commented out with `log_warn` annotations:
+Two blocks are commented out with `log_warn` annotations explaining why:
 
-- **Explicit AES256 SSE** via `aws s3api put-bucket-encryption` — S3 default encryption now covers this automatically, but an explicit configuration demonstrates intentional security posture.
-- **Lifecycle policy** via `aws s3api put-bucket-lifecycle-configuration` — transitions non-current state versions to `STANDARD_IA` after 30 days and expires them after 90 days. Keeps the state bucket lean as deployment history accumulates.
+- **Explicit AES256 SSE** via `aws s3api put-bucket-encryption` — S3 default encryption now covers this automatically, but an explicit configuration demonstrates intentional security posture
+- **Lifecycle policy** via `aws s3api put-bucket-lifecycle-configuration` — transitions non-current state versions to `STANDARD_IA` after 30 days, expires after 90 days. Keeps the state bucket lean as deployment history accumulates
+
+**To enable:** uncomment the two blocks in `bootstrap.sh` and re-run `make bootstrap`. Idempotent.
 
 ---
 
@@ -391,21 +684,23 @@ Two hardening blocks are commented out with `log_warn` annotations:
 
 **File:** `terraform/environments/dev/main.tf` — `enable_nat_gateway = false`
 
-Private ECS tasks in dev reach AWS APIs (ECR, Secrets Manager, SSM) through VPC endpoints. Outbound internet access from private subnets is not available without a NAT Gateway. Set `enable_nat_gateway = true` to enable it.
+Private ECS tasks in dev reach AWS APIs through VPC Interface Endpoints (cheaper). Outbound internet access from private subnets is **not** available in dev without a NAT Gateway.
 
-**Cost when enabled:** ~$1/day ($0.045/hr + data transfer charges).
+**To enable:** set `enable_nat_gateway = true` in `terraform/environments/dev/terraform.tfvars`.
+
+**Cost when enabled:** ~$32/month ($0.045/hr + data transfer).
 
 ---
 
-### NAT Gateway per Availability Zone (prod high availability)
+### NAT Gateway per AZ (prod high availability)
 
-**File:** `terraform/modules/vpc/main.tf`
+**File:** `terraform/modules/vpc/main.tf` — `aws_nat_gateway` resource
 
-A comment in the NAT Gateway resource block documents the trade-off: a single NAT Gateway is a single point of failure. If the AZ hosting the NAT GW goes down, all private subnet outbound traffic fails. True HA requires one NAT GW per AZ.
+A single NAT Gateway is a single point of failure. If its AZ goes down, all private subnet outbound traffic fails. The comment documents the fix.
 
-To enable: change `count = var.enable_nat_gateway ? 1 : 0` to `count = var.enable_nat_gateway ? length(var.availability_zones) : 0` on both `aws_eip.nat` and `aws_nat_gateway.main`, and update the route table associations to use the AZ-local gateway.
+**To enable:** change `count = var.enable_nat_gateway ? 1 : 0` to `count = var.enable_nat_gateway ? length(var.availability_zones) : 0` on both `aws_eip.nat` and `aws_nat_gateway.main`, and update route table associations to use the AZ-local gateway.
 
-**Cost per additional AZ:** ~$1/day.
+**Cost per additional AZ:** ~$32/month.
 
 ---
 
@@ -413,13 +708,15 @@ To enable: change `count = var.enable_nat_gateway ? 1 : 0` to `count = var.enabl
 
 **File:** `terraform/modules/ecs/main.tf` — `containerInsights` setting on the cluster
 
-Container Insights is already enabled in prod. Disabled in dev via:
+Container Insights is enabled in prod and disabled in dev via a ternary:
 
 ```hcl
 value = var.environment == "prod" ? "enabled" : "disabled"
 ```
 
-Container Insights publishes per-container CPU, memory, network, and storage metrics to CloudWatch at higher resolution than the default ECS service-level metrics. Change the condition to enable it in dev.
+Container Insights publishes per-container CPU, memory, network, and storage metrics at higher resolution than default ECS metrics.
+
+**To enable in dev:** change the condition to `"enabled"`.
 
 **Cost when enabled:** ~$0.35 per container per month.
 
@@ -427,7 +724,7 @@ Container Insights publishes per-container CPU, memory, network, and storage met
 
 ### CodeDeploy Deployment Controller
 
-**File:** `terraform/modules/ecs/main.tf` — `deployment_controller` block on the API ECS service
+**File:** `terraform/modules/ecs/main.tf` — `deployment_controller` block
 
 ```hcl
 deployment_controller {
@@ -436,87 +733,207 @@ deployment_controller {
 }
 ```
 
-The current blue-green implementation is Terraform-native: two ECS service sets with slot tracking via SSM. `type = "CODE_DEPLOY"` is the AWS-managed alternative — it integrates with ALB listener rule weights to shift traffic gradually (e.g. 10% → 50% → 100%), provides a deployment timeline in the CodeDeploy console, and supports approval gates per traffic shift step. Requires ALB to be enabled first.
+`CODE_DEPLOY` integrates with ALB listener rule weights for gradual traffic shifting (10% → 50% → 100%), provides a deployment timeline in the CodeDeploy console, and supports approval gates. Requires ALB to be enabled first.
 
 ---
 
-## Repository Structure
+### ProxyFix / Real Client IP
 
-```
-nexusdeploy/
-│
-├── app/                          the workload — exists to give the infra something real to operate
-│   ├── src/
-│   ├── tests/
-│   ├── Dockerfile                Gunicorn, non-root user, --chdir src, 2 workers (right-sized for 256CPU/512MB)
-│   └── Dockerfile.worker         Celery, non-root user, concurrency=2
-│
-├── terraform/
-│   ├── modules/                  reusable blueprints — never run directly
-│   │   ├── vpc/
-│   │   ├── ecs/
-│   │   ├── rds/
-│   │   ├── elasticache/
-│   │   ├── ecr/
-│   │   ├── iam/
-│   │   ├── security-groups/
-│   │   └── monitoring/
-│   │       └── templates/
-│   │           └── monitoring-userdata.sh.tpl
-│   └── environments/
-│       ├── dev/                  calls modules with dev values, 30-min TTL tag
-│       └── prod/                 calls modules with prod values, blue + green ECS sets
-│
-├── .github/workflows/
-│   ├── ci.yml                    lint · test · Trivy · terraform validate
-│   ├── deploy.yml                OIDC · build · push · apply · blue-green logic
-│   └── cleanup.yml               terraform destroy · tag fallback · S3 wipe
-│
-├── scripts/
-│   ├── bootstrap.sh              one-time: S3 · OIDC provider · IAM role · SSM secrets
-│   └── cleanup.sh                10-step tag-based fallback (dependency-ordered deletes)
-│
-├── Makefile                      operational shortcuts: up · test · tf-apply · shell · secrets · prod-active-slot
-├── docker-compose.yml            local development only
-└── docs/
-    └── SETUP.md                  GitHub Secrets guide · OIDC explanation · cost breakdown
-```
+**File:** `app/src/api/v1/projects.py` — `_get_real_ip()` function
+
+When ALB is enabled, the `X-Forwarded-For` header carries the real client IP. The comment documents how to enable ProxyFix in `app.py` so `request.remote_addr` is set correctly without manual header parsing (which is an IP spoofing risk if done incorrectly).
 
 ---
 
-## Operational Runbook
+## 15. Getting Started — First Deployment
+
+### Prerequisites
+
+- AWS CLI configured (`aws configure`) with an IAM user that has permissions to create S3, IAM, OIDC providers
+- Docker Desktop running locally
+- Terraform 1.7+ installed
+- Git Bash or WSL (Windows users)
+
+### Step 1: Bootstrap AWS infrastructure (one time only)
 
 ```bash
-# ── One-time bootstrap ─────────────────────────────────────────────────────
 export GITHUB_ORG=your-github-username
+export GITHUB_REPO=ephemeral-deploy
 make bootstrap
-# Creates: S3 state bucket · GitHub OIDC provider · IAM deploy role
-# Prompts: all secrets → stored in SSM Parameter Store (never in files)
-
-# Add one GitHub repository secret:
-# Settings → Secrets → Actions → New repository secret
-# Name:  AWS_DEPLOY_ROLE_ARN
-# Value: (ARN printed by bootstrap)
-
-# Update tfvars in both environments:
-# terraform/environments/dev/terraform.tfvars  → github_org = "your-username"
-# terraform/environments/prod/terraform.tfvars → github_org = "your-username"
-
-# ── Deploy ──────────────────────────────────────────────────────────────────
-git push origin dev     # deploys dev, auto-destroys in 30 minutes
-git push origin main    # blue-green deploy to prod
-
-# ── Observe ────────────────────────────────────────────────────────────────
-make status             ENV=dev    # ECS service running/desired counts
-make logs               ENV=dev    # tail CloudWatch logs live
-make prod-active-slot              # which slot is currently active (blue/green)
-make monitoring-url     ENV=prod   # print Grafana URL
-
-# ── Access containers (no SSH keys — SSM Session Manager) ─────────────────
-make shell              ENV=dev    # ECS Exec into running API container
-
-# ── Emergency ──────────────────────────────────────────────────────────────
-make cleanup            ENV=dev    # run tag-based cleanup script manually
-make cleanup-dry        ENV=dev    # dry run — shows what would be deleted
-make prod-state-download           # download prod state locally for manual destroy
 ```
+
+`bootstrap.sh` creates:
+
+- S3 bucket for Terraform state (versioned, encrypted, public access blocked)
+- GitHub OIDC provider in AWS IAM (so GitHub Actions can assume roles without stored keys)
+- IAM role `nexusdeploy-github-actions-deploy` with a least-privilege inline policy (the `nexusdeploy` prefix is the AWS resource naming convention used throughout this project)
+- All SSM Parameter Store secrets (you are prompted interactively — nothing is written to disk)
+
+The script is **idempotent** — safe to re-run. It skips anything that already exists.
+
+### Step 2: Add one GitHub Secret
+
+```
+Repository → Settings → Secrets and variables → Actions → New repository secret
+Name:   AWS_DEPLOY_ROLE_ARN
+Value:  (ARN printed at the end of bootstrap output)
+```
+
+### Step 3: Create GitHub Environments
+
+```
+Repository → Settings → Environments
+Create:  dev   (no approval gate)
+Create:  prod  (enable Required reviewers — add yourself)
+```
+
+### Step 4: Update tfvars
+
+Edit both files:
+
+```
+terraform/environments/dev/terraform.tfvars
+terraform/environments/prod/terraform.tfvars
+```
+
+Set `github_org` to your GitHub username and `github_repo` to your exact repo name.
+
+### Step 5: Trigger your first deployment
+
+```bash
+git push origin dev
+```
+
+Watch GitHub Actions: `lint → test → docker-build → terraform-validate → build → deploy-dev`. After ~8 minutes, the Grafana and API URLs appear in the Actions job summary. The environment auto-destroys in 30 minutes.
+
+### Step 6: Deploy to prod
+
+```bash
+git push origin main
+```
+
+Same pipeline, but `deploy-prod` runs blue-green logic instead of a simple apply.
+
+---
+
+## 16. Day-to-Day Operations (Makefile Reference)
+
+Run `make help` to see all targets. Commonly used:
+
+```bash
+# Local development
+make up                       # Start docker-compose (postgres + redis + api + worker + beat)
+make down                     # Stop and remove volumes
+make test                     # Run pytest with coverage report
+make lint                     # flake8 + black check + bandit
+
+# Docker
+make build                    # Build API and worker images locally
+make push                     # Tag + push to ECR (requires ecr-login)
+
+# Terraform
+make tf-init  ENV=dev         # Init backend with correct bucket/key
+make tf-plan  ENV=dev         # Plan changes
+make tf-apply ENV=dev         # Apply (full deploy: build + push + apply)
+make tf-destroy ENV=dev       # Destroy dev (blocked for prod)
+
+# Operations
+make status  ENV=dev          # Show ECS service running/desired counts
+make logs    ENV=dev          # Tail CloudWatch logs for API service
+make shell   ENV=dev          # ECS Exec into a running API container (no SSH needed)
+make cleanup ENV=dev          # Run tag-based cleanup script manually
+
+# Monitoring
+make monitoring-url ENV=prod  # Print Grafana URL from Terraform output
+make monitoring-logs ENV=dev  # Tail the monitoring EC2 setup log via SSM
+
+# Prod blue-green
+make prod-active-slot         # Print current active slot (blue or green)
+make prod-state-download      # Download prod state file for local destroy
+
+# Secrets
+make secrets ENV=dev          # Re-run SSM secret creation for an environment
+```
+
+**Windows note:** `make` is not natively available in Command Prompt or PowerShell. Use Git Bash or WSL. Run Makefile targets as `bash -c "make <target>"` or `wsl make <target>` if needed.
+
+---
+
+## 17. Local Development
+
+The Docker Compose stack runs the full application locally — no AWS account needed for development.
+
+```bash
+make up
+```
+
+This starts:
+
+| Service         | Port | Purpose                                           |
+| --------------- | ---- | ------------------------------------------------- |
+| postgres        | 5432 | PostgreSQL 15 (persisted in Docker volume)        |
+| redis           | 6379 | Redis 7 (used by Celery + API session cache)      |
+| api             | 5000 | Flask API + Swagger UI at `/apidocs`              |
+| worker          | —    | Celery worker (connects to same postgres + redis) |
+| beat            | —    | Celery Beat scheduler                             |
+| redis-commander | 8081 | Redis UI for inspecting queues                    |
+
+The `app/` directory is volume-mounted into the API container. Code changes take effect after `docker compose restart api` — no rebuild needed.
+
+### Initialise the database
+
+```bash
+docker compose exec api python -m src.init_db
+```
+
+This creates the schema and seeds demo data. In dev mode, it prints credentials to stdout:
+
+```
+Admin:      admin      / <generated>
+Manager:    manager    / <generated>
+Developer1: developer1 / <generated>
+Developer2: developer2 / <generated>
+```
+
+### Try the API
+
+```bash
+# Get a token
+curl -X POST http://localhost:5000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "<password from seed output>"}'
+
+# Use the token
+curl http://localhost:5000/api/v1/projects \
+  -H "Authorization: Bearer <token>"
+```
+
+Or open `http://localhost:5000/apidocs` — Swagger UI with the Authorize button for JWT.
+
+### Running tests
+
+```bash
+make test
+# or directly:
+cd app && pytest tests/ -v --cov=src --cov-report=term-missing
+```
+
+Tests use an in-memory SQLite database and a mocked Redis client — no running services needed. Coverage report is generated at `app/htmlcov/index.html`.
+
+---
+
+## Notes for Interviewers
+
+Every feature in this repository has an intentional reason behind it:
+
+- **OIDC instead of access keys** — demonstrates modern, keyless CI/CD security
+- **FARGATE_SPOT in dev** — shows cost awareness, not just "make it work"
+- **Blue-green with SSM slot tracking** — shows deployment strategy depth without requiring CodeDeploy
+- **VPC endpoints instead of NAT GW in dev** — $0 vs $32/month for the same functional result
+- **ECR lifecycle policy** — prevents unbounded image accumulation, something often forgotten
+- **REJECT-only flow logs** — shows you understand the cost/signal tradeoff vs full logging
+- **Auto-format with commit-back** — pragmatic CI design; shifts from blocking-on-format to self-healing
+- **Modular Terraform** — environments call modules; modules are unaware of environments
+- **Commented-out features with documentation** — shows you built them and made a deliberate cost-vs-value decision, not that you didn't know how
+
+The application (teams, projects, tasks) is intentionally simple. The infrastructure around it is not.
