@@ -244,6 +244,15 @@ module "ecs" {
   api_desired_count      = 1
   worker_desired_count   = 1
   common_tags            = local.common_tags
+
+  depends_on = [
+    # Ensure secret VERSION exists before ECS tries to fetch it at task launch.
+    # secrets_arn only creates a reference to the secret shell — without this,
+    # ECS services can start before AWSCURRENT label is set on the version.
+    aws_secretsmanager_secret_version.app,
+    module.rds,
+    module.elasticache,
+  ]
 }
 
 # ── Monitoring: Prometheus + Grafana on EC2 ──

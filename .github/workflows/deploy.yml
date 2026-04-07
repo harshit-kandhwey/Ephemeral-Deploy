@@ -416,8 +416,9 @@ jobs:
         run: |
           # Redirect ALL terraform output to /dev/null — only capture the raw value
           # terraform output can print warnings/banners that corrupt GITHUB_OUTPUT format
-          GRAFANA_URL=$(terraform output -raw grafana_url 2>/dev/null) || GRAFANA_URL="deploying..."
-          PROMETHEUS_URL=$(terraform output -raw prometheus_url 2>/dev/null) || PROMETHEUS_URL="deploying..."
+          # grep -v filters warning banners that corrupt GITHUB_OUTPUT format
+          GRAFANA_URL=$(terraform output -raw grafana_url 2>/dev/null | grep -v '│' | tail -1) || true
+          PROMETHEUS_URL=$(terraform output -raw prometheus_url 2>/dev/null | grep -v '│' | tail -1) || true
           echo "grafana_url=${GRAFANA_URL:-deploying...}"       >> $GITHUB_OUTPUT
           echo "prometheus_url=${PROMETHEUS_URL:-deploying...}" >> $GITHUB_OUTPUT
 
@@ -430,7 +431,7 @@ jobs:
           echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Grafana | ${{ steps.outputs.outputs.grafana_url }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Prometheus | ${{ steps.outputs.outputs.prometheus_url }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| ⚠️ Auto-destroy in | 30 minutes |" >> $GITHUB_STEP_SUMMARY
+          echo "| ⚠️ Auto-destroy in | 45 minutes |" >> $GITHUB_STEP_SUMMARY
 
   # ─────────────────────────────────────────────
   # POST-DEPLOY: Success → cleanup after 30 min TTL
@@ -460,8 +461,8 @@ jobs:
               ref: context.ref,
               inputs: {
                 environment: 'dev',
-                delay_minutes: '30',
-                reason: 'Auto-cleanup: dev TTL (30 min) expired'
+                delay_minutes: '45',
+                reason: 'Auto-cleanup: dev TTL (45 min) expired'
               }
             });
             console.log('⏳ Cleanup scheduled in 30 minutes');
