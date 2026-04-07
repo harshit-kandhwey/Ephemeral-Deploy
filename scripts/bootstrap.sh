@@ -724,23 +724,25 @@ DEPLOY_POLICY2=$(cat <<ENDPOLICY2
 ENDPOLICY2
 )
 
+# Remove old single policy FIRST to free up space before adding split policies
+aws iam delete-role-policy \
+  --role-name "$ROLE_NAME" \
+  --policy-name "${PROJECT}-github-actions-full-deploy" \
+  --no-cli-pager 2>/dev/null || true
+
+log_info "Applying deploy policy (part 1/2)..."
 aws iam put-role-policy \
   --role-name "$ROLE_NAME" \
   --policy-name "${PROJECT}-github-actions-deploy-1" \
   --policy-document "$DEPLOY_POLICY1" \
   --no-cli-pager
 
+log_info "Applying deploy policy (part 2/2)..."
 aws iam put-role-policy \
   --role-name "$ROLE_NAME" \
   --policy-name "${PROJECT}-github-actions-deploy-2" \
   --policy-document "$DEPLOY_POLICY2" \
   --no-cli-pager
-
-# Remove old single policy if it exists (migration from single to split)
-aws iam delete-role-policy \
-  --role-name "$ROLE_NAME" \
-  --policy-name "${PROJECT}-github-actions-full-deploy" \
-  --no-cli-pager 2>/dev/null || true
 
 log_success "Least-privilege policy applied to $ROLE_NAME"
 
