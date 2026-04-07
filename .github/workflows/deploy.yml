@@ -419,6 +419,32 @@ jobs:
               --region "$REGION" 2>/dev/null || true
           fi
 
+          # ── Monitoring IAM role + instance profile ────────────────────────
+          # monitoring module creates these internally but they survive cleanup
+          # because module.monitoring is targeted in destroy. Delete so Terraform
+          # can recreate them fresh on next deploy.
+          # ── Monitoring IAM role + instance profile ────────────────────────
+          MONITORING_ROLE="$PROJECT-$ENV-monitoring-ec2"
+          MONITORING_PROFILE="$PROJECT-$ENV-monitoring"
+
+          if aws iam get-instance-profile               --instance-profile-name "$MONITORING_PROFILE" 2>/dev/null; then
+            aws iam remove-role-from-instance-profile               --instance-profile-name "$MONITORING_PROFILE"               --role-name "$MONITORING_ROLE" 2>/dev/null || true
+            aws iam delete-instance-profile               --instance-profile-name "$MONITORING_PROFILE" 2>/dev/null || true
+            echo "🗑️  Deleted orphaned monitoring instance profile"
+          fi
+          if aws iam get-role               --role-name "$MONITORING_ROLE" 2>/dev/null; then
+            POLICIES=$(aws iam list-attached-role-policies               --role-name "$MONITORING_ROLE"               --query 'AttachedPolicies[*].PolicyArn' --output text 2>/dev/null || echo "")
+            for policy in $POLICIES; do
+              aws iam detach-role-policy                 --role-name "$MONITORING_ROLE"                 --policy-arn "$policy" 2>/dev/null || true
+            done
+            INLINE=$(aws iam list-role-policies               --role-name "$MONITORING_ROLE"               --query 'PolicyNames[*]' --output text 2>/dev/null || echo "")
+            for policy in $INLINE; do
+              aws iam delete-role-policy                 --role-name "$MONITORING_ROLE"                 --policy-name "$policy" 2>/dev/null || true
+            done
+            aws iam delete-role               --role-name "$MONITORING_ROLE" 2>/dev/null || true
+            echo "🗑️  Deleted orphaned monitoring IAM role"
+          fi
+
           echo "✅ Orphaned resource cleanup complete"
 
       - name: Terraform Apply — full infrastructure
