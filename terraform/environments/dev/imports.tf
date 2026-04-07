@@ -58,5 +58,3 @@ import {
   to = module.ecr.aws_ecr_repository.worker
   id = "nexusdeploy-worker-dev"
 }
-
-

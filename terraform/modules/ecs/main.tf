@@ -80,7 +80,7 @@ resource "aws_ecs_task_definition" "api" {
       ]
 
       environment = [
-        { name = "ENV", value = var.environment },
+        { name = "ENV", value = var.environment == "dev" ? "development" : var.environment },
         { name = "VERSION", value = var.git_commit }
       ]
 
@@ -132,7 +132,7 @@ resource "aws_ecs_task_definition" "worker" {
       essential = true
 
       environment = [
-        { name = "ENV", value = var.environment },
+        { name = "ENV", value = var.environment == "dev" ? "development" : var.environment },
         { name = "VERSION", value = var.git_commit }
       ]
 
@@ -172,10 +172,10 @@ resource "aws_ecs_task_definition" "beat" {
       name      = "beat"
       image     = var.worker_image
       essential = true
-      command   = ["celery", "-A", "app.src.celery_worker:celery", "beat", "--loglevel=info"]
+      command   = ["celery", "-A", "src.celery_worker:celery", "beat", "--loglevel=info"]
 
       environment = [
-        { name = "ENV", value = var.environment }
+        { name = "ENV", value = var.environment == "dev" ? "development" : var.environment }
       ]
 
       secrets = [

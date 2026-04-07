@@ -272,4 +272,9 @@ module "monitoring" {
   ecs_cluster_name = module.ecs.cluster_name
   state_bucket     = var.tf_state_bucket
   common_tags      = local.common_tags
+
+  depends_on = [
+    module.ecs, # Need cluster name and for ECS to be ready before monitoring scrapes it
+    module.vpc, # Monitoring EC2 placed in VPC public subnet
+  ]
 }
