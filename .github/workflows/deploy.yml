@@ -465,8 +465,7 @@ jobs:
                 reason: 'Auto-cleanup: dev TTL (45 min) expired'
               }
             });
-            console.log('⏳ Cleanup scheduled in 30 minutes');
-
+            console.log('⏳ Cleanup scheduled in 45 minutes');
   # ─────────────────────────────────────────────
   # POST-DEPLOY: Failure → cleanup immediately
   # Cleans up partial infrastructure on failed deploy.
