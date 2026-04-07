@@ -1,6 +1,6 @@
 # ─────────────────────────────────────────────
 # Dev Environment - Cost-optimized, short-lived
-# Branch: dev → auto-destroys after 45 minutes
+# Branch: dev → auto-destroys after 30 minutes
 # ─────────────────────────────────────────────
 
 terraform {
@@ -62,7 +62,7 @@ locals {
     ManagedBy   = "terraform"
     GitCommit   = var.git_commit
     Owner       = "devops-team"
-    TTL         = "45m"
+    TTL         = "30m"
   }
 }
 
@@ -132,7 +132,7 @@ resource "aws_secretsmanager_secret_version" "app" {
 
   # All values sourced from SSM - zero hardcoding
   secret_string = jsonencode({
-    DATABASE_URL          = "postgresql://${data.aws_ssm_parameter.db_app_username.value}:${data.aws_ssm_parameter.db_app_password.value}@${module.rds.db_endpoint}/${var.db_name}"
+    DATABASE_URL          = "postgresql://${data.aws_ssm_parameter.db_app_username.value}:${data.aws_ssm_parameter.db_app_password.value}@${module.rds.db_endpoint}/${var.db_name}?sslmode=require"
     REDIS_URL             = "redis://${module.elasticache.redis_endpoint}:6379/0"
     CELERY_BROKER_URL     = "redis://${module.elasticache.redis_endpoint}:6379/0"
     CELERY_RESULT_BACKEND = "redis://${module.elasticache.redis_endpoint}:6379/0"
@@ -140,6 +140,10 @@ resource "aws_secretsmanager_secret_version" "app" {
     JWT_SECRET_KEY        = data.aws_ssm_parameter.jwt_secret_key.value
     AWS_REGION            = var.aws_region
     S3_BUCKET             = var.app_s3_bucket
+    DB_MASTER_USER        = data.aws_ssm_parameter.db_master_username.value
+    DB_MASTER_PASSWORD    = data.aws_ssm_parameter.db_master_password.value
+    DB_APP_USER           = data.aws_ssm_parameter.db_app_username.value
+    DB_APP_PASSWORD       = data.aws_ssm_parameter.db_app_password.value
   })
 }
 
@@ -277,4 +281,25 @@ module "monitoring" {
     module.ecs, # Need cluster name and for ECS to be ready before monitoring scrapes it
     module.vpc, # Monitoring EC2 placed in VPC public subnet
   ]
+}
+
+# ── Outputs ───────────────────────────────────────────────────────────────────
+output "app_secret_arn" {
+  description = "ARN of the app secrets in Secrets Manager"
+  value       = aws_secretsmanager_secret.app.arn
+}
+
+output "db_endpoint" {
+  description = "RDS PostgreSQL endpoint"
+  value       = module.rds.db_endpoint
+}
+
+output "grafana_url" {
+  description = "Grafana URL"
+  value       = try("http://${module.monitoring.monitoring_public_ip}:3000", "")
+}
+
+output "prometheus_url" {
+  description = "Prometheus URL"
+  value       = try("http://${module.monitoring.monitoring_public_ip}:9090", "")
 }

@@ -89,6 +89,10 @@ resource "aws_ecs_task_definition" "api" {
         { name = "REDIS_URL", valueFrom = "${var.secrets_arn}:REDIS_URL::" },
         { name = "SECRET_KEY", valueFrom = "${var.secrets_arn}:SECRET_KEY::" },
         { name = "JWT_SECRET_KEY", valueFrom = "${var.secrets_arn}:JWT_SECRET_KEY::" },
+        { name = "DB_MASTER_USER", valueFrom = "${var.secrets_arn}:DB_MASTER_USER::" },
+        { name = "DB_MASTER_PASSWORD", valueFrom = "${var.secrets_arn}:DB_MASTER_PASSWORD::" },
+        { name = "DB_APP_USER", valueFrom = "${var.secrets_arn}:DB_APP_USER::" },
+        { name = "DB_APP_PASSWORD", valueFrom = "${var.secrets_arn}:DB_APP_PASSWORD::" },
         { name = "CELERY_BROKER_URL", valueFrom = "${var.secrets_arn}:CELERY_BROKER_URL::" },
         { name = "CELERY_RESULT_BACKEND", valueFrom = "${var.secrets_arn}:CELERY_RESULT_BACKEND::" }
       ]

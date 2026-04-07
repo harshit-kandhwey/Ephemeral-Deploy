@@ -430,6 +430,39 @@ jobs:
           TF_VAR_git_commit: ${{ github.sha }}
         run: terraform apply -var-file=terraform.tfvars -auto-approve
 
+      - name: Run database init (create app user + schema)
+        # init_db.py is idempotent — safe to run on every deploy.
+        # Creates NexusAppUser if missing, runs db.create_all() for schema.
+        # Must run after Terraform apply (RDS exists) but before services start.
+        continue-on-error: false
+        run: |
+          # Get RDS endpoint and secret ARN from Terraform outputs
+          cd terraform/environments/dev
+          DB_ENDPOINT=$(terraform output -raw db_endpoint 2>/dev/null | grep -v '│' | tail -1 || echo "")
+          SECRET_ARN=$(terraform output -raw app_secret_arn 2>/dev/null | grep -v '│' | tail -1 || echo "")
+
+          if [[ -z "$DB_ENDPOINT" || -z "$SECRET_ARN" ]]; then
+            echo "⚠️  Could not get DB endpoint or secret ARN — skipping init_db"
+            exit 0
+          fi
+          cd ../../..
+
+          # Fetch all credentials from Secrets Manager
+          SECRET_JSON=$(aws secretsmanager get-secret-value             --secret-id "$SECRET_ARN" --region ${{ env.AWS_REGION }}             --query SecretString --output text)
+
+          export DATABASE_URL=$(echo "$SECRET_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['DATABASE_URL'])")
+          export DB_MASTER_USER=$(echo "$SECRET_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['DB_MASTER_USER'])")
+          export DB_MASTER_PASSWORD=$(echo "$SECRET_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['DB_MASTER_PASSWORD'])")
+          export DB_APP_USER=$(echo "$SECRET_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['DB_APP_USER'])")
+          export DB_APP_PASSWORD=$(echo "$SECRET_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['DB_APP_PASSWORD'])")
+          export ENV=development
+
+          # Run init_db from the app directory
+          cd app
+          pip install psycopg2-binary flask flask-sqlalchemy flask-migrate --quiet
+          python -m src.init_db
+          echo "✅ Database initialized"
+
       - name: Get outputs
         id: outputs
         continue-on-error: true # Non-blocking — URLs are informational only
@@ -486,7 +519,7 @@ jobs:
                 reason: 'Auto-cleanup: dev TTL (45 min) expired'
               }
             });
-            console.log('⏳ Cleanup scheduled in 45 minutes');
+            console.log('⏳ Cleanup scheduled in 30 minutes');
 
   # ─────────────────────────────────────────────
   # POST-DEPLOY: Failure → cleanup immediately
