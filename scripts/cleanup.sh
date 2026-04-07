@@ -407,7 +407,7 @@ log_success "CloudWatch log groups deleted"
 # ─────────────────────────────────────────────
 log_info "Step 9/10: Cleaning env-specific IAM roles..."
 
-for role_suffix in "ecs-execution" "ecs-task" "vpc-flow-log"; do
+for role_suffix in "ecs-execution" "ecs-task" "vpc-flow-log" "monitoring-ec2"; do
   ROLE_NAME="${PROJECT}-${ENV}-${role_suffix}"
   if aws iam get-role --role-name "$ROLE_NAME" 2>/dev/null; then
 

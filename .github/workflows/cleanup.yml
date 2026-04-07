@@ -4,22 +4,22 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Environment to destroy'
+        description: "Environment to destroy"
         required: true
         type: choice
-        options: [ dev, staging ]   # prod intentionally excluded from automation
+        options: [dev, staging] # prod intentionally excluded from automation
       delay_minutes:
-        description: 'Delay before cleanup (minutes)'
+        description: "Delay before cleanup (minutes)"
         required: false
-        default: '0'
+        default: "0"
       reason:
-        description: 'Reason for cleanup'
+        description: "Reason for cleanup"
         required: false
-        default: 'Manual cleanup'
+        default: "Manual cleanup"
 
   # Nightly safety net — destroys any forgotten dev environments
   schedule:
-    - cron: '0 0 * * *'   # Midnight UTC
+    - cron: "0 0 * * *" # Midnight UTC
 
 env:
   AWS_REGION: us-east-1
@@ -59,6 +59,7 @@ jobs:
           echo "⏳ Waiting ${DELAY} minutes before cleanup..."
           echo "Reason: ${{ github.event.inputs.reason }}"
           sleep $((DELAY * 60))
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -87,9 +88,9 @@ jobs:
         id: tf_destroy
         working-directory: terraform/environments/${{ env.TF_ENV }}
         env:
-          TF_VAR_api_image:    "placeholder"
+          TF_VAR_api_image: "placeholder"
           TF_VAR_worker_image: "placeholder"
-          TF_VAR_git_commit:   "cleanup"
+          TF_VAR_git_commit: "cleanup"
         run: |
           echo "🔥 Starting Terraform destroy for ${{ env.TF_ENV }}..."
           terraform destroy \
@@ -102,13 +103,20 @@ jobs:
             -target=module.vpc \
             -target=module.security_groups \
             -target=module.monitoring \
+            -target=module.iam.aws_iam_role.ecs_execution \
+            -target=module.iam.aws_iam_role.ecs_task \
+            -target=module.iam.aws_iam_role.vpc_flow_log \
+            -target=module.iam.aws_iam_role_policy.ecs_execution_secrets \
+            -target=module.iam.aws_iam_role_policy.ecs_task_s3 \
+            -target=module.iam.aws_iam_role_policy.vpc_flow_log \
+            -target=module.iam.aws_iam_role_policy_attachment.ecs_execution_managed \
             -target=aws_secretsmanager_secret.app \
             -target=aws_secretsmanager_secret_version.app \
             2>&1 | tee destroy_output.txt
           echo "tf_destroy_exit=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
           # NOTE: module.iam (OIDC + deploy role) and module.ecr are excluded.
           # They are bootstrap-owned and must survive cleanup. See bootstrap.sh.
-        continue-on-error: true  # fallback script runs if this fails
+        continue-on-error: true # fallback script runs if this fails
 
       # ── Step 2: Fallback — tag-based nuke script ─────────────────────────
       - name: Fallback cleanup script (if Terraform failed)

@@ -1,6 +1,6 @@
 # ─────────────────────────────────────────────
 # Dev Environment - Cost-optimized, short-lived
-# Branch: dev → auto-destroys after 30 minutes
+# Branch: dev → auto-destroys after 45 minutes
 # ─────────────────────────────────────────────
 
 terraform {
@@ -62,7 +62,7 @@ locals {
     ManagedBy   = "terraform"
     GitCommit   = var.git_commit
     Owner       = "devops-team"
-    TTL         = "30m"
+    TTL         = "45m"
   }
 }
 

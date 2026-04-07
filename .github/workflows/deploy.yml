@@ -382,20 +382,41 @@ jobs:
             -backend-config="encrypt=true"
           # Note: no dynamodb_table - see backend comment in main.tf
 
-      - name: Delete orphaned log groups (prevents ResourceAlreadyExistsException)
-        # Log groups survive failed cleanups. Terraform cannot create them if they
-        # already exist outside state. Delete them here so Terraform creates fresh.
+      - name: Delete orphaned resources (prevents EntityAlreadyExists / ResourceAlreadyExistsException)
+        # Some resources survive failed cleanups but aren't in Terraform state.
+        # Terraform cannot create them if they already exist — delete them so
+        # Terraform creates fresh. Import blocks handle resources that ALWAYS survive.
         continue-on-error: true
         run: |
           ENV="${{ needs.setup.outputs.environment }}"
           REGION="${{ env.AWS_REGION }}"
-          for lg in             "/ecs/nexusdeploy/$ENV/api"             "/ecs/nexusdeploy/$ENV/worker"             "/ecs/nexusdeploy/$ENV/beat"             "/aws/vpc/flowlogs/nexusdeploy-$ENV"; do
-            if aws logs describe-log-groups                 --log-group-name-prefix "$lg"                 --region "$REGION"                 --query 'logGroups[0].logGroupName'                 --output text 2>/dev/null | grep -q "$lg"; then
+          PROJECT="nexusdeploy"
+
+          # ── CloudWatch Log Groups ──────────────────────────────────────────
+          # Only deleted if cleanup fails (module.vpc + module.ecs are targeted)
+          for lg in             "/ecs/$PROJECT/$ENV/api"             "/ecs/$PROJECT/$ENV/worker"             "/ecs/$PROJECT/$ENV/beat"             "/aws/vpc/flowlogs/$PROJECT-$ENV"; do
+            if aws logs describe-log-groups                 --log-group-name-prefix "$lg" --region "$REGION"                 --query 'logGroups[0].logGroupName' --output text 2>/dev/null | grep -q "$lg"; then
               echo "🗑️  Deleting orphaned log group: $lg"
-              aws logs delete-log-group --log-group-name "$lg" --region "$REGION" || true
+              aws logs delete-log-group --log-group-name "$lg" --region "$REGION" 2>/dev/null || true
             fi
           done
-          echo "✅ Orphaned log groups cleared"
+
+          # ── IAM Roles ─────────────────────────────────────────────────────
+          # module.iam is excluded from destroy targets so these always survive.
+          # Import blocks handle them — but if a full manual cleanup ran and
+          # deleted them, we skip (import will fail gracefully with cannot-import).
+          # Nothing to delete here — handled by import blocks in imports.tf.
+
+          # ── Secrets Manager ───────────────────────────────────────────────
+          # Secret may be in deletion pending state from previous cleanup.
+          # Force delete it so Terraform can recreate fresh.
+          SECRET_STATE=$(aws secretsmanager describe-secret             --secret-id "$PROJECT/$ENV/app-secrets" --region "$REGION"             --query 'DeletedDate' --output text 2>/dev/null || echo "NOT_FOUND")
+          if [[ "$SECRET_STATE" != "NOT_FOUND" && "$SECRET_STATE" != "None" ]]; then
+            echo "🗑️  Force-deleting secret pending deletion: $PROJECT/$ENV/app-secrets"
+            aws secretsmanager delete-secret               --secret-id "$PROJECT/$ENV/app-secrets"               --force-delete-without-recovery               --region "$REGION" 2>/dev/null || true
+          fi
+
+          echo "✅ Orphaned resource cleanup complete"
 
       - name: Terraform Apply — full infrastructure
         # ECR already exists from ecr-provision job.
@@ -466,6 +487,7 @@ jobs:
               }
             });
             console.log('⏳ Cleanup scheduled in 45 minutes');
+
   # ─────────────────────────────────────────────
   # POST-DEPLOY: Failure → cleanup immediately
   # Cleans up partial infrastructure on failed deploy.
