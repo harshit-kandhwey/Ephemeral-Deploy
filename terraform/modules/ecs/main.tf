@@ -144,7 +144,11 @@ resource "aws_ecs_task_definition" "worker" {
         { name = "DATABASE_URL", valueFrom = "${var.secrets_arn}:DATABASE_URL::" },
         { name = "REDIS_URL", valueFrom = "${var.secrets_arn}:REDIS_URL::" },
         { name = "CELERY_BROKER_URL", valueFrom = "${var.secrets_arn}:CELERY_BROKER_URL::" },
-        { name = "CELERY_RESULT_BACKEND", valueFrom = "${var.secrets_arn}:CELERY_RESULT_BACKEND::" }
+        { name = "CELERY_RESULT_BACKEND", valueFrom = "${var.secrets_arn}:CELERY_RESULT_BACKEND::" },
+        { name = "DB_MASTER_USER", valueFrom = "${var.secrets_arn}:DB_MASTER_USER::" },
+        { name = "DB_MASTER_PASSWORD", valueFrom = "${var.secrets_arn}:DB_MASTER_PASSWORD::" },
+        { name = "DB_APP_USER", valueFrom = "${var.secrets_arn}:DB_APP_USER::" },
+        { name = "DB_APP_PASSWORD", valueFrom = "${var.secrets_arn}:DB_APP_PASSWORD::" }
       ]
 
       logConfiguration = {

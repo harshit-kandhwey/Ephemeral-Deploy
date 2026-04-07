@@ -294,6 +294,21 @@ output "db_endpoint" {
   value       = module.rds.db_endpoint
 }
 
+output "ecs_cluster_name" {
+  description = "ECS cluster name"
+  value       = module.ecs.cluster_name
+}
+
+output "private_app_subnet_ids" {
+  description = "Private app subnet IDs for ECS tasks"
+  value       = module.vpc.private_app_subnet_ids
+}
+
+output "worker_sg_id" {
+  description = "Worker security group ID"
+  value       = module.security_groups.worker_sg_id
+}
+
 output "grafana_url" {
   description = "Grafana URL"
   value       = try("http://${module.monitoring.monitoring_public_ip}:3000", "")

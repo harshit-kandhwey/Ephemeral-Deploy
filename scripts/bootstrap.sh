@@ -401,6 +401,7 @@ DEPLOY_POLICY1=$(cat <<ENDPOLICY1
         "ecs:ListTasks",
         "ecs:PutClusterCapacityProviders",
         "ecs:RegisterTaskDefinition",
+        "ecs:RunTask",
         "ecs:StopTask",
         "ecs:TagResource",
         "ecs:UntagResource",

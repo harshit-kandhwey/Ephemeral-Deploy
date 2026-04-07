@@ -17,6 +17,10 @@ permissions:
   actions: write
   contents: write
 
+concurrency:
+  group: ci-${{ github.ref_name }}
+  cancel-in-progress: true # CI is always safe to cancel (tests/lint/build only)
+
 jobs:
   # ─────────────────────────────────────────────
   # JOB 0: Detect what changed
