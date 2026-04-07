@@ -182,6 +182,50 @@ systemctl enable --now yace
 systemctl enable --now node_exporter
 systemctl enable --now prometheus
 systemctl enable --now grafana-server
+
+# ── ECS Service Discovery ─────────────────────────────────────────────────────
+# Creates /etc/prometheus/ecs-targets.json by querying ECS for running API tasks.
+# Runs every 30s via cron so targets update automatically after deployments.
+cat > /usr/local/bin/ecs-discovery.sh << 'DISCOVERY'
+#!/bin/bash
+set -e
+CLUSTER="${ecs_cluster_name}"
+REGION="${aws_region}"
+OUTPUT="/etc/prometheus/ecs-targets.json"
+
+TASKS=$(aws ecs list-tasks   --cluster "$CLUSTER"   --family nexusdeploy-${environment}-api   --region "$REGION"   --query 'taskArns' --output text 2>/dev/null || echo "")
+
+if [[ -z "$TASKS" ]]; then
+  echo "[]" > "$OUTPUT"
+  exit 0
+fi
+
+IPS=$(aws ecs describe-tasks   --cluster "$CLUSTER"   --tasks $TASKS   --region "$REGION"   --query 'tasks[*].attachments[0].details[?name==`privateIPv4Address`].value'   --output text 2>/dev/null || echo "")
+
+TARGETS=()
+for IP in $IPS; do
+  [[ -z "$IP" || "$IP" == "None" ]] && continue
+  TARGETS+=("$IP:5000")
+done
+
+if [[ $${#TARGETS[@]} -eq 0 ]]; then
+  echo "[]" > "$OUTPUT"
+else
+  printf '%s\n' "$${TARGETS[@]}" | jq -R -s -c '
+    split("\n") | map(select(length > 0)) |
+    [{ targets: ., labels: { job: "nexusdeploy-api", environment: "${environment}" }}]
+  ' > "$OUTPUT"
+fi
+DISCOVERY
+
+chmod +x /usr/local/bin/ecs-discovery.sh
+
+# Run once immediately then every 30s via cron
+/usr/local/bin/ecs-discovery.sh || true
+cat > /etc/cron.d/ecs-discovery << 'CRONEOF'
+*/1 * * * * root /usr/local/bin/ecs-discovery.sh
+*/1 * * * * root sleep 30 && /usr/local/bin/ecs-discovery.sh
+CRONEOF
 sleep 10
 
 echo "=== Service Status ==="

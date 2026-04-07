@@ -1,3 +1,5 @@
 .venv/
 .vscode/
 __pycache__/
+scripts/post_deploycheck.sh
+scripts/load_test.sh
