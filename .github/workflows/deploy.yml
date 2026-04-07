@@ -98,7 +98,11 @@ jobs:
             echo "🔨 App changed — image build required"
           else
             # No app change — check if ECR has any images
-            IMAGE_COUNT=$(aws ecr describe-images               --repository-name "nexusdeploy-api-$ENV"               --region ${{ env.AWS_REGION }}               --query 'length(imageDetails)'               --output text 2>/dev/null || echo "0")
+            IMAGE_COUNT=$(aws ecr describe-images \
+              --repository-name "nexusdeploy-api-$ENV" \
+              --region ${{ env.AWS_REGION }} \
+              --query 'length(imageDetails)' \
+              --output text 2>/dev/null || echo "0")
 
             if [[ "$IMAGE_COUNT" == "0" || -z "$IMAGE_COUNT" ]]; then
               echo "app_changed=true" >> $GITHUB_OUTPUT
@@ -188,8 +192,16 @@ jobs:
         id: ecr-check
         run: |
           ENV="${{ needs.setup.outputs.environment }}"
-          API_EXISTS=$(aws ecr describe-repositories             --repository-names "nexusdeploy-api-$ENV"             --region ${{ env.AWS_REGION }}             --query 'repositories[0].repositoryName'             --output text 2>/dev/null || echo "")
-          WORKER_EXISTS=$(aws ecr describe-repositories             --repository-names "nexusdeploy-worker-$ENV"             --region ${{ env.AWS_REGION }}             --query 'repositories[0].repositoryName'             --output text 2>/dev/null || echo "")
+          API_EXISTS=$(aws ecr describe-repositories \
+            --repository-names "nexusdeploy-api-$ENV" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'repositories[0].repositoryName' \
+            --output text 2>/dev/null || echo "")
+          WORKER_EXISTS=$(aws ecr describe-repositories \
+            --repository-names "nexusdeploy-worker-$ENV" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'repositories[0].repositoryName' \
+            --output text 2>/dev/null || echo "")
 
           if [[ -n "$API_EXISTS" && -n "$WORKER_EXISTS" ]]; then
             echo "repos_exist=true" >> $GITHUB_OUTPUT
@@ -210,46 +222,28 @@ jobs:
           TF_VAR_worker_image: "placeholder"
           TF_VAR_git_commit: ${{ github.sha }}
         run: |
-          terraform apply             -target=module.ecr             -var-file=terraform.tfvars             -auto-approve
+          terraform apply \
+            -target=module.ecr \
+            -var-file=terraform.tfvars \
+            -auto-approve
           echo "✅ ECR repositories provisioned"
 
       - name: Ensure ECR lifecycle policies exist
         # Lifecycle policies may have been deleted manually or by a failed cleanup.
         # Create them via AWS CLI if missing — idempotent, safe to run every time.
-        # This guarantees the import block in imports.tf never fails.
         run: |
           ENV="${{ needs.setup.outputs.environment }}"
           REGION="${{ env.AWS_REGION }}"
 
           for repo in nexusdeploy-api-$ENV nexusdeploy-worker-$ENV; do
-            if ! aws ecr get-lifecycle-policy                 --repository-name "$repo"                 --region "$REGION" 2>/dev/null; then
+            if ! aws ecr get-lifecycle-policy \
+                --repository-name "$repo" \
+                --region "$REGION" 2>/dev/null; then
               echo "⚠️  Lifecycle policy missing for $repo — creating..."
-              aws ecr put-lifecycle-policy                 --repository-name "$repo"                 --region "$REGION"                 --lifecycle-policy-text '{
-                  "rules": [
-                    {
-                      "rulePriority": 1,
-                      "description": "Keep last 3 tagged images",
-                      "selection": {
-                        "tagStatus": "tagged",
-                        "tagPrefixList": ["v", "sha"],
-                        "countType": "imageCountMoreThan",
-                        "countNumber": 3
-                      },
-                      "action": { "type": "expire" }
-                    },
-                    {
-                      "rulePriority": 2,
-                      "description": "Delete untagged images after 1 day",
-                      "selection": {
-                        "tagStatus": "untagged",
-                        "countType": "sinceImagePushed",
-                        "countUnit": "days",
-                        "countNumber": 1
-                      },
-                      "action": { "type": "expire" }
-                    }
-                  ]
-                }'
+              aws ecr put-lifecycle-policy \
+                --repository-name "$repo" \
+                --region "$REGION" \
+                --lifecycle-policy-text '{"rules":[{"rulePriority":1,"description":"Keep last 3 tagged images","selection":{"tagStatus":"tagged","tagPrefixList":["v","sha"],"countType":"imageCountMoreThan","countNumber":3},"action":{"type":"expire"}},{"rulePriority":2,"description":"Delete untagged images after 1 day","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":1},"action":{"type":"expire"}}]}'
               echo "✅ Lifecycle policy created for $repo"
             else
               echo "✅ Lifecycle policy already exists for $repo"
@@ -279,6 +273,9 @@ jobs:
     name: Push Images (${{ needs.setup.outputs.environment }})
     runs-on: ubuntu-latest
     needs: [setup, ecr-provision]
+    concurrency:
+      group: push-image-${{ github.ref_name }}
+      cancel-in-progress: true
     if: |
       always() &&
       needs.setup.outputs.app_changed == 'true' &&
@@ -345,6 +342,9 @@ jobs:
     name: Deploy → dev
     runs-on: ubuntu-latest
     needs: [setup, ecr-provision, push-image]
+    concurrency:
+      group: deploy-dev-${{ github.ref_name }}
+      cancel-in-progress: false
     # Run when: env is dev AND (image was pushed OR only infra changed)
     if: |
       always() &&
@@ -393,51 +393,99 @@ jobs:
           PROJECT="nexusdeploy"
 
           # ── CloudWatch Log Groups ──────────────────────────────────────────
-          # Only deleted if cleanup fails (module.vpc + module.ecs are targeted)
-          for lg in             "/ecs/$PROJECT/$ENV/api"             "/ecs/$PROJECT/$ENV/worker"             "/ecs/$PROJECT/$ENV/beat"             "/aws/vpc/flowlogs/$PROJECT-$ENV"; do
-            if aws logs describe-log-groups                 --log-group-name-prefix "$lg" --region "$REGION"                 --query 'logGroups[0].logGroupName' --output text 2>/dev/null | grep -q "$lg"; then
+          for lg in \
+            "/ecs/$PROJECT/$ENV/api" \
+            "/ecs/$PROJECT/$ENV/worker" \
+            "/ecs/$PROJECT/$ENV/beat" \
+            "/aws/vpc/flowlogs/$PROJECT-$ENV"; do
+            if aws logs describe-log-groups \
+                --log-group-name-prefix "$lg" --region "$REGION" \
+                --query 'logGroups[0].logGroupName' --output text 2>/dev/null | grep -q "$lg"; then
               echo "🗑️  Deleting orphaned log group: $lg"
               aws logs delete-log-group --log-group-name "$lg" --region "$REGION" 2>/dev/null || true
             fi
           done
 
-          # ── IAM Roles ─────────────────────────────────────────────────────
-          # module.iam is excluded from destroy targets so these always survive.
-          # Import blocks handle them — but if a full manual cleanup ran and
-          # deleted them, we skip (import will fail gracefully with cannot-import).
-          # Nothing to delete here — handled by import blocks in imports.tf.
-
           # ── Secrets Manager ───────────────────────────────────────────────
           # Secret may be in deletion pending state from previous cleanup.
-          # Force delete it so Terraform can recreate fresh.
-          SECRET_STATE=$(aws secretsmanager describe-secret             --secret-id "$PROJECT/$ENV/app-secrets" --region "$REGION"             --query 'DeletedDate' --output text 2>/dev/null || echo "NOT_FOUND")
+          SECRET_STATE=$(aws secretsmanager describe-secret \
+            --secret-id "$PROJECT/$ENV/app-secrets" --region "$REGION" \
+            --query 'DeletedDate' --output text 2>/dev/null || echo "NOT_FOUND")
           if [[ "$SECRET_STATE" != "NOT_FOUND" && "$SECRET_STATE" != "None" ]]; then
             echo "🗑️  Force-deleting secret pending deletion: $PROJECT/$ENV/app-secrets"
-            aws secretsmanager delete-secret               --secret-id "$PROJECT/$ENV/app-secrets"               --force-delete-without-recovery               --region "$REGION" 2>/dev/null || true
+            aws secretsmanager delete-secret \
+              --secret-id "$PROJECT/$ENV/app-secrets" \
+              --force-delete-without-recovery \
+              --region "$REGION" 2>/dev/null || true
           fi
 
           echo "✅ Orphaned resource cleanup complete"
 
       - name: Terraform Apply — full infrastructure
-        # ECR already exists from ecr-provision job.
-        # Images already pushed from push-image job.
-        # This apply creates VPC, ECS, RDS, ElastiCache etc. with real image tags.
         working-directory: terraform/environments/dev
         env:
-          # Use newly pushed image if app changed, otherwise use current ECR image
           TF_VAR_api_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}
           TF_VAR_worker_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.worker_image || needs.setup.outputs.current_worker }}
           TF_VAR_git_commit: ${{ github.sha }}
         run: terraform apply -var-file=terraform.tfvars -auto-approve
+
+      - name: Run database init (ECS one-off task inside VPC)
+        # Runs init_db.py as ECS task inside VPC — can reach private RDS.
+        # Creates NexusAppUser + schema. Idempotent — safe on every deploy.
+        # continue-on-error: init_db failure should not block deployment.
+        continue-on-error: true
+        working-directory: terraform/environments/dev
+        run: |
+          SECRET_ARN=$(terraform output -raw app_secret_arn 2>/dev/null | grep -v '│' | tail -1 || echo "")
+          CLUSTER=$(terraform output -raw ecs_cluster_name 2>/dev/null | grep -v '│' | tail -1 || echo "nexusdeploy-dev")
+          SUBNET_ID=$(terraform output -json private_app_subnet_ids 2>/dev/null | python3 -c "import sys,json; ids=json.load(sys.stdin); print(ids[0])" || echo "")
+          SG_ID=$(terraform output -raw worker_sg_id 2>/dev/null | grep -v '│' | tail -1 || echo "")
+
+          if [[ -z "$SECRET_ARN" || -z "$SUBNET_ID" || -z "$SG_ID" ]]; then
+            echo "⚠️  Missing Terraform outputs — skipping init_db"
+            exit 0
+          fi
+
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition nexusdeploy-dev-worker \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          OVERRIDES='{"containerOverrides":[{"name":"worker","command":["python","-m","src.init_db"],"environment":[{"name":"ENV","value":"development"},{"name":"SEED_DB","value":"true"}]}]}'
+
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "$CLUSTER" \
+            --task-definition "$TASK_DEF" \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_ID],securityGroups=[$SG_ID],assignPublicIp=DISABLED}" \
+            --overrides "$OVERRIDES" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'tasks[0].taskArn' --output text)
+
+          echo "Task ARN: $TASK_ARN"
+
+          aws ecs wait tasks-stopped \
+            --cluster "$CLUSTER" \
+            --tasks "$TASK_ARN" \
+            --region ${{ env.AWS_REGION }}
+
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster "$CLUSTER" \
+            --tasks "$TASK_ARN" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+
+          if [[ "$EXIT_CODE" == "0" ]]; then
+            echo "✅ Database initialized successfully"
+          else
+            echo "⚠️  init_db exited with code: $EXIT_CODE — check logs"
+          fi
 
       - name: Get outputs
         id: outputs
         continue-on-error: true # Non-blocking — URLs are informational only
         working-directory: terraform/environments/dev
         run: |
-          # Redirect ALL terraform output to /dev/null — only capture the raw value
-          # terraform output can print warnings/banners that corrupt GITHUB_OUTPUT format
-          # grep -v filters warning banners that corrupt GITHUB_OUTPUT format
           GRAFANA_URL=$(terraform output -raw grafana_url 2>/dev/null | grep -v '│' | tail -1) || true
           PROMETHEUS_URL=$(terraform output -raw prometheus_url 2>/dev/null | grep -v '│' | tail -1) || true
           echo "grafana_url=${GRAFANA_URL:-deploying...}"       >> $GITHUB_OUTPUT
@@ -455,11 +503,10 @@ jobs:
           echo "| ⚠️ Auto-destroy in | 45 minutes |" >> $GITHUB_STEP_SUMMARY
 
   # ─────────────────────────────────────────────
-  # POST-DEPLOY: Success → cleanup after 30 min TTL
-  # Runs in PARALLEL with any prod gating steps.
+  # POST-DEPLOY: Success → cleanup after 45 min TTL
   # ─────────────────────────────────────────────
   cleanup-on-success:
-    name: Schedule cleanup (30 min TTL)
+    name: Schedule cleanup (45 min TTL)
     runs-on: ubuntu-latest
     needs: [setup, deploy-dev]
     if: |
@@ -471,7 +518,7 @@ jobs:
       actions: write
 
     steps:
-      - name: Trigger cleanup after 30 minutes
+      - name: Trigger cleanup after 45 minutes
         uses: actions/github-script@v7
         with:
           script: |
@@ -490,7 +537,6 @@ jobs:
 
   # ─────────────────────────────────────────────
   # POST-DEPLOY: Failure → cleanup immediately
-  # Cleans up partial infrastructure on failed deploy.
   # ─────────────────────────────────────────────
   cleanup-on-failure:
     name: Cleanup on failure (immediate)
