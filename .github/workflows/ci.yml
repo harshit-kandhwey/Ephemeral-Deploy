@@ -184,7 +184,7 @@ jobs:
             --cov-fail-under=60
 
       - name: Upload coverage report
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           file: app/coverage.xml
           flags: unittests
