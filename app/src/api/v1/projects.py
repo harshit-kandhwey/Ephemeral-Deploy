@@ -54,12 +54,17 @@ def get_projects():
         return jsonify({"projects": [], "total": 0, "pages": 0, "current_page": 1}), 200
 
     projects = query.order_by(Project.created_at.desc()).paginate(page=page, per_page=per_page, error_out=False)
-    return jsonify({
-        "projects": [p.to_dict() for p in projects.items],
-        "total": projects.total,
-        "pages": projects.pages,
-        "current_page": projects.page,
-    }), 200
+    return (
+        jsonify(
+            {
+                "projects": [p.to_dict() for p in projects.items],
+                "total": projects.total,
+                "pages": projects.pages,
+                "current_page": projects.page,
+            }
+        ),
+        200,
+    )
 
 
 @api_v1.route("/projects/<int:project_id>", methods=["GET"])
