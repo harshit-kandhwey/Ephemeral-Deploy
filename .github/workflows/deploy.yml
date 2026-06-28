@@ -449,6 +449,26 @@ jobs:
 
           echo "✅ Orphaned resource cleanup complete"
 
+      - name: Adopt orphaned Terraform resources
+        # If a previous deploy failed mid-way and cleanup didn't run, AWS
+        # resources can exist without being in Terraform state. The next apply
+        # then fails with "already exists". This step imports each resource only
+        # when it exists in AWS but is absent from state — both "not in AWS" and
+        # "already in state" cases are silenced with || true so a clean first
+        # deploy or a replay of a successful one both pass without errors.
+        working-directory: terraform/environments/dev
+        run: |
+          adopt() {
+            local addr=$1 id=$2
+            terraform state show "$addr" &>/dev/null && return 0
+            terraform import "$addr" "$id" 2>/dev/null || true
+          }
+          adopt aws_secretsmanager_secret.init                  "nexusdeploy/dev/init-secrets"
+          adopt module.iam.aws_iam_role.ecs_execution           "nexusdeploy-dev-ecs-execution"
+          adopt module.iam.aws_iam_role.ecs_execution_worker    "nexusdeploy-dev-ecs-execution-worker"
+          adopt module.iam.aws_iam_role.ecs_task                "nexusdeploy-dev-ecs-task"
+          adopt module.iam.aws_iam_role.vpc_flow_log            "nexusdeploy-dev-vpc-flow-log"
+
       - name: Terraform Apply — full infrastructure
         working-directory: terraform/environments/dev
         env:

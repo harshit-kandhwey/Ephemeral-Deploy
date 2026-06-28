@@ -104,14 +104,18 @@ jobs:
             -target=module.security_groups \
             -target=module.monitoring \
             -target=module.iam.aws_iam_role.ecs_execution \
+            -target=module.iam.aws_iam_role.ecs_execution_worker \
             -target=module.iam.aws_iam_role.ecs_task \
             -target=module.iam.aws_iam_role.vpc_flow_log \
             -target=module.iam.aws_iam_role_policy.ecs_execution_secrets \
+            -target=module.iam.aws_iam_role_policy.ecs_execution_worker_secrets \
             -target=module.iam.aws_iam_role_policy.ecs_task_s3 \
             -target=module.iam.aws_iam_role_policy.vpc_flow_log \
             -target=module.iam.aws_iam_role_policy_attachment.ecs_execution_managed \
             -target=aws_secretsmanager_secret.app \
             -target=aws_secretsmanager_secret_version.app \
+            -target=aws_secretsmanager_secret.init \
+            -target=aws_secretsmanager_secret_version.init \
             2>&1 | tee destroy_output.txt
           echo "tf_destroy_exit=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
           # NOTE: module.iam (OIDC + deploy role) and module.ecr are excluded.
