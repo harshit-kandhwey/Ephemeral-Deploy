@@ -1,0 +1,34 @@
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/app"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-patch"]
+
+  - package-ecosystem: "docker"
+    directory: "/app"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "docker"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
