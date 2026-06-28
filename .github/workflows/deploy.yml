@@ -456,12 +456,18 @@ jobs:
         # when it exists in AWS but is absent from state — both "not in AWS" and
         # "already in state" cases are silenced with || true so a clean first
         # deploy or a replay of a successful one both pass without errors.
+        # TF_VAR_* placeholders are required so Terraform can parse the config
+        # during import (these vars have no defaults in the module).
         working-directory: terraform/environments/dev
+        env:
+          TF_VAR_api_image: "placeholder"
+          TF_VAR_worker_image: "placeholder"
+          TF_VAR_git_commit: "placeholder"
         run: |
           adopt() {
             local addr=$1 id=$2
             terraform state show "$addr" &>/dev/null && return 0
-            terraform import "$addr" "$id" 2>/dev/null || true
+            terraform import -var-file=terraform.tfvars "$addr" "$id" || true
           }
           adopt aws_secretsmanager_secret.init                  "nexusdeploy/dev/init-secrets"
           adopt module.iam.aws_iam_role.ecs_execution           "nexusdeploy-dev-ecs-execution"
