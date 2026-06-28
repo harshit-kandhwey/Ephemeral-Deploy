@@ -407,17 +407,19 @@ jobs:
           done
 
           # ── Secrets Manager ───────────────────────────────────────────────
-          # Secret may be in deletion pending state from previous cleanup.
-          SECRET_STATE=$(aws secretsmanager describe-secret \
-            --secret-id "$PROJECT/$ENV/app-secrets" --region "$REGION" \
-            --query 'DeletedDate' --output text 2>/dev/null || echo "NOT_FOUND")
-          if [[ "$SECRET_STATE" != "NOT_FOUND" && "$SECRET_STATE" != "None" ]]; then
-            echo "🗑️  Force-deleting secret pending deletion: $PROJECT/$ENV/app-secrets"
-            aws secretsmanager delete-secret \
-              --secret-id "$PROJECT/$ENV/app-secrets" \
-              --force-delete-without-recovery \
-              --region "$REGION" 2>/dev/null || true
-          fi
+          # Secrets may be in pending-deletion state from a previous failed cleanup.
+          for secret_id in "$PROJECT/$ENV/app-secrets" "$PROJECT/$ENV/init-secrets"; do
+            SECRET_STATE=$(aws secretsmanager describe-secret \
+              --secret-id "$secret_id" --region "$REGION" \
+              --query 'DeletedDate' --output text 2>/dev/null || echo "NOT_FOUND")
+            if [[ "$SECRET_STATE" != "NOT_FOUND" && "$SECRET_STATE" != "None" ]]; then
+              echo "🗑️  Force-deleting secret pending deletion: $secret_id"
+              aws secretsmanager delete-secret \
+                --secret-id "$secret_id" \
+                --force-delete-without-recovery \
+                --region "$REGION" 2>/dev/null || true
+            fi
+          done
 
           # ── Monitoring IAM role + instance profile ────────────────────────
           # monitoring module creates these internally but they survive cleanup
@@ -693,6 +695,9 @@ jobs:
           # Previous images stay on old slot (already running)
           TF_VAR_previous_api_image: ${{ steps.prev_images.outputs.api }}
           TF_VAR_previous_worker_image: ${{ steps.prev_images.outputs.worker }}
+          # Set in GitHub → Settings → Environments → prod → Variables → MONITORING_ALLOWED_CIDR
+          # Format: '["1.2.3.4/32","10.0.0.0/8"]' — never commit real CIDRs to repo
+          TF_VAR_monitoring_allowed_cidr: ${{ vars.MONITORING_ALLOWED_CIDR }}
         run: |
           terraform apply -var-file=terraform.tfvars -auto-approve
         continue-on-error: true

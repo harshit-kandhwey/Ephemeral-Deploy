@@ -125,7 +125,7 @@
       "targets": [
         {
           "expr": "sum(aws_ecs_live_task_count_average) or vector(0)",
-          "legendFormat": "Live Tasks",
+          "legendFormat": "Live Tasks (incl. activating/deactivating)",
           "refId": "A"
         }
       ],
