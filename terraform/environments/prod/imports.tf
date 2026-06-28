@@ -27,6 +27,18 @@ import {
   id = "nexusdeploy-github-actions-deploy"
 }
 
+# Inline policies — split into two to stay under 10240 char limit per policy
+# Same policies as dev; these are shared bootstrap-owned resources
+import {
+  to = module.iam.aws_iam_role_policy.github_actions_deploy
+  id = "nexusdeploy-github-actions-deploy:nexusdeploy-github-actions-deploy-1"
+}
+
+import {
+  to = module.iam.aws_iam_role_policy.github_actions_deploy_2
+  id = "nexusdeploy-github-actions-deploy:nexusdeploy-github-actions-deploy-2"
+}
+
 # ECR repositories — prod uses separate ECR repos tagged with 'prod'
 # ecr-provision job guarantees these exist before deploy-prod runs.
 import {

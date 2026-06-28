@@ -673,6 +673,104 @@ jobs:
           role-session-name: DeployProd-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: terraform/environments/prod
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
+            -backend-config="key=prod/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true"
+
+      - name: Delete orphaned resources
+        continue-on-error: true
+        run: |
+          ENV="prod"
+          REGION="${{ env.AWS_REGION }}"
+          PROJECT="nexusdeploy"
+
+          # CloudWatch log groups (both slots)
+          for slot in blue green; do
+            for svc in api worker beat; do
+              lg="/ecs/$PROJECT/$ENV-$slot/$svc"
+              if aws logs describe-log-groups \
+                  --log-group-name-prefix "$lg" --region "$REGION" \
+                  --query 'logGroups[0].logGroupName' --output text 2>/dev/null | grep -q "$lg"; then
+                echo "🗑️  Deleting orphaned log group: $lg"
+                aws logs delete-log-group --log-group-name "$lg" --region "$REGION" 2>/dev/null || true
+              fi
+            done
+          done
+
+          # Secrets Manager pending-deletion secrets
+          for secret_id in "$PROJECT/$ENV/app-secrets" "$PROJECT/$ENV/init-secrets"; do
+            SECRET_STATE=$(aws secretsmanager describe-secret \
+              --secret-id "$secret_id" --region "$REGION" \
+              --query 'DeletedDate' --output text 2>/dev/null || echo "NOT_FOUND")
+            if [[ "$SECRET_STATE" != "NOT_FOUND" && "$SECRET_STATE" != "None" ]]; then
+              echo "🗑️  Force-deleting secret pending deletion: $secret_id"
+              aws secretsmanager delete-secret \
+                --secret-id "$secret_id" \
+                --force-delete-without-recovery \
+                --region "$REGION" 2>/dev/null || true
+            fi
+          done
+
+          # Monitoring IAM role + instance profile
+          MONITORING_ROLE="$PROJECT-$ENV-monitoring-ec2"
+          MONITORING_PROFILE="$PROJECT-$ENV-monitoring"
+
+          if aws iam get-instance-profile --instance-profile-name "$MONITORING_PROFILE" 2>/dev/null; then
+            aws iam remove-role-from-instance-profile \
+              --instance-profile-name "$MONITORING_PROFILE" \
+              --role-name "$MONITORING_ROLE" 2>/dev/null || true
+            aws iam delete-instance-profile \
+              --instance-profile-name "$MONITORING_PROFILE" 2>/dev/null || true
+            echo "🗑️  Deleted orphaned monitoring instance profile"
+          fi
+          if aws iam get-role --role-name "$MONITORING_ROLE" 2>/dev/null; then
+            POLICIES=$(aws iam list-attached-role-policies \
+              --role-name "$MONITORING_ROLE" \
+              --query 'AttachedPolicies[*].PolicyArn' --output text 2>/dev/null || echo "")
+            for policy in $POLICIES; do
+              aws iam detach-role-policy --role-name "$MONITORING_ROLE" --policy-arn "$policy" 2>/dev/null || true
+            done
+            INLINE=$(aws iam list-role-policies \
+              --role-name "$MONITORING_ROLE" \
+              --query 'PolicyNames[*]' --output text 2>/dev/null || echo "")
+            for policy in $INLINE; do
+              aws iam delete-role-policy --role-name "$MONITORING_ROLE" --policy-name "$policy" 2>/dev/null || true
+            done
+            aws iam delete-role --role-name "$MONITORING_ROLE" 2>/dev/null || true
+            echo "🗑️  Deleted orphaned monitoring IAM role"
+          fi
+
+          echo "✅ Orphaned resource cleanup complete"
+
+      - name: Adopt orphaned Terraform resources
+        working-directory: terraform/environments/prod
+        env:
+          TF_VAR_api_image: "placeholder"
+          TF_VAR_worker_image: "placeholder"
+          TF_VAR_git_commit: "placeholder"
+          TF_VAR_monitoring_allowed_cidr: "[]"
+        run: |
+          adopt() {
+            local addr=$1 id=$2
+            terraform state show "$addr" &>/dev/null && return 0
+            terraform import -var-file=terraform.tfvars "$addr" "$id" || true
+          }
+          adopt aws_secretsmanager_secret.init                  "nexusdeploy/prod/init-secrets"
+          adopt module.iam.aws_iam_role.ecs_execution           "nexusdeploy-prod-ecs-execution"
+          adopt module.iam.aws_iam_role.ecs_execution_worker    "nexusdeploy-prod-ecs-execution-worker"
+          adopt module.iam.aws_iam_role.ecs_task                "nexusdeploy-prod-ecs-task"
+          adopt module.iam.aws_iam_role.vpc_flow_log            "nexusdeploy-prod-vpc-flow-log"
+
       # ── Step 1: Read current active slot ──
       - name: Read active deployment slot from SSM
         id: slot
@@ -693,20 +791,6 @@ jobs:
           echo "current_slot=$CURRENT" >> $GITHUB_OUTPUT
           echo "new_slot=$NEW_SLOT"    >> $GITHUB_OUTPUT
           echo "🔵 Current active: $CURRENT → 🟢 Deploying to: $NEW_SLOT"
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Terraform Init
-        working-directory: terraform/environments/prod
-        run: |
-          terraform init \
-            -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
-            -backend-config="key=prod/terraform.tfstate" \
-            -backend-config="region=${{ env.AWS_REGION }}" \
-            -backend-config="encrypt=true"
 
       # ── Step 1c: Read previous images from SSM ──
       - name: Read previous images from SSM

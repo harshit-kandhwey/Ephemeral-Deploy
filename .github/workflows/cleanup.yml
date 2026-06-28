@@ -4,12 +4,22 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: "Environment to destroy"
+        description: "Environment to target"
         required: true
         type: choice
-        options: [dev, staging] # prod intentionally excluded from automation
+        options: [dev, staging, prod] # prod only valid for drain_old_slot action
+      action:
+        description: "Action to perform"
+        required: false
+        default: "destroy"
+        type: choice
+        options: [destroy, drain_old_slot]
+      old_slot:
+        description: "Old blue-green slot to drain (blue or green) — drain_old_slot only"
+        required: false
+        default: ""
       delay_minutes:
-        description: "Delay before cleanup (minutes)"
+        description: "Delay before action (minutes)"
         required: false
         default: "0"
       reason:
@@ -33,6 +43,8 @@ jobs:
   destroy:
     name: Destroy ${{ github.event.inputs.environment || 'dev' }}
     runs-on: ubuntu-latest
+    # Scheduled runs are always dev destroy. Manual runs skip destroy for drain_old_slot.
+    if: github.event_name == 'schedule' || github.event.inputs.action != 'drain_old_slot'
     environment: ${{ github.event.inputs.environment || 'dev' }}
 
     permissions:
@@ -192,3 +204,78 @@ jobs:
           echo "| ECR Images | ✅ Managed by lifecycle policy |" >> $GITHUB_STEP_SUMMARY
           echo "| S3 Bucket | ✅ Preserved (bootstrap resource) |" >> $GITHUB_STEP_SUMMARY
           echo "| State File | 🗑️ Deleted (backed up) |" >> $GITHUB_STEP_SUMMARY
+
+  # ─────────────────────────────────────────────
+  # Blue-green: drain old slot after 24h health window
+  # Triggered by deploy-prod after new slot is promoted.
+  # Scales old ECS services to 0 — does NOT destroy infrastructure.
+  # ─────────────────────────────────────────────
+  drain-old-slot:
+    name: Drain old slot (${{ github.event.inputs.old_slot }})
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'drain_old_slot'
+    environment: ${{ github.event.inputs.environment }}
+
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      TF_ENV: ${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Wait for delay
+        if: github.event.inputs.delay_minutes != '0' && github.event.inputs.delay_minutes != ''
+        run: |
+          DELAY='${{ github.event.inputs.delay_minutes || 0 }}'
+          if ! [[ "$DELAY" =~ ^[0-9]+$ ]]; then
+            echo "❌ Invalid delay_minutes: must be a non-negative integer, got: $DELAY"
+            exit 1
+          fi
+          echo "⏳ Waiting ${DELAY} minutes before draining old slot..."
+          echo "Reason: ${{ github.event.inputs.reason }}"
+          sleep $((DELAY * 60))
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: DrainSlot-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Scale down old slot
+        run: |
+          OLD_SLOT="${{ github.event.inputs.old_slot }}"
+          ENV="${{ env.TF_ENV }}"
+
+          if [[ -z "$OLD_SLOT" ]]; then
+            echo "❌ old_slot input is required for drain_old_slot action"
+            exit 1
+          fi
+
+          CLUSTER="nexusdeploy-${ENV}-${OLD_SLOT}"
+          echo "🔻 Draining old slot: $OLD_SLOT (cluster: $CLUSTER)"
+
+          for svc in api worker beat; do
+            SVC_NAME="nexusdeploy-${ENV}-${OLD_SLOT}-${svc}"
+            aws ecs update-service \
+              --cluster "$CLUSTER" \
+              --service "$SVC_NAME" \
+              --desired-count 0 \
+              --region "${{ env.AWS_REGION }}" 2>/dev/null \
+            && echo "  ✅ Scaled down $SVC_NAME" \
+            || echo "  ⚠️  $SVC_NAME not found or already stopped"
+          done
+
+          echo "✅ Old slot $OLD_SLOT drained"
+
+      - name: Drain summary
+        if: always()
+        run: |
+          echo "## 🔻 Blue-Green Old Slot Drained" >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | \`${{ env.TF_ENV }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Drained slot | \`${{ github.event.inputs.old_slot }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Triggered By | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Reason | ${{ github.event.inputs.reason }} |" >> $GITHUB_STEP_SUMMARY

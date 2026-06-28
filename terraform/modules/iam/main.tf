@@ -168,6 +168,17 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
         ]
         Resource = ["arn:aws:ecs:*:*:cluster/${var.project}-*", "arn:aws:ecs:*:*:service/${var.project}-*/*", "arn:aws:ecs:*:*:task-definition/${var.project}-*"]
       },
+      # ECS one-off tasks — needed to run init_db as a Fargate task from CI
+      {
+        Sid    = "ECSRunTask"
+        Effect = "Allow"
+        Action = ["ecs:RunTask", "ecs:StopTask", "ecs:DescribeTasks"]
+        Resource = [
+          "arn:aws:ecs:*:*:cluster/${var.project}-*",
+          "arn:aws:ecs:*:*:task-definition/${var.project}-*",
+          "arn:aws:ecs:*:*:task/${var.project}-*/*"
+        ]
+      },
       # Infrastructure: RDS (Terraform-managed instances)
       {
         Sid    = "RDSManagement"
