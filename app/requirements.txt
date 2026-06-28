@@ -33,7 +33,7 @@ gunicorn==23.0.0
 
 # Utilities
 marshmallow==3.26.2
-python-dateutil==2.8.2
+python-dateutil==2.9.0.post0
 
 # Testing
 pytest==7.4.3
