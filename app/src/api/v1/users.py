@@ -23,12 +23,16 @@ def get_users():
       200:
         description: List of users
     """
-    users = User.query.all()
+    page = request.args.get("page", 1, type=int)
+    per_page = min(request.args.get("per_page", 20, type=int), 100)
+    users = User.query.order_by(User.created_at.desc()).paginate(page=page, per_page=per_page, error_out=False)
     return (
         jsonify(
             {
-                "users": [u.to_dict(include_email=True) for u in users],
-                "count": len(users),
+                "users": [u.to_dict(include_email=True) for u in users.items],
+                "total": users.total,
+                "pages": users.pages,
+                "current_page": users.page,
             }
         ),
         200,

@@ -59,7 +59,7 @@ def test_get_projects(client, auth_headers, project_id):
     response = client.get("/api/v1/projects", headers=auth_headers)
     assert response.status_code == 200
     assert "projects" in response.json
-    assert "count" in response.json
+    assert "total" in response.json
 
 
 def test_get_single_project(client, auth_headers, project_id):

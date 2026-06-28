@@ -12,13 +12,16 @@ discovery:
     - regions:
         - NEXUSDEPLOY_REGION
       type: AWS/ECS
-      period: 300
+      period: 60
       length: 300
       metrics:
         - name: CPUUtilization
           statistics: [Average]
           nilToZero: true
         - name: MemoryUtilization
+          statistics: [Average]
+          nilToZero: true
+        - name: RunningTaskCount
           statistics: [Average]
           nilToZero: true
       searchTags:

@@ -27,7 +27,7 @@ trap "rm -rf $WORK_DIR" EXIT
 # ── Parallel check functions ──────────────────────────────────────────────────
 # Each writes a result file: "<order>|<name>|<status>|<detail>"
 
-q() { aws "$@" 2>/dev/null; }
+q() { MSYS_NO_PATHCONV=1 aws "$@" 2>/dev/null; }
 
 check_ecs_cluster() {
   local out status detail
@@ -447,14 +447,14 @@ done <<< "$ALL_RESULTS"
 # ── Summary / Prerequisites check ────────────────────────────────────────────
 PREREQ_FAIL=$(
   {
-    aws ecr describe-repositories --repository-names "${PROJECT}-api-${ENV}" --region "$REGION" &>/dev/null || echo "FAIL"
-    aws ecr describe-repositories --repository-names "${PROJECT}-worker-${ENV}" --region "$REGION" &>/dev/null || echo "FAIL"
+    MSYS_NO_PATHCONV=1 aws ecr describe-repositories --repository-names "${PROJECT}-api-${ENV}" --region "$REGION" &>/dev/null || echo "FAIL"
+    MSYS_NO_PATHCONV=1 aws ecr describe-repositories --repository-names "${PROJECT}-worker-${ENV}" --region "$REGION" &>/dev/null || echo "FAIL"
     for param in db/master_username db/master_password db/app_username db/app_password \
                  app/secret_key app/jwt_secret_key monitoring/grafana_password; do
-      aws ssm get-parameter --name "/${PROJECT}/${ENV}/${param}" --region "$REGION" &>/dev/null || echo "FAIL"
+      MSYS_NO_PATHCONV=1 aws ssm get-parameter --name "/${PROJECT}/${ENV}/${param}" --region "$REGION" &>/dev/null || echo "FAIL"
     done
-    aws iam get-role --role-name "${PROJECT}-github-actions-deploy" &>/dev/null || echo "FAIL"
-    aws s3api head-bucket --bucket "${PROJECT}-terraform-state" --region "$REGION" &>/dev/null || echo "FAIL"
+    MSYS_NO_PATHCONV=1 aws iam get-role --role-name "${PROJECT}-github-actions-deploy" &>/dev/null || echo "FAIL"
+    MSYS_NO_PATHCONV=1 aws s3api head-bucket --bucket "${PROJECT}-terraform-state" --region "$REGION" &>/dev/null || echo "FAIL"
   } | grep -c "FAIL" || echo 0
 )
 

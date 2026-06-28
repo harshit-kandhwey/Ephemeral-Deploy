@@ -15,7 +15,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.40.0" # Pinned for production stability — update deliberately after testing
+      version = "~> 5.40.0" # Pinned for production stability
     }
   }
 
@@ -56,9 +56,20 @@ locals {
   }
 }
 
-
 # ══════════════════════════════════════════════
 # SECRETS — All from SSM, zero hardcoding
+#
+# Flow:
+#   1. bootstrap.sh writes secrets to SSM Parameter Store
+#   2. Terraform reads them via data sources (never stored in .tf or .tfvars)
+#   3. Terraform builds Secrets Manager secret from SSM values
+#   4. ECS injects Secrets Manager values as env vars at container launch
+#   5. App code reads standard env vars — has no knowledge of AWS
+#
+# DB has two users:
+#   master_user  → RDS superuser (only used by Terraform / init scripts)
+#   app_user     → Limited-privilege user the Flask app connects as
+#                  Created by the entrypoint-worker.sh on first boot
 # ══════════════════════════════════════════════
 
 data "aws_ssm_parameter" "db_master_username" {
@@ -96,7 +107,7 @@ data "aws_ssm_parameter" "grafana_admin_password" {
   with_decryption = true
 }
 
-# ── Secrets Manager ───────────────────────────
+# ── Secrets Manager (ECS runtime injection) ──
 resource "aws_secretsmanager_secret" "app" {
   name                    = "${local.project}/${local.environment}/app-secrets"
   description             = "Runtime secrets injected by ECS at container launch"
@@ -107,8 +118,9 @@ resource "aws_secretsmanager_secret" "app" {
 resource "aws_secretsmanager_secret_version" "app" {
   secret_id = aws_secretsmanager_secret.app.id
 
+  # All values sourced from SSM - zero hardcoding
   secret_string = jsonencode({
-    DATABASE_URL          = "postgresql://${data.aws_ssm_parameter.db_app_username.value}:${data.aws_ssm_parameter.db_app_password.value}@${module.rds.db_endpoint}/${var.db_name}"
+    DATABASE_URL          = "postgresql://${data.aws_ssm_parameter.db_app_username.value}:${data.aws_ssm_parameter.db_app_password.value}@${module.rds.db_endpoint}/${var.db_name}?sslmode=require"
     REDIS_URL             = "redis://${module.elasticache.redis_endpoint}:6379/0"
     CELERY_BROKER_URL     = "redis://${module.elasticache.redis_endpoint}:6379/0"
     CELERY_RESULT_BACKEND = "redis://${module.elasticache.redis_endpoint}:6379/0"
@@ -116,6 +128,10 @@ resource "aws_secretsmanager_secret_version" "app" {
     JWT_SECRET_KEY        = data.aws_ssm_parameter.jwt_secret_key.value
     AWS_REGION            = var.aws_region
     S3_BUCKET             = var.app_s3_bucket
+    DB_MASTER_USER        = data.aws_ssm_parameter.db_master_username.value
+    DB_MASTER_PASSWORD    = data.aws_ssm_parameter.db_master_password.value
+    DB_APP_USER           = data.aws_ssm_parameter.db_app_username.value
+    DB_APP_PASSWORD       = data.aws_ssm_parameter.db_app_password.value
   })
 }
 
@@ -221,6 +237,7 @@ module "ecs_blue" {
   api_image              = local.active_slot == "blue" ? var.api_image : var.previous_api_image
   worker_image           = local.active_slot == "blue" ? var.worker_image : var.previous_worker_image
   git_commit             = var.git_commit
+  vpc_id                 = module.vpc.vpc_id
   private_app_subnet_ids = module.vpc.private_app_subnet_ids
   public_subnet_ids      = module.vpc.public_subnet_ids
   api_sg_id              = module.security_groups.api_sg_id
@@ -239,6 +256,12 @@ module "ecs_blue" {
   worker_memory        = 512
 
   common_tags = merge(local.common_tags, { Slot = "blue" })
+
+  depends_on = [
+    aws_secretsmanager_secret_version.app,
+    module.rds,
+    module.elasticache,
+  ]
 }
 
 # ── Green slot ────────────────────────────────
@@ -251,6 +274,7 @@ module "ecs_green" {
   api_image              = local.active_slot == "green" ? var.api_image : var.previous_api_image
   worker_image           = local.active_slot == "green" ? var.worker_image : var.previous_worker_image
   git_commit             = var.git_commit
+  vpc_id                 = module.vpc.vpc_id
   private_app_subnet_ids = module.vpc.private_app_subnet_ids
   public_subnet_ids      = module.vpc.public_subnet_ids
   api_sg_id              = module.security_groups.api_sg_id
@@ -269,20 +293,38 @@ module "ecs_green" {
   worker_memory        = 512
 
   common_tags = merge(local.common_tags, { Slot = "green" })
+
+  depends_on = [
+    aws_secretsmanager_secret_version.app,
+    module.rds,
+    module.elasticache,
+  ]
 }
 
 # ── Monitoring ────────────────────────────────
 module "monitoring" {
   source = "../../modules/monitoring"
 
-  project          = local.project
-  environment      = local.environment
-  aws_region       = var.aws_region
-  public_subnet_id = module.vpc.public_subnet_ids[0]
-  monitoring_sg_id = module.security_groups.monitoring_sg_id
-  ecs_cluster_name = module.ecs_blue.cluster_name
-  state_bucket     = var.tf_state_bucket
-  common_tags      = local.common_tags
+  project                = local.project
+  environment            = local.environment
+  aws_region             = var.aws_region
+  vpc_id                 = module.vpc.vpc_id
+  public_subnet_id       = module.vpc.public_subnet_ids[0]
+  monitoring_sg_id       = module.security_groups.monitoring_sg_id
+  ecs_cluster_name       = module.ecs_blue.cluster_name # Cluster is shared
+  grafana_admin_password = data.aws_ssm_parameter.grafana_admin_password.value
+  cloudwatch_log_groups = [
+    "/ecs/${local.project}/${local.environment}-blue/api",
+    "/ecs/${local.project}/${local.environment}-green/api",
+    "/ecs/${local.project}/${local.environment}-blue/worker",
+    "/ecs/${local.project}/${local.environment}-green/worker",
+  ]
+  common_tags = local.common_tags
+
+  depends_on = [
+    module.ecs_blue,
+    module.ecs_green,
+  ]
 }
 
 # ── SSM: Store active slot for next deployment ─
@@ -297,4 +339,45 @@ resource "aws_ssm_parameter" "active_slot" {
   lifecycle {
     ignore_changes = [value] # deploy.yml manages this value, not Terraform
   }
+}
+
+# ── Outputs ───────────────────────────────────────────────────────────────────
+output "app_secret_arn" {
+  description = "ARN of the app secrets in Secrets Manager"
+  value       = aws_secretsmanager_secret.app.arn
+}
+
+output "db_endpoint" {
+  description = "RDS PostgreSQL endpoint"
+  value       = module.rds.db_endpoint
+}
+
+output "ecs_cluster_name_blue" {
+  description = "Blue ECS cluster name"
+  value       = module.ecs_blue.cluster_name
+}
+
+output "ecs_cluster_name_green" {
+  description = "Green ECS cluster name"
+  value       = module.ecs_green.cluster_name
+}
+
+output "worker_sg_id" {
+  description = "Worker security group ID"
+  value       = module.security_groups.worker_sg_id
+}
+
+output "private_app_subnet_ids" {
+  description = "Private app subnet IDs"
+  value       = module.vpc.private_app_subnet_ids
+}
+
+output "grafana_url" {
+  description = "Grafana URL"
+  value       = try("http://${module.monitoring.monitoring_public_ip}:3000", "")
+}
+
+output "prometheus_url" {
+  description = "Prometheus URL"
+  value       = try("http://${module.monitoring.monitoring_public_ip}:9090", "")
 }

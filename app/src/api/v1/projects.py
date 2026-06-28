@@ -43,14 +43,23 @@ def get_projects():
     if error_response:
         return error_response
 
-    if user.role == "admin":
-        projects = Project.query.all()
-    elif user.team:
-        projects = user.team.projects
-    else:
-        projects = []
+    page = request.args.get("page", 1, type=int)
+    per_page = min(request.args.get("per_page", 20, type=int), 100)
 
-    return jsonify({"projects": [p.to_dict() for p in projects], "count": len(projects)}), 200
+    if user.role == "admin":
+        query = Project.query
+    elif user.team:
+        query = Project.query.filter_by(team_id=user.team.id)
+    else:
+        return jsonify({"projects": [], "total": 0, "pages": 0, "current_page": 1}), 200
+
+    projects = query.order_by(Project.created_at.desc()).paginate(page=page, per_page=per_page, error_out=False)
+    return jsonify({
+        "projects": [p.to_dict() for p in projects.items],
+        "total": projects.total,
+        "pages": projects.pages,
+        "current_page": projects.page,
+    }), 200
 
 
 @api_v1.route("/projects/<int:project_id>", methods=["GET"])

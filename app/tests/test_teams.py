@@ -9,7 +9,7 @@ def test_get_teams(client, auth_headers):
     response = client.get("/api/v1/teams", headers=auth_headers)
     assert response.status_code == 200
     assert "teams" in response.json
-    assert "count" in response.json
+    assert "total" in response.json
 
 
 def test_get_single_team(client, auth_headers):

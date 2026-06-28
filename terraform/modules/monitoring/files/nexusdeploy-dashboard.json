@@ -2,22 +2,38 @@
   "title": "NexusDeploy Overview",
   "uid": "nexusdeploy-overview",
   "tags": ["nexusdeploy", "ecs", "flask"],
-  "time": { "from": "now-1h", "to": "now" },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "refresh": "30s",
   "panels": [
     {
       "id": 1,
-      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
       "type": "stat",
       "title": "HTTP Request Rate",
       "datasource": "Prometheus",
       "targets": [
-        { "expr": "rate(app_requests_total[5m])", "legendFormat": "req/s" }
+        {
+          "expr": "rate(app_requests_total[5m])",
+          "legendFormat": "req/s"
+        }
       ]
     },
     {
       "id": 2,
-      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
       "type": "stat",
       "title": "p95 Request Latency",
       "datasource": "Prometheus",
@@ -27,42 +43,134 @@
           "legendFormat": "p95"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "s" } }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
     },
     {
       "id": 3,
-      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
       "type": "stat",
       "title": "Error Rate (5xx)",
       "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "rate(app_requests_total{status=~'5..'}[5m])",
-          "legendFormat": "errors/s"
+          "expr": "sum(rate(app_requests_total{status=~'5..'}[5m])) or vector(0)",
+          "legendFormat": "5xx rate"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.01
+              },
+              {
+                "color": "red",
+                "value": 0.1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "No errors",
+                  "color": "green"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      }
     },
     {
       "id": 4,
-      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
       "type": "stat",
       "title": "ECS Running Tasks",
       "datasource": "CloudWatch",
       "targets": [
         {
-          "queryMode": "Metrics",
-          "namespace": "AWS/ECS",
-          "metricName": "RunningTaskCount",
-          "dimensions": {
-            "ClusterName": "NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV",
-            "ServiceName": "NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-api"
-          }
+          "expr": "sum(aws_ecs_running_task_count_average) or vector(0)",
+          "legendFormat": "Running Tasks",
+          "refId": "A"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "green",
+                "value": 3
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"]
+        },
+        "orientation": "auto",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      }
     },
     {
       "id": 5,
-      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
       "type": "timeseries",
       "title": "Request Latency Percentiles",
       "datasource": "Prometheus",
@@ -83,28 +191,75 @@
     },
     {
       "id": 6,
-      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
       "type": "timeseries",
       "title": "RDS CPU & Connections (CloudWatch)",
       "datasource": "CloudWatch",
       "targets": [
         {
-          "queryMode": "Metrics",
-          "namespace": "AWS/RDS",
-          "metricName": "CPUUtilization",
-          "dimensions": {
-            "DBInstanceIdentifier": "NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-postgres"
-          }
+          "expr": "aws_rds_cpuutilization_average",
+          "legendFormat": "RDS CPU %",
+          "refId": "A"
         },
         {
-          "queryMode": "Metrics",
-          "namespace": "AWS/RDS",
-          "metricName": "DatabaseConnections",
-          "dimensions": {
-            "DBInstanceIdentifier": "NEXUSDEPLOY_PROJECT-NEXUSDEPLOY_ENV-postgres"
-          }
+          "expr": "aws_rds_database_connections_average",
+          "legendFormat": "DB Connections",
+          "refId": "B"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "RDS CPU %"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "DB Connections"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
     }
   ]
 }

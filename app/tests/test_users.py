@@ -34,8 +34,8 @@ def test_get_users_as_admin(client, admin_headers):
     r = client.get("/api/v1/users", headers=admin_headers)
     assert r.status_code == 200
     assert "users" in r.json
-    assert "count" in r.json
-    assert r.json["count"] >= 1
+    assert "total" in r.json
+    assert r.json["total"] >= 1
 
 
 def test_get_users_as_developer_forbidden(client, auth_headers):

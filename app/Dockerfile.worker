@@ -20,22 +20,28 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application source
 COPY . /app/
 
+# Copy and configure entrypoint
+COPY entrypoint-worker.sh /entrypoint-worker.sh
+RUN chmod +x /entrypoint-worker.sh
+
 # Fix permissions
 RUN chown -R celeryuser:celeryuser /app
 
 USER celeryuser
 
 # ── Entry point explanation ───────────────────────────────────────────────────
+# entrypoint-worker.sh runs init_db before starting Celery.
+# This ensures NexusAppUser and schema exist on every deploy
+# without requiring a separate pipeline step. Idempotent.
+#
 # src.celery_worker:celery  → Celery needs the full dotted path from WORKDIR.
 #                             WORKDIR is /app, so src.celery_worker resolves
-#                             to /app/src/celery_worker.py. This works correctly
-#                             in both local docker-compose and ECS (unlike wsgi
-#                             which needed --chdir because Gunicorn imports differ).
+#                             to /app/src/celery_worker.py.
 #
 # --concurrency 2           → 2 worker processes per container. Matches the
-#                             256 CPU / 512 MB Fargate task size. Higher values
-#                             would cause memory pressure.
+#                             256 CPU / 512 MB Fargate task size.
 # ─────────────────────────────────────────────────────────────────────────────
+ENTRYPOINT ["/entrypoint-worker.sh"]
 CMD ["celery", "-A", "src.celery_worker:celery", "worker", \
     "--loglevel=info", \
     "--concurrency=2"]
