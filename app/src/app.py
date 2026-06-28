@@ -60,6 +60,7 @@ def create_app(config_name="default"):
     @jwt.token_in_blocklist_loader
     def check_if_token_revoked(jwt_header, jwt_payload):
         from .extensions import redis_client as rc
+
         if rc is None:
             app.logger.error("Redis unavailable; rejecting JWT because blocklist cannot be checked")
             return True
