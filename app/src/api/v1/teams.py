@@ -25,7 +25,17 @@ def get_teams():
     page = max(request.args.get("page", 1, type=int), 1)
     per_page = max(1, min(request.args.get("per_page", 20, type=int), 100))
     teams = Team.query.order_by(Team.created_at.desc()).paginate(page=page, per_page=per_page, error_out=False)
-    return jsonify({"teams": [t.to_dict() for t in teams.items], "total": teams.total, "pages": teams.pages, "current_page": teams.page}), 200
+    return (
+        jsonify(
+            {
+                "teams": [t.to_dict() for t in teams.items],
+                "total": teams.total,
+                "pages": teams.pages,
+                "current_page": teams.page,
+            }
+        ),
+        200,
+    )
 
 
 @api_v1.route("/teams/<int:team_id>", methods=["GET"])
