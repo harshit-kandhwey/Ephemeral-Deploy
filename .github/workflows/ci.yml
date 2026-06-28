@@ -2,9 +2,9 @@ name: CI - Test & Build
 
 on:
   push:
-    branches: [main, dev, "feature/**"]
+    branches: [main, dev, staging, "feature/**"]
   pull_request:
-    branches: [main, dev]
+    branches: [main, dev, staging]
   workflow_dispatch: # allow manual trigger
 
 env:
@@ -315,14 +315,21 @@ jobs:
           TF_VAR_git_commit: "ci-validate"
         run: |
           mkdir -p "$TF_PLUGIN_CACHE_DIR"
-          for env in dev prod; do
+          for env in dev staging prod; do
             echo "Validating $env..."
             cd terraform/environments/$env
             terraform init -backend=false -input=false
             terraform validate
             # plan -refresh=false catches templatefile() and function errors
             # that validate misses — no real AWS calls made with -backend=false
-            terraform plan -refresh=false               -var-file=terraform.tfvars               -var="aws_region=us-east-1"               -var="tf_state_bucket=nexusdeploy-terraform-state"               -var="app_s3_bucket=nexusdeploy-attachments-dev"               -var="db_name=nexusdeploy"               2>&1 | grep -E "^Error:|^Warning:|Plan:|will be created|will be destroyed" || true
+            terraform plan -refresh=false \
+              -var-file=terraform.tfvars \
+              -var="aws_region=us-east-1" \
+              -var="tf_state_bucket=nexusdeploy-terraform-state" \
+              -var="app_s3_bucket=nexusdeploy-attachments-${env}" \
+              -var="db_name=nexusdeploy" \
+              -var='monitoring_allowed_cidr=[]' \
+              2>&1 | grep -E "^Error:|^Warning:|Plan:|will be created|will be destroyed" || true
             cd ../../..
           done
 
@@ -373,20 +380,22 @@ jobs:
       - name: Trigger deploy pipeline
         if: |
           github.event_name == 'push' &&
-          (github.ref_name == 'dev' || github.ref_name == 'main')
+          (github.ref_name == 'dev' || github.ref_name == 'staging' || github.ref_name == 'main')
         uses: actions/github-script@v9
         with:
           script: |
             const branch = context.ref.replace('refs/heads/', '');
+            const envMap = { main: 'prod', staging: 'staging', dev: 'dev' };
+            const environment = envMap[branch] || 'dev';
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo:  context.repo.repo,
               workflow_id: 'deploy.yml',
               ref: context.ref,
               inputs: {
-                environment: branch === 'main' ? 'prod' : 'dev',
+                environment,
                 action: 'apply',
                 app_changed: '${{ needs.detect-changes.outputs.app_changed }}'
               }
             });
-            console.log(`🚀 Deploy triggered for ${branch}`);
+            console.log(`🚀 Deploy triggered for ${branch} → ${environment}`);

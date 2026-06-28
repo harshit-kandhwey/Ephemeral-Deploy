@@ -103,13 +103,23 @@ jobs:
           TF_VAR_api_image: "placeholder"
           TF_VAR_worker_image: "placeholder"
           TF_VAR_git_commit: "cleanup"
+          # Required by staging/prod (no default in variables.tf); unused for destroy
+          TF_VAR_monitoring_allowed_cidr: "[]"
         run: |
           echo "🔥 Starting Terraform destroy for ${{ env.TF_ENV }}..."
+
+          # dev uses a single module.ecs; staging/prod use blue-green split modules
+          if [[ "${{ env.TF_ENV }}" == "staging" ]]; then
+            ECS_TARGETS="-target=module.ecs_blue -target=module.ecs_green"
+          else
+            ECS_TARGETS="-target=module.ecs"
+          fi
+
           terraform destroy \
             -var-file="terraform.tfvars" \
             -auto-approve \
             -no-color \
-            -target=module.ecs \
+            $ECS_TARGETS \
             -target=module.rds \
             -target=module.elasticache \
             -target=module.vpc \

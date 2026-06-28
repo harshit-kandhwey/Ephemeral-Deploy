@@ -10,7 +10,7 @@ on:
         description: "Target environment"
         required: true
         type: choice
-        options: [dev, prod]
+        options: [dev, staging, prod]
       action:
         description: "Action"
         required: true
@@ -637,6 +637,359 @@ jobs:
                 throw err;
               }
             }
+
+  # ─────────────────────────────────────────────
+  # STAGING DEPLOYMENT — Blue-Green (branch: staging)
+  #
+  # Mirrors prod exactly: same provider pin, same blue-green slot rotation,
+  # same secrets flow. Purpose: catch prod-only issues before they hit main.
+  #
+  # Differences from prod:
+  #   - Old slot drains after 2h (not 24h) — staging TTL is shorter
+  #   - init_db runs on deploy (like dev) — staging DB is ephemeral
+  #   - No manual approval gate
+  # ─────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy → staging (blue-green)
+    runs-on: ubuntu-latest
+    needs: [setup, ecr-provision, push-image]
+    if: |
+      always() &&
+      needs.setup.outputs.environment == 'staging' &&
+      needs.setup.outputs.tf_action == 'apply' &&
+      (needs.ecr-provision.result == 'success' || needs.ecr-provision.result == 'skipped') &&
+      (needs.push-image.result == 'success' || needs.setup.outputs.app_changed == 'false')
+    environment: staging
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: DeployStaging-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: terraform/environments/staging
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
+            -backend-config="key=staging/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true"
+
+      - name: Delete orphaned resources
+        continue-on-error: true
+        run: |
+          ENV="staging"
+          REGION="${{ env.AWS_REGION }}"
+          PROJECT="nexusdeploy"
+
+          for slot in blue green; do
+            for svc in api worker beat; do
+              lg="/ecs/$PROJECT/$ENV-$slot/$svc"
+              if aws logs describe-log-groups \
+                  --log-group-name-prefix "$lg" --region "$REGION" \
+                  --query 'logGroups[0].logGroupName' --output text 2>/dev/null | grep -q "$lg"; then
+                echo "🗑️  Deleting orphaned log group: $lg"
+                aws logs delete-log-group --log-group-name "$lg" --region "$REGION" 2>/dev/null || true
+              fi
+            done
+          done
+
+          for secret_id in "$PROJECT/$ENV/app-secrets" "$PROJECT/$ENV/init-secrets"; do
+            SECRET_STATE=$(aws secretsmanager describe-secret \
+              --secret-id "$secret_id" --region "$REGION" \
+              --query 'DeletedDate' --output text 2>/dev/null || echo "NOT_FOUND")
+            if [[ "$SECRET_STATE" != "NOT_FOUND" && "$SECRET_STATE" != "None" ]]; then
+              echo "🗑️  Force-deleting secret pending deletion: $secret_id"
+              aws secretsmanager delete-secret \
+                --secret-id "$secret_id" \
+                --force-delete-without-recovery \
+                --region "$REGION" 2>/dev/null || true
+            fi
+          done
+
+          MONITORING_ROLE="$PROJECT-$ENV-monitoring-ec2"
+          MONITORING_PROFILE="$PROJECT-$ENV-monitoring"
+          if aws iam get-instance-profile --instance-profile-name "$MONITORING_PROFILE" 2>/dev/null; then
+            aws iam remove-role-from-instance-profile \
+              --instance-profile-name "$MONITORING_PROFILE" \
+              --role-name "$MONITORING_ROLE" 2>/dev/null || true
+            aws iam delete-instance-profile \
+              --instance-profile-name "$MONITORING_PROFILE" 2>/dev/null || true
+          fi
+          if aws iam get-role --role-name "$MONITORING_ROLE" 2>/dev/null; then
+            for policy in $(aws iam list-attached-role-policies \
+              --role-name "$MONITORING_ROLE" \
+              --query 'AttachedPolicies[*].PolicyArn' --output text 2>/dev/null || echo ""); do
+              aws iam detach-role-policy --role-name "$MONITORING_ROLE" --policy-arn "$policy" 2>/dev/null || true
+            done
+            for policy in $(aws iam list-role-policies \
+              --role-name "$MONITORING_ROLE" \
+              --query 'PolicyNames[*]' --output text 2>/dev/null || echo ""); do
+              aws iam delete-role-policy --role-name "$MONITORING_ROLE" --policy-name "$policy" 2>/dev/null || true
+            done
+            aws iam delete-role --role-name "$MONITORING_ROLE" 2>/dev/null || true
+          fi
+          echo "✅ Orphaned resource cleanup complete"
+
+      - name: Adopt orphaned Terraform resources
+        working-directory: terraform/environments/staging
+        env:
+          TF_VAR_api_image: "placeholder"
+          TF_VAR_worker_image: "placeholder"
+          TF_VAR_git_commit: "placeholder"
+          TF_VAR_monitoring_allowed_cidr: "[]"
+        run: |
+          adopt() {
+            local addr=$1 id=$2
+            terraform state show "$addr" &>/dev/null && return 0
+            terraform import -var-file=terraform.tfvars "$addr" "$id" || true
+          }
+          adopt aws_secretsmanager_secret.init                  "nexusdeploy/staging/init-secrets"
+          adopt module.iam.aws_iam_role.ecs_execution           "nexusdeploy-staging-ecs-execution"
+          adopt module.iam.aws_iam_role.ecs_execution_worker    "nexusdeploy-staging-ecs-execution-worker"
+          adopt module.iam.aws_iam_role.ecs_task                "nexusdeploy-staging-ecs-task"
+          adopt module.iam.aws_iam_role.vpc_flow_log            "nexusdeploy-staging-vpc-flow-log"
+
+      - name: Read active deployment slot from SSM
+        id: slot
+        run: |
+          CURRENT=$(aws ssm get-parameter \
+            --name "/nexusdeploy/staging/deployment/active_slot" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Parameter.Value' \
+            --output text 2>/dev/null || echo "blue")
+
+          if [[ "$CURRENT" == "blue" ]]; then
+            NEW_SLOT="green"
+          else
+            NEW_SLOT="blue"
+          fi
+
+          echo "current_slot=$CURRENT" >> $GITHUB_OUTPUT
+          echo "new_slot=$NEW_SLOT"    >> $GITHUB_OUTPUT
+          echo "🔵 Current active: $CURRENT → 🟢 Deploying to: $NEW_SLOT"
+
+      - name: Read previous images from SSM
+        id: prev_images
+        run: |
+          PREV_API=$(aws ssm get-parameter \
+            --name "/nexusdeploy/staging/deployment/prev_api_image" \
+            --query 'Parameter.Value' --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+          echo "api=${PREV_API}" >> $GITHUB_OUTPUT
+
+          PREV_WORKER=$(aws ssm get-parameter \
+            --name "/nexusdeploy/staging/deployment/prev_worker_image" \
+            --query 'Parameter.Value' --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+          echo "worker=${PREV_WORKER}" >> $GITHUB_OUTPUT
+
+      - name: Terraform Apply → new slot
+        id: tf_apply
+        working-directory: terraform/environments/staging
+        env:
+          TF_VAR_api_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}
+          TF_VAR_worker_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.worker_image || needs.setup.outputs.current_worker }}
+          TF_VAR_git_commit: ${{ github.sha }}
+          TF_VAR_deployment_slot: ${{ steps.slot.outputs.new_slot }}
+          TF_VAR_previous_api_image: ${{ steps.prev_images.outputs.api }}
+          TF_VAR_previous_worker_image: ${{ steps.prev_images.outputs.worker }}
+          # Set in GitHub → Settings → Environments → staging → Variables → MONITORING_ALLOWED_CIDR
+          TF_VAR_monitoring_allowed_cidr: ${{ vars.MONITORING_ALLOWED_CIDR }}
+        run: |
+          if [[ -z "${TF_VAR_monitoring_allowed_cidr:-}" ]]; then
+            echo "::error::MONITORING_ALLOWED_CIDR is not set. Add it in GitHub → Settings → Environments → staging → Variables."
+            exit 1
+          fi
+          terraform apply -var-file=terraform.tfvars -auto-approve
+        continue-on-error: true
+
+      - name: Health check new slot
+        id: health
+        if: steps.tf_apply.outcome == 'success'
+        run: |
+          NEW_SLOT="${{ steps.slot.outputs.new_slot }}"
+          CLUSTER="nexusdeploy-staging-$NEW_SLOT"
+          SERVICE="nexusdeploy-staging-$NEW_SLOT-api"
+          MAX_WAIT=300
+          INTERVAL=30
+          ELAPSED=0
+
+          echo "health_ok=false" >> $GITHUB_OUTPUT
+          echo "⏳ Waiting for $SERVICE to reach RUNNING state..."
+
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            RUNNING=$(aws ecs describe-services \
+              --cluster $CLUSTER \
+              --services $SERVICE \
+              --region ${{ env.AWS_REGION }} \
+              --query 'services[0].runningCount' \
+              --output text 2>/dev/null || echo "0")
+
+            DESIRED=$(aws ecs describe-services \
+              --cluster $CLUSTER \
+              --services $SERVICE \
+              --region ${{ env.AWS_REGION }} \
+              --query 'services[0].desiredCount' \
+              --output text 2>/dev/null || echo "1")
+
+            echo "  Running: $RUNNING / Desired: $DESIRED (${ELAPSED}s elapsed)"
+
+            if [[ "$RUNNING" == "$DESIRED" && "$RUNNING" != "0" ]]; then
+              echo "health_ok=true" >> $GITHUB_OUTPUT
+              echo "✅ New slot is healthy!"
+              exit 0
+            fi
+
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          echo "health_ok=false" >> $GITHUB_OUTPUT
+          echo "❌ New slot failed to become healthy"
+
+      - name: Run database init (ECS one-off task inside VPC)
+        if: steps.health.outputs.health_ok == 'true'
+        continue-on-error: true
+        working-directory: terraform/environments/staging
+        run: |
+          SECRET_ARN=$(terraform output -raw app_secret_arn 2>/dev/null | grep -v '│' | tail -1 || echo "")
+          NEW_SLOT="${{ steps.slot.outputs.new_slot }}"
+          CLUSTER="nexusdeploy-staging-$NEW_SLOT"
+          SUBNET_ID=$(terraform output -json private_app_subnet_ids 2>/dev/null | python3 -c "import sys,json; ids=json.load(sys.stdin); print(ids[0])" || echo "")
+          SG_ID=$(terraform output -raw worker_sg_id 2>/dev/null | grep -v '│' | tail -1 || echo "")
+
+          if [[ -z "$SECRET_ARN" || -z "$SUBNET_ID" || -z "$SG_ID" ]]; then
+            echo "⚠️  Missing Terraform outputs — skipping init_db"
+            exit 0
+          fi
+
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition "nexusdeploy-staging-$NEW_SLOT-worker" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          OVERRIDES='{"containerOverrides":[{"name":"worker","command":["python","-m","src.init_db"],"environment":[{"name":"ENV","value":"production"},{"name":"SEED_DB","value":"true"}]}]}'
+
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "$CLUSTER" \
+            --task-definition "$TASK_DEF" \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_ID],securityGroups=[$SG_ID],assignPublicIp=DISABLED}" \
+            --overrides "$OVERRIDES" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'tasks[0].taskArn' --output text)
+
+          echo "Task ARN: $TASK_ARN"
+          aws ecs wait tasks-stopped \
+            --cluster "$CLUSTER" \
+            --tasks "$TASK_ARN" \
+            --region ${{ env.AWS_REGION }}
+
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster "$CLUSTER" \
+            --tasks "$TASK_ARN" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+
+          if [[ "$EXIT_CODE" == "0" ]]; then
+            echo "✅ Database initialized successfully"
+          else
+            echo "⚠️  init_db exited with code: $EXIT_CODE — check logs"
+          fi
+
+      - name: Promote new slot (update SSM active_slot)
+        if: steps.health.outputs.health_ok == 'true'
+        run: |
+          aws ssm put-parameter \
+            --name "/nexusdeploy/staging/deployment/active_slot" \
+            --value "${{ steps.slot.outputs.new_slot }}" \
+            --type String \
+            --overwrite \
+            --region ${{ env.AWS_REGION }}
+          echo "✅ SSM active_slot updated to ${{ steps.slot.outputs.new_slot }}"
+
+      - name: Store current images as 'previous' for next deploy
+        if: steps.health.outputs.health_ok == 'true'
+        run: |
+          aws ssm put-parameter \
+            --name "/nexusdeploy/staging/deployment/prev_api_image" \
+            --value "${{ needs.push-image.outputs.api_image }}" \
+            --type String --overwrite --region ${{ env.AWS_REGION }}
+          aws ssm put-parameter \
+            --name "/nexusdeploy/staging/deployment/prev_worker_image" \
+            --value "${{ needs.push-image.outputs.worker_image }}" \
+            --type String --overwrite --region ${{ env.AWS_REGION }}
+
+      - name: Schedule old slot drain (2h)
+        if: steps.health.outputs.health_ok == 'true'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'cleanup.yml',
+                ref: 'staging',
+                inputs: {
+                  environment: 'staging',
+                  action: 'drain_old_slot',
+                  old_slot: '${{ steps.slot.outputs.current_slot }}',
+                  delay_minutes: '120',
+                  reason: 'Blue-green: draining old staging slot after 2h'
+                }
+              });
+              console.log('🕐 Old staging slot drain scheduled in 2h');
+            } catch (err) {
+              if (err.status === 422) {
+                console.warn('⚠️  cleanup.yml is disabled — skipping drain.');
+              } else {
+                throw err;
+              }
+            }
+
+      - name: Rollback - revert to old slot
+        if: steps.tf_apply.outcome == 'failure' || steps.health.outputs.health_ok != 'true'
+        run: |
+          echo "⚠️ Deployment failed - rolling back to ${{ steps.slot.outputs.current_slot }}"
+          FAILED_CLUSTER="nexusdeploy-staging-${{ steps.slot.outputs.new_slot }}"
+          for svc in api worker beat; do
+            aws ecs update-service \
+              --cluster $FAILED_CLUSTER \
+              --service "nexusdeploy-staging-${{ steps.slot.outputs.new_slot }}-$svc" \
+              --desired-count 0 \
+              --region ${{ env.AWS_REGION }} 2>/dev/null || true
+          done
+          echo "✅ Rollback complete — ${{ steps.slot.outputs.current_slot }} remains active"
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          if [[ "${{ steps.health.outputs.health_ok }}" == "true" ]]; then
+            echo "## ✅ Staging Blue-Green Deployment Complete" >> $GITHUB_STEP_SUMMARY
+            echo "| | |" >> $GITHUB_STEP_SUMMARY
+            echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+            echo "| Previous slot | ${{ steps.slot.outputs.current_slot }} (draining in 2h) |" >> $GITHUB_STEP_SUMMARY
+            echo "| Active slot   | ${{ steps.slot.outputs.new_slot }} ✅ |" >> $GITHUB_STEP_SUMMARY
+            echo "| Image         | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ Staging Deployment Failed - Rolled Back" >> $GITHUB_STEP_SUMMARY
+            echo "Active slot remains: ${{ steps.slot.outputs.current_slot }}" >> $GITHUB_STEP_SUMMARY
+          fi
 
   # ─────────────────────────────────────────────
   # PROD DEPLOYMENT — Blue-Green (branch: main)
