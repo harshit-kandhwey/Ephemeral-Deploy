@@ -550,18 +550,26 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'cleanup.yml',
-              ref: context.ref,
-              inputs: {
-                environment: 'dev',
-                delay_minutes: '45',
-                reason: 'Auto-cleanup: dev TTL (45 min) expired'
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'cleanup.yml',
+                ref: context.ref,
+                inputs: {
+                  environment: 'dev',
+                  delay_minutes: '45',
+                  reason: 'Auto-cleanup: dev TTL (45 min) expired'
+                }
+              });
+              console.log('⏳ Cleanup scheduled in 45 minutes');
+            } catch (err) {
+              if (err.status === 422) {
+                console.warn('⚠️  cleanup.yml is disabled — skipping auto-cleanup. Enable it in GitHub → Actions to restore auto-cleanup.');
+              } else {
+                throw err;
               }
-            });
-            console.log('⏳ Cleanup scheduled in 45 minutes');
+            }
 
   # ─────────────────────────────────────────────
   # POST-DEPLOY: Failure → cleanup immediately
@@ -583,18 +591,26 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'cleanup.yml',
-              ref: context.ref,
-              inputs: {
-                environment: 'dev',
-                delay_minutes: '0',
-                reason: 'Auto-cleanup: deploy failed — removing partial infrastructure'
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'cleanup.yml',
+                ref: context.ref,
+                inputs: {
+                  environment: 'dev',
+                  delay_minutes: '0',
+                  reason: 'Auto-cleanup: deploy failed — removing partial infrastructure'
+                }
+              });
+              console.log('🔥 Immediate cleanup triggered due to deploy failure');
+            } catch (err) {
+              if (err.status === 422) {
+                console.warn('⚠️  cleanup.yml is disabled — skipping auto-cleanup. Enable it in GitHub → Actions to restore auto-cleanup.');
+              } else {
+                throw err;
               }
-            });
-            console.log('🔥 Immediate cleanup triggered due to deploy failure');
+            }
 
   # ─────────────────────────────────────────────
   # PROD DEPLOYMENT — Blue-Green (branch: main)
@@ -788,19 +804,28 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'cleanup.yml',
-              ref: 'main',
-              inputs: {
-                environment: 'prod',
-                action: 'drain_old_slot',
-                old_slot: '${{ steps.slot.outputs.current_slot }}',
-                delay_minutes: '1440',  // 24 hours
-                reason: 'Blue-green: draining old slot after 24h'
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'cleanup.yml',
+                ref: 'main',
+                inputs: {
+                  environment: 'prod',
+                  action: 'drain_old_slot',
+                  old_slot: '${{ steps.slot.outputs.current_slot }}',
+                  delay_minutes: '1440',
+                  reason: 'Blue-green: draining old slot after 24h'
+                }
+              });
+              console.log('🕐 Old slot drain scheduled in 24h');
+            } catch (err) {
+              if (err.status === 422) {
+                console.warn('⚠️  cleanup.yml is disabled — skipping old-slot drain. Enable it in GitHub → Actions to restore auto-cleanup.');
+              } else {
+                throw err;
               }
-            });
+            }
 
       # ── Step 4b: FAILURE — rollback ──────────────
       - name: Rollback - revert to old slot
