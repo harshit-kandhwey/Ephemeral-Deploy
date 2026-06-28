@@ -18,7 +18,7 @@
 8. [CI/CD Pipeline](#8-cicd-pipeline)
 9. [OIDC Authentication — No Stored AWS Keys](#9-oidc-authentication--no-stored-aws-keys)
 10. [Blue-Green Deployment (prod)](#10-blue-green-deployment-prod)
-11. [Auto-Cleanup — 30-Minute Dev TTL](#11-auto-cleanup--30-minute-dev-ttl)
+11. [Auto-Cleanup — 45-Minute Dev TTL](#11-auto-cleanup--45-minute-dev-ttl)
 12. [Monitoring Stack](#12-monitoring-stack)
 13. [Cost Engineering](#13-cost-engineering)
 14. [Commented-Out Features](#14-commented-out-features)
@@ -39,7 +39,7 @@
 | **Secrets Management**     | SSM Parameter Store → Secrets Manager → ECS runtime injection                         |
 | **Deployment Strategy**    | Blue-green with automated health checks, instant rollback, 24 h drain                 |
 | **Observability**          | Prometheus + Grafana on EC2 + CloudWatch alarms + CloudWatch dashboard                |
-| **Cost Engineering**       | 30-min ephemeral dev environments, Spot pricing, free-tier sizing                     |
+| **Cost Engineering**       | 45-min ephemeral dev environments, Spot pricing, free-tier sizing                     |
 | **Security Hardening**     | Non-root containers, Grype/Trivy scanning, least-privilege IAM, REJECT-only flow logs |
 
 ---
@@ -50,7 +50,7 @@
 
 ```
 feature/** ──PR──▶  ci.yml   ──▶  lint + test + scan       (no AWS touched)
-dev        ──push─▶ deploy.yml ─▶  dev environment          (auto-destroys in 30 min)
+dev        ──push─▶ deploy.yml ─▶  dev environment          (auto-destroys in 45 min)
 main       ──push─▶ deploy.yml ─▶  prod environment         (blue-green, manual destroy)
 ```
 
@@ -413,7 +413,7 @@ Step 3: Delete S3 state file
          Prevents orphaned state confusing future deployments
 ```
 
-A nightly GitHub Actions cron also runs cleanup against any forgotten dev environments (useful if a dev deploy ran and the 30-min dispatch was missed).
+A nightly GitHub Actions cron also runs cleanup against any forgotten dev environments (useful if a dev deploy ran and the 45-min dispatch was missed).
 
 ---
 
@@ -506,13 +506,13 @@ The deployment controller is set to `type = "ECS"` (Terraform-managed). The alte
 
 ---
 
-## 11. Auto-Cleanup — 30-Minute Dev TTL
+## 11. Auto-Cleanup — 45-Minute Dev TTL
 
-Dev environments are designed to be thrown away. Every push to `dev` deploys a fresh environment and schedules its own destruction 30 minutes later via `cleanup.yml`.
+Dev environments are designed to be thrown away. Every push to `dev` deploys a fresh environment and schedules its own destruction 45 minutes later via `cleanup.yml`.
 
-### Why 30 minutes?
+### Why 45 minutes?
 
-That's enough time to manually test the deployment, check Grafana, and hit the API. After that, the environment costs nothing because it no longer exists. You can always push to `dev` again to spin it back up in ~5 minutes.
+That's enough time to manually test the deployment, check Grafana, and hit the API. After that, the environment costs nothing because it no longer exists. You can always push to `dev` again to spin it back up in ~8 minutes.
 
 ### What the cleanup does
 
@@ -606,7 +606,7 @@ Every sizing and configuration decision is deliberate. Nothing is over-provision
 
 | Resource           | Configuration                      | Why                                                 | Cost                    |
 | ------------------ | ---------------------------------- | --------------------------------------------------- | ----------------------- |
-| ECS Fargate (dev)  | FARGATE_SPOT, 256 CPU / 512 MB     | Spot = 70% cheaper; dev tolerates interruption      | ~$0.02 per 30-min run   |
+| ECS Fargate (dev)  | FARGATE_SPOT, 256 CPU / 512 MB     | Spot = 70% cheaper; dev tolerates interruption      | ~$0.02 per 45-min run   |
 | ECS Fargate (prod) | FARGATE on-demand, same size       | On-demand required for prod reliability             | ~$0.05/hr while running |
 | RDS                | db.t3.micro, 20 GB                 | Free tier                                           | Free (750 hrs/month)    |
 | ElastiCache        | cache.t3.micro                     | Free tier                                           | Free (750 hrs/month)    |
@@ -754,6 +754,27 @@ When ALB is enabled, the `X-Forwarded-For` header carries the real client IP. Th
 - Terraform 1.7+ installed
 - Git Bash or WSL (Windows users)
 
+---
+
+### Pre-flight checklist — what must be set before each push
+
+| # | What | Where to set | dev | prod |
+|---|------|-------------|:---:|:----:|
+| 1 | `AWS_DEPLOY_ROLE_ARN` — IAM role ARN output by bootstrap | GitHub → Settings → Secrets and variables → Actions → **Repository secrets** | ✅ | ✅ |
+| 2 | `dev` GitHub Environment (no approval gate) | GitHub → Settings → **Environments** → New environment | ✅ | — |
+| 3 | `prod` GitHub Environment (Required reviewers enabled) | GitHub → Settings → **Environments** → New environment | — | ✅ |
+| 4 | `MONITORING_ALLOWED_CIDR` — CIDR(s) allowed inbound to Grafana (:3000) and Prometheus (:9090) | GitHub → Settings → Environments → **prod** → Variables → New variable | — | ✅ |
+| 5 | SSM Parameter Store secrets (DB passwords, JWT key, Grafana password) | Run `make bootstrap` once — prompts you interactively | ✅ | ✅ |
+| 6 | `github_org` + `github_repo` set in tfvars | `terraform/environments/dev/terraform.tfvars` and `prod/terraform.tfvars` | ✅ | ✅ |
+
+**Notes on `MONITORING_ALLOWED_CIDR`:**
+- Format: a JSON list of CIDR strings, e.g. `["203.0.113.42/32"]` or `["10.0.0.0/8","203.0.113.0/24"]`
+- Set to your home/office IP or VPN egress CIDR — this is the only address that can reach Grafana and Prometheus in prod
+- dev ignores this variable (dev hardcodes `0.0.0.0/0` — ephemeral environments, acceptable)
+- Never commit a real CIDR to the repo; it lives only in the GitHub Environment variable
+
+---
+
 ### Step 1: Bootstrap AWS infrastructure (one time only)
 
 ```bash
@@ -771,7 +792,7 @@ make bootstrap
 
 The script is **idempotent** — safe to re-run. It skips anything that already exists.
 
-### Step 2: Add one GitHub Secret
+### Step 2: Add the repository secret
 
 ```
 Repository → Settings → Secrets and variables → Actions → New repository secret
@@ -783,11 +804,21 @@ Value:  (ARN printed at the end of bootstrap output)
 
 ```
 Repository → Settings → Environments
-Create:  dev   (no approval gate)
-Create:  prod  (enable Required reviewers — add yourself)
+Create:  dev   (no protection rules needed)
+Create:  prod  (enable "Required reviewers" — add yourself)
 ```
 
-### Step 4: Update tfvars
+### Step 4: Add the prod environment variable
+
+```
+Repository → Settings → Environments → prod → Variables → New variable
+Name:   MONITORING_ALLOWED_CIDR
+Value:  ["your.ip.address/32"]
+```
+
+Replace `your.ip.address` with your actual IP or VPN egress CIDR. This controls which addresses can reach Grafana (:3000) and Prometheus (:9090) in production.
+
+### Step 5: Update tfvars
 
 Edit both files:
 
@@ -798,21 +829,21 @@ terraform/environments/prod/terraform.tfvars
 
 Set `github_org` to your GitHub username and `github_repo` to your exact repo name.
 
-### Step 5: Trigger your first deployment
+### Step 6: Push to dev
 
 ```bash
 git push origin dev
 ```
 
-Watch GitHub Actions: `lint → test → docker-build → terraform-validate → build → deploy-dev`. After ~8 minutes, the Grafana and API URLs appear in the Actions job summary. The environment auto-destroys in 30 minutes.
+Watch GitHub Actions: `lint → test → docker-build → terraform-validate → build → deploy-dev`. After ~8 minutes, the Grafana and API URLs appear in the Actions job summary. The environment auto-destroys in 45 minutes.
 
-### Step 6: Deploy to prod
+### Step 7: Deploy to prod
 
 ```bash
 git push origin main
 ```
 
-Same pipeline, but `deploy-prod` runs blue-green logic instead of a simple apply.
+Same pipeline, but `deploy-prod` runs blue-green logic instead of a simple apply. The prod environment requires manual approval from a required reviewer before the deploy job starts.
 
 ---
 
