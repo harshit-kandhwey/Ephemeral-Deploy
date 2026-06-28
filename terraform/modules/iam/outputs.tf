@@ -3,6 +3,11 @@ output "ecs_execution_role_arn" {
   value       = aws_iam_role.ecs_execution.arn
 }
 
+output "ecs_execution_worker_role_arn" {
+  description = "IAM role ARN for the worker ECS task execution — adds init_secrets_arn access on top of the base API role"
+  value       = aws_iam_role.ecs_execution_worker.arn
+}
+
 output "ecs_task_role_arn" {
   description = "IAM role ARN for the running application (S3, Secrets Manager, etc.)"
   value       = aws_iam_role.ecs_task.arn

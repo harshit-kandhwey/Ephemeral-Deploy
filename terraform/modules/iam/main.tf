@@ -282,9 +282,9 @@ resource "aws_iam_role_policy" "github_actions_deploy_2" {
   }
 }
 
-# ── ECS Task Execution Role ───────────────────
-# This role allows ECS to pull images from ECR and
-# write logs to CloudWatch. The ECS agent needs this.
+# ── ECS Task Execution Role (API) ────────────
+# Used by the API task definition. Grants access only to the app-secrets secret.
+# Does NOT receive init_secrets_arn — API has no legitimate use for DB master creds.
 resource "aws_iam_role" "ecs_execution" {
   name = "${var.project}-${var.environment}-ecs-execution"
 
@@ -305,10 +305,48 @@ resource "aws_iam_role_policy_attachment" "ecs_execution_managed" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-# Allow ECS to read secrets from Secrets Manager
 resource "aws_iam_role_policy" "ecs_execution_secrets" {
   name = "${var.project}-${var.environment}-ecs-secrets"
   role = aws_iam_role.ecs_execution.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+      Resource = var.secrets_arn
+    }]
+  })
+}
+
+# ── ECS Task Execution Role (Worker) ─────────
+# Separate role for the worker task definition.
+# Adds init_secrets_arn so entrypoint-worker.sh can run init_db at startup.
+# Keeping this separate means a task-def change cannot accidentally grant the
+# API container access to master DB credentials.
+resource "aws_iam_role" "ecs_execution_worker" {
+  name = "${var.project}-${var.environment}-ecs-execution-worker"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+
+  tags = var.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_execution_worker_managed" {
+  role       = aws_iam_role.ecs_execution_worker.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+resource "aws_iam_role_policy" "ecs_execution_worker_secrets" {
+  name = "${var.project}-${var.environment}-ecs-worker-secrets"
+  role = aws_iam_role.ecs_execution_worker.id
 
   policy = jsonencode({
     Version = "2012-10-17"

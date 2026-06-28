@@ -191,12 +191,13 @@ module "vpc" {
 module "security_groups" {
   source = "../../modules/security-groups"
 
-  project            = local.project
-  environment        = local.environment
-  vpc_id             = module.vpc.vpc_id
-  vpc_cidr           = var.vpc_cidr
-  monitoring_enabled = true
-  common_tags        = local.common_tags
+  project                 = local.project
+  environment             = local.environment
+  vpc_id                  = module.vpc.vpc_id
+  vpc_cidr                = var.vpc_cidr
+  monitoring_enabled      = true
+  monitoring_allowed_cidr = var.monitoring_allowed_cidr
+  common_tags             = local.common_tags
 }
 
 module "ecr" {
@@ -263,11 +264,12 @@ module "ecs_blue" {
   public_subnet_ids      = module.vpc.public_subnet_ids
   api_sg_id              = module.security_groups.api_sg_id
   worker_sg_id           = module.security_groups.worker_sg_id
-  ecs_execution_role_arn = module.iam.ecs_execution_role_arn
-  ecs_task_role_arn      = module.iam.ecs_task_role_arn
-  secrets_arn            = aws_secretsmanager_secret.app.arn
-  init_secrets_arn       = aws_secretsmanager_secret.init.arn
-  log_retention_days     = 14
+  ecs_execution_role_arn        = module.iam.ecs_execution_role_arn
+  ecs_execution_worker_role_arn = module.iam.ecs_execution_worker_role_arn
+  ecs_task_role_arn             = module.iam.ecs_task_role_arn
+  secrets_arn                   = aws_secretsmanager_secret.app.arn
+  init_secrets_arn              = aws_secretsmanager_secret.init.arn
+  log_retention_days            = 14
 
   # Blue is active when deployment_slot = "blue", else it's being drained
   api_desired_count    = local.active_slot == "blue" ? 1 : 0
@@ -302,11 +304,12 @@ module "ecs_green" {
   public_subnet_ids      = module.vpc.public_subnet_ids
   api_sg_id              = module.security_groups.api_sg_id
   worker_sg_id           = module.security_groups.worker_sg_id
-  ecs_execution_role_arn = module.iam.ecs_execution_role_arn
-  ecs_task_role_arn      = module.iam.ecs_task_role_arn
-  secrets_arn            = aws_secretsmanager_secret.app.arn
-  init_secrets_arn       = aws_secretsmanager_secret.init.arn
-  log_retention_days     = 14
+  ecs_execution_role_arn        = module.iam.ecs_execution_role_arn
+  ecs_execution_worker_role_arn = module.iam.ecs_execution_worker_role_arn
+  ecs_task_role_arn             = module.iam.ecs_task_role_arn
+  secrets_arn                   = aws_secretsmanager_secret.app.arn
+  init_secrets_arn              = aws_secretsmanager_secret.init.arn
+  log_retention_days            = 14
 
   # Green is active when deployment_slot = "green"
   api_desired_count    = local.active_slot == "green" ? 1 : 0

@@ -60,7 +60,14 @@ def create_app(config_name="default"):
     @jwt.token_in_blocklist_loader
     def check_if_token_revoked(jwt_header, jwt_payload):
         from .extensions import redis_client as rc
-        return rc is not None and rc.exists(f"jti_blocklist:{jwt_payload['jti']}")
+        if rc is None:
+            app.logger.error("Redis unavailable; rejecting JWT because blocklist cannot be checked")
+            return True
+        try:
+            return bool(rc.exists(f"jti_blocklist:{jwt_payload['jti']}"))
+        except Exception:
+            app.logger.exception("Failed to check JWT blocklist")
+            return True
 
     # ── Swagger / API docs ────────────────────
     app.config["SWAGGER"] = {

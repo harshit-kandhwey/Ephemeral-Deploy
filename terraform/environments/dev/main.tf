@@ -201,12 +201,13 @@ module "vpc" {
 module "security_groups" {
   source = "../../modules/security-groups"
 
-  project            = local.project
-  environment        = local.environment
-  vpc_id             = module.vpc.vpc_id
-  vpc_cidr           = var.vpc_cidr
-  monitoring_enabled = true
-  common_tags        = local.common_tags
+  project                 = local.project
+  environment             = local.environment
+  vpc_id                  = module.vpc.vpc_id
+  vpc_cidr                = var.vpc_cidr
+  monitoring_enabled      = true
+  monitoring_allowed_cidr = ["0.0.0.0/0"]
+  common_tags             = local.common_tags
 }
 
 module "ecr" {
@@ -255,11 +256,12 @@ module "ecs" {
   private_app_subnet_ids = module.vpc.private_app_subnet_ids
   api_sg_id              = module.security_groups.api_sg_id
   worker_sg_id           = module.security_groups.worker_sg_id
-  ecs_execution_role_arn = module.iam.ecs_execution_role_arn
-  ecs_task_role_arn      = module.iam.ecs_task_role_arn
-  secrets_arn            = aws_secretsmanager_secret.app.arn
-  init_secrets_arn       = aws_secretsmanager_secret.init.arn
-  log_retention_days     = 3
+  ecs_execution_role_arn        = module.iam.ecs_execution_role_arn
+  ecs_execution_worker_role_arn = module.iam.ecs_execution_worker_role_arn
+  ecs_task_role_arn             = module.iam.ecs_task_role_arn
+  secrets_arn                   = aws_secretsmanager_secret.app.arn
+  init_secrets_arn              = aws_secretsmanager_secret.init.arn
+  log_retention_days            = 3
   api_cpu                = 256
   api_memory             = 512
   worker_cpu             = 256

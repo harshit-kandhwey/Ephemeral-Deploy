@@ -120,12 +120,12 @@
         "h": 4
       },
       "type": "stat",
-      "title": "ECS Running Tasks",
+      "title": "ECS Live Tasks (incl. activating/deactivating)",
       "datasource": "Prometheus",
       "targets": [
         {
           "expr": "sum(aws_ecs_live_task_count_average) or vector(0)",
-          "legendFormat": "Running Tasks",
+          "legendFormat": "Live Tasks",
           "refId": "A"
         }
       ],

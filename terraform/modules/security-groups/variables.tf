@@ -25,9 +25,8 @@ variable "monitoring_enabled" {
 }
 
 variable "monitoring_allowed_cidr" {
-  description = "CIDR blocks allowed to reach Prometheus (9090) and Grafana (3000). Restrict to your IP/VPN range in production."
+  description = "CIDR blocks allowed to reach Prometheus (9090) and Grafana (3000). Must be set explicitly — no default to prevent accidental public exposure."
   type        = list(string)
-  default     = ["0.0.0.0/0"]
 }
 
 variable "common_tags" {

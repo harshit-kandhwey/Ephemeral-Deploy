@@ -47,7 +47,12 @@ variable "worker_sg_id" {
 }
 
 variable "ecs_execution_role_arn" {
-  description = "IAM role ARN for ECS task execution (ECR pull + CloudWatch logs)"
+  description = "IAM role ARN for ECS task execution (ECR pull + CloudWatch logs) — used by API and Beat tasks"
+  type        = string
+}
+
+variable "ecs_execution_worker_role_arn" {
+  description = "IAM role ARN for ECS task execution used by the worker task — has access to both secrets_arn and init_secrets_arn"
   type        = string
 }
 

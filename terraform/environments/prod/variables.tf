@@ -66,3 +66,8 @@ variable "previous_worker_image" {
   type        = string
   default     = "placeholder"
 }
+
+variable "monitoring_allowed_cidr" {
+  description = "CIDR blocks allowed inbound to Prometheus (9090) and Grafana (3000). Set to your IP or VPN range."
+  type        = list(string)
+}

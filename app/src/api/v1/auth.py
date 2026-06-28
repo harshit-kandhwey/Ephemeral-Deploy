@@ -1,6 +1,7 @@
+import math
 import time
 
-from flask import jsonify, request
+from flask import current_app, jsonify, request
 from flask_jwt_extended import create_access_token, create_refresh_token, get_jwt, get_jwt_identity, jwt_required
 
 from ...extensions import db, limiter, redis_client
@@ -196,10 +197,19 @@ def logout():
       200:
         description: Logged out successfully
     """
+    if redis_client is None:
+        current_app.logger.error("Redis unavailable; cannot revoke JWT")
+        return jsonify({"error": "Logout temporarily unavailable"}), 503
+
     payload = get_jwt()
     jti = payload["jti"]
-    ttl = max(int(payload["exp"] - time.time()), 1)
-    redis_client.setex(f"jti_blocklist:{jti}", ttl, "revoked")
+    ttl = max(math.ceil(payload["exp"] - time.time()), 1)
+    try:
+        redis_client.setex(f"jti_blocklist:{jti}", ttl, "revoked")
+    except Exception:
+        current_app.logger.exception("Failed to revoke JWT")
+        return jsonify({"error": "Logout temporarily unavailable"}), 503
+
     return jsonify({"message": "Logged out successfully"}), 200
 
 
