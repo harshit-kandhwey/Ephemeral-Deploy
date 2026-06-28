@@ -808,11 +808,16 @@ jobs:
           TF_VAR_previous_api_image: ${{ steps.prev_images.outputs.api }}
           TF_VAR_previous_worker_image: ${{ steps.prev_images.outputs.worker }}
           # Set in GitHub → Settings → Environments → staging → Variables → MONITORING_ALLOWED_CIDR
+          # Accepts plain CIDR (1.2.3.4/32) or JSON array (["1.2.3.4/32"]) — normalized below
           TF_VAR_monitoring_allowed_cidr: ${{ vars.MONITORING_ALLOWED_CIDR }}
         run: |
           if [[ -z "${TF_VAR_monitoring_allowed_cidr:-}" ]]; then
             echo "::error::MONITORING_ALLOWED_CIDR is not set. Add it in GitHub → Settings → Environments → staging → Variables."
             exit 1
+          fi
+          # Normalize: wrap plain CIDR in JSON array so Terraform never falls into interactive prompt
+          if [[ "${TF_VAR_monitoring_allowed_cidr}" != \[* ]]; then
+            export TF_VAR_monitoring_allowed_cidr='["'"${TF_VAR_monitoring_allowed_cidr}"'"]'
           fi
           terraform apply -var-file=terraform.tfvars -auto-approve
         continue-on-error: true
@@ -1175,12 +1180,16 @@ jobs:
           TF_VAR_previous_api_image: ${{ steps.prev_images.outputs.api }}
           TF_VAR_previous_worker_image: ${{ steps.prev_images.outputs.worker }}
           # Set in GitHub → Settings → Environments → prod → Variables → MONITORING_ALLOWED_CIDR
-          # Format: '["1.2.3.4/32","10.0.0.0/8"]' — never commit real CIDRs to repo
+          # Accepts plain CIDR (1.2.3.4/32) or JSON array (["1.2.3.4/32"]) — normalized below
           TF_VAR_monitoring_allowed_cidr: ${{ vars.MONITORING_ALLOWED_CIDR }}
         run: |
           if [[ -z "${TF_VAR_monitoring_allowed_cidr:-}" ]]; then
             echo "::error::MONITORING_ALLOWED_CIDR is not set. Add it in GitHub → Settings → Environments → prod → Variables."
             exit 1
+          fi
+          # Normalize: wrap plain CIDR in JSON array so Terraform never falls into interactive prompt
+          if [[ "${TF_VAR_monitoring_allowed_cidr}" != \[* ]]; then
+            export TF_VAR_monitoring_allowed_cidr='["'"${TF_VAR_monitoring_allowed_cidr}"'"]'
           fi
           terraform apply -var-file=terraform.tfvars -auto-approve
         continue-on-error: true
