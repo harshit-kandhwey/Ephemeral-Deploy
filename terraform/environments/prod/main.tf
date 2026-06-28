@@ -253,17 +253,17 @@ module "elasticache" {
 module "ecs_blue" {
   source = "../../modules/ecs"
 
-  project                = local.project
-  environment            = "${local.environment}-blue" # Separate service names
-  aws_region             = var.aws_region
-  api_image              = local.active_slot == "blue" ? var.api_image : var.previous_api_image
-  worker_image           = local.active_slot == "blue" ? var.worker_image : var.previous_worker_image
-  git_commit             = var.git_commit
-  vpc_id                 = module.vpc.vpc_id
-  private_app_subnet_ids = module.vpc.private_app_subnet_ids
-  public_subnet_ids      = module.vpc.public_subnet_ids
-  api_sg_id              = module.security_groups.api_sg_id
-  worker_sg_id           = module.security_groups.worker_sg_id
+  project                       = local.project
+  environment                   = "${local.environment}-blue" # Separate service names
+  aws_region                    = var.aws_region
+  api_image                     = local.active_slot == "blue" ? var.api_image : var.previous_api_image
+  worker_image                  = local.active_slot == "blue" ? var.worker_image : var.previous_worker_image
+  git_commit                    = var.git_commit
+  vpc_id                        = module.vpc.vpc_id
+  private_app_subnet_ids        = module.vpc.private_app_subnet_ids
+  public_subnet_ids             = module.vpc.public_subnet_ids
+  api_sg_id                     = module.security_groups.api_sg_id
+  worker_sg_id                  = module.security_groups.worker_sg_id
   ecs_execution_role_arn        = module.iam.ecs_execution_role_arn
   ecs_execution_worker_role_arn = module.iam.ecs_execution_worker_role_arn
   ecs_task_role_arn             = module.iam.ecs_task_role_arn
@@ -293,17 +293,17 @@ module "ecs_blue" {
 module "ecs_green" {
   source = "../../modules/ecs"
 
-  project                = local.project
-  environment            = "${local.environment}-green"
-  aws_region             = var.aws_region
-  api_image              = local.active_slot == "green" ? var.api_image : var.previous_api_image
-  worker_image           = local.active_slot == "green" ? var.worker_image : var.previous_worker_image
-  git_commit             = var.git_commit
-  vpc_id                 = module.vpc.vpc_id
-  private_app_subnet_ids = module.vpc.private_app_subnet_ids
-  public_subnet_ids      = module.vpc.public_subnet_ids
-  api_sg_id              = module.security_groups.api_sg_id
-  worker_sg_id           = module.security_groups.worker_sg_id
+  project                       = local.project
+  environment                   = "${local.environment}-green"
+  aws_region                    = var.aws_region
+  api_image                     = local.active_slot == "green" ? var.api_image : var.previous_api_image
+  worker_image                  = local.active_slot == "green" ? var.worker_image : var.previous_worker_image
+  git_commit                    = var.git_commit
+  vpc_id                        = module.vpc.vpc_id
+  private_app_subnet_ids        = module.vpc.private_app_subnet_ids
+  public_subnet_ids             = module.vpc.public_subnet_ids
+  api_sg_id                     = module.security_groups.api_sg_id
+  worker_sg_id                  = module.security_groups.worker_sg_id
   ecs_execution_role_arn        = module.iam.ecs_execution_role_arn
   ecs_execution_worker_role_arn = module.iam.ecs_execution_worker_role_arn
   ecs_task_role_arn             = module.iam.ecs_task_role_arn

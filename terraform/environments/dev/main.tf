@@ -247,28 +247,28 @@ module "elasticache" {
 module "ecs" {
   source = "../../modules/ecs"
 
-  project                = local.project
-  environment            = local.environment
-  aws_region             = var.aws_region
-  api_image              = var.api_image
-  worker_image           = var.worker_image
-  git_commit             = var.git_commit
-  private_app_subnet_ids = module.vpc.private_app_subnet_ids
-  api_sg_id              = module.security_groups.api_sg_id
-  worker_sg_id           = module.security_groups.worker_sg_id
+  project                       = local.project
+  environment                   = local.environment
+  aws_region                    = var.aws_region
+  api_image                     = var.api_image
+  worker_image                  = var.worker_image
+  git_commit                    = var.git_commit
+  private_app_subnet_ids        = module.vpc.private_app_subnet_ids
+  api_sg_id                     = module.security_groups.api_sg_id
+  worker_sg_id                  = module.security_groups.worker_sg_id
   ecs_execution_role_arn        = module.iam.ecs_execution_role_arn
   ecs_execution_worker_role_arn = module.iam.ecs_execution_worker_role_arn
   ecs_task_role_arn             = module.iam.ecs_task_role_arn
   secrets_arn                   = aws_secretsmanager_secret.app.arn
   init_secrets_arn              = aws_secretsmanager_secret.init.arn
   log_retention_days            = 3
-  api_cpu                = 256
-  api_memory             = 512
-  worker_cpu             = 256
-  worker_memory          = 512
-  api_desired_count      = 1
-  worker_desired_count   = 1
-  common_tags            = local.common_tags
+  api_cpu                       = 256
+  api_memory                    = 512
+  worker_cpu                    = 256
+  worker_memory                 = 512
+  api_desired_count             = 1
+  worker_desired_count          = 1
+  common_tags                   = local.common_tags
 
   depends_on = [
     aws_secretsmanager_secret_version.app,
