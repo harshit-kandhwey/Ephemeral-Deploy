@@ -121,10 +121,10 @@
       },
       "type": "stat",
       "title": "ECS Running Tasks",
-      "datasource": "CloudWatch",
+      "datasource": "Prometheus",
       "targets": [
         {
-          "expr": "sum(aws_ecs_running_task_count_average) or vector(0)",
+          "expr": "sum(aws_ecs_live_task_count_average) or vector(0)",
           "legendFormat": "Running Tasks",
           "refId": "A"
         }
@@ -199,7 +199,7 @@
       },
       "type": "timeseries",
       "title": "RDS CPU & Connections (CloudWatch)",
-      "datasource": "CloudWatch",
+      "datasource": "Prometheus",
       "targets": [
         {
           "expr": "aws_rds_cpuutilization_average",

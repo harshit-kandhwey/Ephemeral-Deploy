@@ -21,7 +21,7 @@ discovery:
         - name: MemoryUtilization
           statistics: [Average]
           nilToZero: true
-        - name: RunningTaskCount
+        - name: LiveTaskCount
           statistics: [Average]
           nilToZero: true
       searchTags:

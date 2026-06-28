@@ -56,6 +56,12 @@ variable "secrets_arn" {
   type        = string
 }
 
+variable "init_secrets_arn" {
+  description = "ARN of Secrets Manager secret containing DB master credentials (worker init only)"
+  type        = string
+  default     = ""
+}
+
 variable "app_s3_bucket" {
   description = "S3 bucket for application file attachments"
   type        = string

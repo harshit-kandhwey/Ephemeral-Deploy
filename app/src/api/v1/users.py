@@ -23,8 +23,8 @@ def get_users():
       200:
         description: List of users
     """
-    page = request.args.get("page", 1, type=int)
-    per_page = min(request.args.get("per_page", 20, type=int), 100)
+    page = max(request.args.get("page", 1, type=int), 1)
+    per_page = max(1, min(request.args.get("per_page", 20, type=int), 100))
     users = User.query.order_by(User.created_at.desc()).paginate(page=page, per_page=per_page, error_out=False)
     return (
         jsonify(

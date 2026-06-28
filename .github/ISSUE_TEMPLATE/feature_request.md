@@ -31,9 +31,9 @@ What other approaches did you consider and why did you rule them out?
 
 What does "done" look like for this feature?
 
-- [ ] 
-- [ ] 
-- [ ] 
+- [ ]
+- [ ]
+- [ ]
 
 ## Additional Context
 

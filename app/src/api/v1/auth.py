@@ -1,7 +1,9 @@
-from flask import jsonify, request
-from flask_jwt_extended import create_access_token, create_refresh_token, get_jwt_identity, jwt_required
+import time
 
-from ...extensions import db, limiter
+from flask import jsonify, request
+from flask_jwt_extended import create_access_token, create_refresh_token, get_jwt, get_jwt_identity, jwt_required
+
+from ...extensions import db, limiter, redis_client
 from ...models.audit_log import AuditLog
 from ...models.user import User
 from . import api_v1
@@ -169,10 +171,36 @@ def refresh():
     responses:
       200:
         description: Token refreshed
+      403:
+        description: Account disabled
     """
     user_id = int(get_jwt_identity())
-    access_token = create_access_token(identity=user_id)
+    user = User.query.get(user_id)
+    if not user or not user.is_active:
+        return jsonify({"error": "Account is disabled"}), 403
+    access_token = create_access_token(identity=str(user_id))
     return jsonify({"access_token": access_token}), 200
+
+
+@api_v1.route("/auth/logout", methods=["POST"])
+@jwt_required()
+def logout():
+    """
+    Revoke the current access token
+    ---
+    tags:
+      - Authentication
+    security:
+      - Bearer: []
+    responses:
+      200:
+        description: Logged out successfully
+    """
+    payload = get_jwt()
+    jti = payload["jti"]
+    ttl = max(int(payload["exp"] - time.time()), 1)
+    redis_client.setex(f"jti_blocklist:{jti}", ttl, "revoked")
+    return jsonify({"message": "Logged out successfully"}), 200
 
 
 @api_v1.route("/auth/me", methods=["GET"])

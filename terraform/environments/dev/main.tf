@@ -131,6 +131,8 @@ resource "aws_secretsmanager_secret_version" "app" {
   secret_id = aws_secretsmanager_secret.app.id
 
   # All values sourced from SSM - zero hardcoding
+  # DB_MASTER_USER/PASSWORD intentionally excluded — injected only into the
+  # worker init task via a separate init-secrets secret (see below).
   secret_string = jsonencode({
     DATABASE_URL          = "postgresql://${data.aws_ssm_parameter.db_app_username.value}:${data.aws_ssm_parameter.db_app_password.value}@${module.rds.db_endpoint}/${var.db_name}?sslmode=require"
     REDIS_URL             = "redis://${module.elasticache.redis_endpoint}:6379/0"
@@ -140,10 +142,25 @@ resource "aws_secretsmanager_secret_version" "app" {
     JWT_SECRET_KEY        = data.aws_ssm_parameter.jwt_secret_key.value
     AWS_REGION            = var.aws_region
     S3_BUCKET             = var.app_s3_bucket
-    DB_MASTER_USER        = data.aws_ssm_parameter.db_master_username.value
-    DB_MASTER_PASSWORD    = data.aws_ssm_parameter.db_master_password.value
     DB_APP_USER           = data.aws_ssm_parameter.db_app_username.value
     DB_APP_PASSWORD       = data.aws_ssm_parameter.db_app_password.value
+  })
+}
+
+# ── Init secrets (DB master credentials for worker startup only) ─
+resource "aws_secretsmanager_secret" "init" {
+  name                    = "${local.project}/${local.environment}/init-secrets"
+  description             = "DB master credentials for worker DB initialisation only"
+  recovery_window_in_days = 0 # Instant deletion in dev
+  tags                    = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "init" {
+  secret_id = aws_secretsmanager_secret.init.id
+
+  secret_string = jsonencode({
+    DB_MASTER_USER     = data.aws_ssm_parameter.db_master_username.value
+    DB_MASTER_PASSWORD = data.aws_ssm_parameter.db_master_password.value
   })
 }
 
@@ -161,6 +178,7 @@ module "iam" {
   tf_state_bucket      = var.tf_state_bucket
   app_s3_bucket        = var.app_s3_bucket
   secrets_arn          = aws_secretsmanager_secret.app.arn
+  init_secrets_arn     = aws_secretsmanager_secret.init.arn
   create_oidc_provider = true
   common_tags          = local.common_tags
 }
@@ -240,6 +258,7 @@ module "ecs" {
   ecs_execution_role_arn = module.iam.ecs_execution_role_arn
   ecs_task_role_arn      = module.iam.ecs_task_role_arn
   secrets_arn            = aws_secretsmanager_secret.app.arn
+  init_secrets_arn       = aws_secretsmanager_secret.init.arn
   log_retention_days     = 3
   api_cpu                = 256
   api_memory             = 512
@@ -250,10 +269,8 @@ module "ecs" {
   common_tags            = local.common_tags
 
   depends_on = [
-    # Ensure secret VERSION exists before ECS tries to fetch it at task launch.
-    # secrets_arn only creates a reference to the secret shell — without this,
-    # ECS services can start before AWSCURRENT label is set on the version.
     aws_secretsmanager_secret_version.app,
+    aws_secretsmanager_secret_version.init,
     module.rds,
     module.elasticache,
   ]

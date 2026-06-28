@@ -4,11 +4,11 @@
 
 This project follows a single-branch production model. Only the code currently deployed from `main` is supported.
 
-| Branch | Supported |
-|---|---|
-| `main` (current) | Yes |
-| `dev` | No (pre-release) |
-| Older commits | No |
+| Branch           | Supported        |
+| ---------------- | ---------------- |
+| `main` (current) | Yes              |
+| `dev`            | No (pre-release) |
+| Older commits    | No               |
 
 ## Reporting a Vulnerability
 
@@ -30,12 +30,12 @@ A useful report contains:
 
 ### Response Timeline
 
-| Stage | Target |
-|---|---|
-| Acknowledgement | Within 48 hours |
-| Initial assessment | Within 7 days |
-| Fix or mitigation | Depends on severity; critical issues within 14 days |
-| Disclosure | Coordinated with reporter after fix is deployed |
+| Stage              | Target                                              |
+| ------------------ | --------------------------------------------------- |
+| Acknowledgement    | Within 48 hours                                     |
+| Initial assessment | Within 7 days                                       |
+| Fix or mitigation  | Depends on severity; critical issues within 14 days |
+| Disclosure         | Coordinated with reporter after fix is deployed     |
 
 ## Known Security Design Decisions
 

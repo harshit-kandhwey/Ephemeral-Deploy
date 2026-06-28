@@ -5,6 +5,7 @@ from flask_jwt_extended import get_jwt_identity, jwt_required
 
 from ...extensions import db
 from ...models.audit_log import AuditLog
+from ...models.project import Project
 from ...models.task import Task
 from ...models.user import User
 from ...utils.decorators import get_current_user_or_401, role_required
@@ -113,7 +114,15 @@ def get_task(task_id):
       404:
         description: Task not found
     """
+    user, error_response = get_current_user_or_401()
+    if error_response:
+        return error_response
+
     task = Task.query.get_or_404(task_id)
+
+    if user.role != "admin" and (not user.team or task.project.team_id != user.team.id):
+        return jsonify({"error": "Access denied"}), 403
+
     return jsonify(task.to_dict(include_comments=True)), 200
 
 
@@ -166,6 +175,10 @@ def create_task():
 
     if not data or "title" not in data or "project_id" not in data:
         return jsonify({"error": "Missing required fields"}), 400
+
+    project = db.get_or_404(Project, data["project_id"])
+    if user.role != "admin" and (not user.team or project.team_id != user.team.id):
+        return jsonify({"error": "Access denied"}), 403
 
     task = Task(
         title=data["title"],
@@ -243,6 +256,10 @@ def update_task(task_id):
 
     user_id = user.id
     task = Task.query.get_or_404(task_id)
+
+    if user.role != "admin" and (not user.team or task.project.team_id != user.team.id):
+        return jsonify({"error": "Access denied"}), 403
+
     data = request.get_json()
 
     changes = {}

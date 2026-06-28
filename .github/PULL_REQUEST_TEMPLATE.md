@@ -26,7 +26,7 @@
 - [ ] Unit / integration tests added or updated (`make test` passes)
 - [ ] Manually tested against local stack (`make up`)
 - [ ] Tested against dev environment (pushed to `dev` branch)
-- [ ] No test needed — reason: ___
+- [ ] No test needed — reason: \_\_\_
 
 ## Checklist
 

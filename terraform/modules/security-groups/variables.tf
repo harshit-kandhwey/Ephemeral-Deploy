@@ -24,6 +24,12 @@ variable "monitoring_enabled" {
   default     = false
 }
 
+variable "monitoring_allowed_cidr" {
+  description = "CIDR blocks allowed to reach Prometheus (9090) and Grafana (3000). Restrict to your IP/VPN range in production."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}
+
 variable "common_tags" {
   description = "Common tags for all resources"
   type        = map(string)

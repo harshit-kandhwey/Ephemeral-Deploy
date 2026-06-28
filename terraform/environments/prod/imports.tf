@@ -16,12 +16,10 @@
 # not supported. Account ID 415838720130 is hardcoded intentionally.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# GitHub OIDC provider — owned by bootstrap.sh, shared between dev and prod
-# create_oidc_provider = false in prod, so this import is a no-op reference
-import {
-  to = module.iam.aws_iam_openid_connect_provider.github[0]
-  id = "arn:aws:iam::415838720130:oidc-provider/token.actions.githubusercontent.com"
-}
+# GitHub OIDC provider: create_oidc_provider = false in prod, so the resource
+# has count = 0 and cannot be imported here. The provider is created by dev env
+# (create_oidc_provider = true) and shared — reference it via var.oidc_provider_arn
+# if the IAM module trust policy needs it.
 
 # GitHub Actions deploy IAM role — owned by bootstrap.sh, shared
 import {

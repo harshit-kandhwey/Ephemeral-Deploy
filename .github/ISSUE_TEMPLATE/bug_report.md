@@ -19,13 +19,13 @@ Which part of the system is affected?
 - [ ] Terraform / AWS Infrastructure
 - [ ] CI/CD Pipeline (GitHub Actions)
 - [ ] Monitoring (Prometheus / Grafana)
-- [ ] Other: ___
+- [ ] Other: \_\_\_
 
 ## Steps to Reproduce
 
-1. 
-2. 
-3. 
+1.
+2.
+3.
 
 ## Expected Behavior
 

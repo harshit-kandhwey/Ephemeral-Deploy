@@ -56,6 +56,12 @@ def create_app(config_name="default"):
     init_redis(app)
     init_celery(app)
 
+    # ── JWT blocklist (Redis-backed) ──────────
+    @jwt.token_in_blocklist_loader
+    def check_if_token_revoked(jwt_header, jwt_payload):
+        from .extensions import redis_client as rc
+        return rc is not None and rc.exists(f"jti_blocklist:{jwt_payload['jti']}")
+
     # ── Swagger / API docs ────────────────────
     app.config["SWAGGER"] = {
         "title": "NexusDeploy Project Management API",

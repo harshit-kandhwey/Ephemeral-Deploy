@@ -4,6 +4,7 @@ from flask_jwt_extended import get_jwt_identity, jwt_required
 from ...extensions import db
 from ...models.comment import Comment
 from ...models.task import Task
+from ...utils.decorators import get_current_user_or_401
 from . import api_v1
 
 
@@ -11,7 +12,15 @@ from . import api_v1
 @jwt_required()
 def get_comments(task_id):
     """Get all comments for a task"""
+    user, error_response = get_current_user_or_401()
+    if error_response:
+        return error_response
+
     task = Task.query.get_or_404(task_id)
+
+    if user.role != "admin" and (not user.team or task.project.team_id != user.team.id):
+        return jsonify({"error": "Access denied"}), 403
+
     return (
         jsonify(
             {
@@ -52,8 +61,15 @@ def create_comment(task_id):
       201:
         description: Comment created
     """
-    user_id = get_jwt_identity()
+    user, error_response = get_current_user_or_401()
+    if error_response:
+        return error_response
+
+    user_id = user.id
     task = Task.query.get_or_404(task_id)
+
+    if user.role != "admin" and (not user.team or task.project.team_id != user.team.id):
+        return jsonify({"error": "Access denied"}), 403
     data = request.get_json()
 
     if not data or "content" not in data:

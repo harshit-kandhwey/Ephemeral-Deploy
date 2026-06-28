@@ -43,8 +43,8 @@ def get_projects():
     if error_response:
         return error_response
 
-    page = request.args.get("page", 1, type=int)
-    per_page = min(request.args.get("per_page", 20, type=int), 100)
+    page = max(request.args.get("page", 1, type=int), 1)
+    per_page = max(1, min(request.args.get("per_page", 20, type=int), 100))
 
     if user.role == "admin":
         query = Project.query

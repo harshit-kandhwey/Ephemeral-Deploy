@@ -24,6 +24,9 @@ def get_current_user_or_401():
     if not user:
         return None, (jsonify({"error": "User not found"}), 401)
 
+    if not user.is_active:
+        return None, (jsonify({"error": "Account is disabled"}), 403)
+
     return user, None
 
 

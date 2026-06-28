@@ -315,7 +315,7 @@ resource "aws_iam_role_policy" "ecs_execution_secrets" {
     Statement = [{
       Effect   = "Allow"
       Action   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-      Resource = var.secrets_arn
+      Resource = compact([var.secrets_arn, var.init_secrets_arn])
     }]
   })
 }

@@ -187,23 +187,22 @@ resource "aws_security_group" "monitoring" {
   description = "Prometheus and Grafana - inbound from internet on specific ports only"
   vpc_id      = var.vpc_id
 
-  # Grafana UI - accessible from internet (password-protected)
+  # Grafana UI — restrict to var.monitoring_allowed_cidr (set to your IP/VPN in prod)
   ingress {
-    description = "Grafana from internet"
+    description = "Grafana"
     from_port   = 3000
     to_port     = 3000
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = var.monitoring_allowed_cidr
   }
 
-  # Prometheus UI - restrict to your IP in real usage
-  # For demo purposes, open to internet
+  # Prometheus UI — restrict to var.monitoring_allowed_cidr (set to your IP/VPN in prod)
   ingress {
-    description = "Prometheus from internet"
+    description = "Prometheus"
     from_port   = 9090
     to_port     = 9090
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = var.monitoring_allowed_cidr
   }
 
   # Node exporter - only within VPC (Prometheus scrapes this internally)

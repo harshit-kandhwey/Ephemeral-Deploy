@@ -61,6 +61,11 @@ variable "secrets_arn" {
   type        = string
 }
 
+variable "init_secrets_arn" {
+  description = "Secrets Manager secret ARN containing DB master credentials (injected into worker only)"
+  type        = string
+}
+
 variable "log_retention_days" {
   description = "CloudWatch log group retention in days"
   type        = number

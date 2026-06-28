@@ -119,6 +119,8 @@ resource "aws_secretsmanager_secret_version" "app" {
   secret_id = aws_secretsmanager_secret.app.id
 
   # All values sourced from SSM - zero hardcoding
+  # DB_MASTER_USER/PASSWORD intentionally excluded — injected only into the
+  # worker init task via a separate init-secrets secret (see below).
   secret_string = jsonencode({
     DATABASE_URL          = "postgresql://${data.aws_ssm_parameter.db_app_username.value}:${data.aws_ssm_parameter.db_app_password.value}@${module.rds.db_endpoint}/${var.db_name}?sslmode=require"
     REDIS_URL             = "redis://${module.elasticache.redis_endpoint}:6379/0"
@@ -128,10 +130,28 @@ resource "aws_secretsmanager_secret_version" "app" {
     JWT_SECRET_KEY        = data.aws_ssm_parameter.jwt_secret_key.value
     AWS_REGION            = var.aws_region
     S3_BUCKET             = var.app_s3_bucket
-    DB_MASTER_USER        = data.aws_ssm_parameter.db_master_username.value
-    DB_MASTER_PASSWORD    = data.aws_ssm_parameter.db_master_password.value
     DB_APP_USER           = data.aws_ssm_parameter.db_app_username.value
     DB_APP_PASSWORD       = data.aws_ssm_parameter.db_app_password.value
+  })
+}
+
+# ── Init secrets (DB master credentials for worker startup only) ─
+# Scoped narrowly: injected only into the worker task definition so
+# entrypoint-worker.sh can run init_db at startup. The API task
+# never receives these credentials.
+resource "aws_secretsmanager_secret" "init" {
+  name                    = "${local.project}/${local.environment}/init-secrets"
+  description             = "DB master credentials for worker DB initialisation only"
+  recovery_window_in_days = 7
+  tags                    = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "init" {
+  secret_id = aws_secretsmanager_secret.init.id
+
+  secret_string = jsonencode({
+    DB_MASTER_USER     = data.aws_ssm_parameter.db_master_username.value
+    DB_MASTER_PASSWORD = data.aws_ssm_parameter.db_master_password.value
   })
 }
 
@@ -149,6 +169,7 @@ module "iam" {
   tf_state_bucket      = var.tf_state_bucket
   app_s3_bucket        = var.app_s3_bucket
   secrets_arn          = aws_secretsmanager_secret.app.arn
+  init_secrets_arn     = aws_secretsmanager_secret.init.arn
   create_oidc_provider = false # Already created by dev env - reuse it
   common_tags          = local.common_tags
 }
@@ -245,6 +266,7 @@ module "ecs_blue" {
   ecs_execution_role_arn = module.iam.ecs_execution_role_arn
   ecs_task_role_arn      = module.iam.ecs_task_role_arn
   secrets_arn            = aws_secretsmanager_secret.app.arn
+  init_secrets_arn       = aws_secretsmanager_secret.init.arn
   log_retention_days     = 14
 
   # Blue is active when deployment_slot = "blue", else it's being drained
@@ -259,6 +281,7 @@ module "ecs_blue" {
 
   depends_on = [
     aws_secretsmanager_secret_version.app,
+    aws_secretsmanager_secret_version.init,
     module.rds,
     module.elasticache,
   ]
@@ -282,6 +305,7 @@ module "ecs_green" {
   ecs_execution_role_arn = module.iam.ecs_execution_role_arn
   ecs_task_role_arn      = module.iam.ecs_task_role_arn
   secrets_arn            = aws_secretsmanager_secret.app.arn
+  init_secrets_arn       = aws_secretsmanager_secret.init.arn
   log_retention_days     = 14
 
   # Green is active when deployment_slot = "green"
@@ -296,6 +320,7 @@ module "ecs_green" {
 
   depends_on = [
     aws_secretsmanager_secret_version.app,
+    aws_secretsmanager_secret_version.init,
     module.rds,
     module.elasticache,
   ]
