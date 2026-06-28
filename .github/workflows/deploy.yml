@@ -476,6 +476,7 @@ jobs:
           adopt module.iam.aws_iam_role.vpc_flow_log            "nexusdeploy-dev-vpc-flow-log"
 
       - name: Terraform Apply — full infrastructure
+        timeout-minutes: 30
         working-directory: terraform/environments/dev
         env:
           TF_VAR_api_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}
@@ -799,6 +800,7 @@ jobs:
 
       - name: Terraform Apply → new slot
         id: tf_apply
+        timeout-minutes: 30
         working-directory: terraform/environments/staging
         env:
           TF_VAR_api_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}
@@ -1169,6 +1171,7 @@ jobs:
       # ── Step 2: Deploy to new (inactive) slot ──
       - name: Terraform Apply → new slot
         id: tf_apply
+        timeout-minutes: 30
         working-directory: terraform/environments/prod
         env:
           TF_VAR_api_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}
