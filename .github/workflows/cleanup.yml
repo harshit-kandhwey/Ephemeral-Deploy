@@ -55,7 +55,7 @@ jobs:
       TF_ENV: ${{ github.event.inputs.environment || 'dev' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Sleep BEFORE acquiring AWS credentials — the OIDC token is only
       # requested when configure-aws-credentials runs, so sleeping here
