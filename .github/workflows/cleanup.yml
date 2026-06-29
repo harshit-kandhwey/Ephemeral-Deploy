@@ -73,7 +73,7 @@ jobs:
           sleep $((DELAY * 60))
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           role-session-name: Cleanup-${{ github.run_id }}
@@ -237,7 +237,7 @@ jobs:
           sleep $((DELAY * 60))
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           role-session-name: DrainSlot-${{ github.run_id }}
