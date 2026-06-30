@@ -124,31 +124,26 @@ aws s3api put-public-access-block \
 log_success "Public access blocked on s3://$STATE_BUCKET"
 
 # ──────────────────────────────────────────────
-# STEP 2: DYNAMODB STATE LOCKING (commented out)
-# Single-developer workflow — no concurrent runs possible,
-# so locking adds cost/complexity with no benefit.
-#
-# To enable for a team:
-#   1. Uncomment the block below
-#   2. Add dynamodb_table to backend config in deploy.yml
-#   3. Add dynamodb_table to backend block in each environment's main.tf
-# Cost: $0 — DynamoDB PAY_PER_REQUEST with <25 ops/day is negligible
+# STEP 2: DYNAMODB STATE LOCKING
+# One shared table handles all environments — lock keys include the
+# state path (e.g. staging/terraform.tfstate) so there is no collision.
+# Cost: $0 — PAY_PER_REQUEST with <25 ops/day is negligible.
 # ──────────────────────────────────────────────
 
-# log_info "Creating DynamoDB state lock table: $LOCK_TABLE"
-# if aws dynamodb describe-table --table-name "$LOCK_TABLE" --region "$REGION" 2>/dev/null; then
-#   log_warn "Table $LOCK_TABLE already exists — skipping"
-# else
-#   aws dynamodb create-table \
-#     --table-name "$LOCK_TABLE" \
-#     --attribute-definitions AttributeName=LockID,AttributeType=S \
-#     --key-schema AttributeName=LockID,KeyType=HASH \
-#     --billing-mode PAY_PER_REQUEST \
-#     --region "$REGION" \
-#     --tags Key=Project,Value="$PROJECT" Key=ManagedBy,Value=bootstrap
-#   aws dynamodb wait table-exists --table-name "$LOCK_TABLE" --region "$REGION"
-#   log_success "Created DynamoDB table: $LOCK_TABLE"
-# fi
+log_info "Creating DynamoDB state lock table: $LOCK_TABLE"
+if aws dynamodb describe-table --table-name "$LOCK_TABLE" --region "$REGION" 2>/dev/null; then
+  log_warn "Table $LOCK_TABLE already exists — skipping"
+else
+  aws dynamodb create-table \
+    --table-name "$LOCK_TABLE" \
+    --attribute-definitions AttributeName=LockID,AttributeType=S \
+    --key-schema AttributeName=LockID,KeyType=HASH \
+    --billing-mode PAY_PER_REQUEST \
+    --region "$REGION" \
+    --tags Key=Project,Value="$PROJECT" Key=ManagedBy,Value=bootstrap
+  aws dynamodb wait table-exists --table-name "$LOCK_TABLE" --region "$REGION"
+  log_success "Created DynamoDB table: $LOCK_TABLE"
+fi
 
 # ──────────────────────────────────────────────
 # STEP 3: GITHUB OIDC PROVIDER
@@ -283,6 +278,17 @@ DEPLOY_POLICY1=$(cat <<ENDPOLICY1
         "arn:aws:s3:::${STATE_BUCKET}",
         "arn:aws:s3:::${STATE_BUCKET}/*"
       ]
+    },
+    {
+      "Sid": "DynamoDBLock",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+      ],
+      "Resource": "arn:aws:dynamodb:*:${ACCOUNT_ID}:table/${LOCK_TABLE}"
     },
     {
       "Sid": "SSM",

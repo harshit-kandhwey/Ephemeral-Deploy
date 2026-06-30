@@ -35,8 +35,7 @@ env:
   TF_VERSION: 1.7.0
   TF_STATE_BUCKET: nexusdeploy-terraform-state
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # DynamoDB locking - commented intentionally (single-dev, no concurrency risk)
-  # TF_LOCK_TABLE: nexusdeploy-terraform-locks
+  TF_LOCK_TABLE: nexusdeploy-terraform-locks
 
 jobs:
   # ─────────────────────────────────────────────
@@ -186,7 +185,8 @@ jobs:
             -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
             -backend-config="key=${{ needs.setup.outputs.environment }}/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" \
-            -backend-config="encrypt=true"
+            -backend-config="encrypt=true" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
 
       - name: Check if ECR repositories already exist
         id: ecr-check
@@ -379,8 +379,8 @@ jobs:
             -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
             -backend-config="key=dev/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" \
-            -backend-config="encrypt=true"
-          # Note: no dynamodb_table - see backend comment in main.tf
+            -backend-config="encrypt=true" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
 
       - name: Delete orphaned resources (prevents EntityAlreadyExists / ResourceAlreadyExistsException)
         # Some resources survive failed cleanups but aren't in Terraform state.
@@ -687,7 +687,8 @@ jobs:
             -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
             -backend-config="key=staging/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" \
-            -backend-config="encrypt=true"
+            -backend-config="encrypt=true" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
 
       - name: Delete orphaned resources
         continue-on-error: true
@@ -1045,7 +1046,8 @@ jobs:
             -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
             -backend-config="key=prod/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" \
-            -backend-config="encrypt=true"
+            -backend-config="encrypt=true" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
 
       - name: Delete orphaned resources
         continue-on-error: true

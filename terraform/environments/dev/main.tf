@@ -17,26 +17,13 @@ terraform {
   # State stored in S3 per environment.
   # Bucket/key/region passed via -backend-config flags in CI/CD (deploy.yml).
   #
-  # NOTE ON STATE LOCKING (DynamoDB):
-  # We are intentionally NOT using DynamoDB state locking here.
-  # Reason: Only one environment runs at a time (single-developer workflow),
-  # so concurrent state conflicts are not a risk for this project.
-  #
-  # In a real team setup, you WOULD enable it to prevent two pipeline runs
-  # from corrupting state simultaneously. It's ready to enable:
-  #   Step 1: Uncomment table creation in scripts/bootstrap.sh
-  #   Step 2: Add this to the backend block below:
-  #           dynamodb_table = "nexusdeploy-terraform-locks"
-  #   Cost:   Free (DynamoDB PAY_PER_REQUEST with <25 lock ops/day = $0.00)
   backend "s3" {
     # All values passed via -backend-config in deploy.yml:
-    # bucket  = "nexusdeploy-terraform-state"
-    # key     = "dev/terraform.tfstate"
-    # region  = "us-east-1"
-    # encrypt = true
-    #
-    # To enable locking, add:
-    # dynamodb_table = "nexusdeploy-terraform-locks"
+    # -backend-config="bucket=nexusdeploy-terraform-state"
+    # -backend-config="key=dev/terraform.tfstate"
+    # -backend-config="region=us-east-1"
+    # -backend-config="encrypt=true"
+    # -backend-config="dynamodb_table=nexusdeploy-terraform-locks"
   }
 }
 

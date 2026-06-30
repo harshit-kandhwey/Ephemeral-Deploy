@@ -35,8 +35,7 @@ env:
   AWS_REGION: us-east-1
   TF_VERSION: 1.7.0
   TF_STATE_BUCKET: nexusdeploy-terraform-state
-  # TF_LOCK_TABLE intentionally omitted — DynamoDB locking disabled (single-dev)
-  # See: scripts/bootstrap.sh and terraform/environments/dev/main.tf for rationale
+  TF_LOCK_TABLE: nexusdeploy-terraform-locks
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -91,9 +90,8 @@ jobs:
             -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
             -backend-config="key=${{ env.TF_ENV }}/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" \
-            -backend-config="encrypt=true"
-          # Note: no dynamodb_table — DynamoDB locking intentionally disabled.
-          # Single-developer workflow, no concurrent runs possible.
+            -backend-config="encrypt=true" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
 
       # ── Step 1: Graceful Terraform destroy ──────────────────────────────
       - name: Terraform Destroy

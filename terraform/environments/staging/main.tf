@@ -24,6 +24,7 @@ terraform {
     # -backend-config="key=staging/terraform.tfstate"
     # -backend-config="region=us-east-1"
     # -backend-config="encrypt=true"
+    # -backend-config="dynamodb_table=nexusdeploy-terraform-locks"
   }
 }
 
@@ -86,10 +87,6 @@ data "aws_ssm_parameter" "jwt_secret_key" {
   with_decryption = true
 }
 
-data "aws_ssm_parameter" "grafana_admin_password" {
-  name            = "/${local.project}/${local.environment}/monitoring/grafana_password"
-  with_decryption = true
-}
 
 resource "aws_secretsmanager_secret" "app" {
   name                    = "${local.project}/${local.environment}/app-secrets"
@@ -223,9 +220,7 @@ module "ecs_blue" {
   api_image                     = local.active_slot == "blue" ? var.api_image : var.previous_api_image
   worker_image                  = local.active_slot == "blue" ? var.worker_image : var.previous_worker_image
   git_commit                    = var.git_commit
-  vpc_id                        = module.vpc.vpc_id
   private_app_subnet_ids        = module.vpc.private_app_subnet_ids
-  public_subnet_ids             = module.vpc.public_subnet_ids
   api_sg_id                     = module.security_groups.api_sg_id
   worker_sg_id                  = module.security_groups.worker_sg_id
   ecs_execution_role_arn        = module.iam.ecs_execution_role_arn
@@ -261,9 +256,7 @@ module "ecs_green" {
   api_image                     = local.active_slot == "green" ? var.api_image : var.previous_api_image
   worker_image                  = local.active_slot == "green" ? var.worker_image : var.previous_worker_image
   git_commit                    = var.git_commit
-  vpc_id                        = module.vpc.vpc_id
   private_app_subnet_ids        = module.vpc.private_app_subnet_ids
-  public_subnet_ids             = module.vpc.public_subnet_ids
   api_sg_id                     = module.security_groups.api_sg_id
   worker_sg_id                  = module.security_groups.worker_sg_id
   ecs_execution_role_arn        = module.iam.ecs_execution_role_arn
@@ -293,21 +286,14 @@ module "ecs_green" {
 module "monitoring" {
   source = "../../modules/monitoring"
 
-  project                = local.project
-  environment            = local.environment
-  aws_region             = var.aws_region
-  vpc_id                 = module.vpc.vpc_id
-  public_subnet_id       = module.vpc.public_subnet_ids[0]
-  monitoring_sg_id       = module.security_groups.monitoring_sg_id
-  ecs_cluster_name       = module.ecs_blue.cluster_name
-  grafana_admin_password = data.aws_ssm_parameter.grafana_admin_password.value
-  cloudwatch_log_groups = [
-    "/ecs/${local.project}/${local.environment}-blue/api",
-    "/ecs/${local.project}/${local.environment}-green/api",
-    "/ecs/${local.project}/${local.environment}-blue/worker",
-    "/ecs/${local.project}/${local.environment}-green/worker",
-  ]
-  common_tags = local.common_tags
+  project          = local.project
+  environment      = local.environment
+  aws_region       = var.aws_region
+  public_subnet_id = module.vpc.public_subnet_ids[0]
+  monitoring_sg_id = module.security_groups.monitoring_sg_id
+  ecs_cluster_name = module.ecs_blue.cluster_name
+  state_bucket     = var.tf_state_bucket
+  common_tags      = local.common_tags
 
   depends_on = [
     module.ecs_blue,
