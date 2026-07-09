@@ -380,9 +380,18 @@ jobs:
           echo "   Infra jobs: ${{ needs.terraform-lint.result }}"
 
       - name: Trigger deploy pipeline
+        # Deploys cost real AWS money — dependency bumps should run CI but
+        # never auto-deploy. Covers all three merge styles of a Dependabot PR:
+        # squash ("chore(deps): ..."), merge commit ("Merge pull request ...
+        # from <org>/dependabot/..."), and direct dependabot pushes.
+        # An explicit [skip deploy] in the head commit message also skips it.
         if: |
           github.event_name == 'push' &&
-          (github.ref_name == 'dev' || github.ref_name == 'staging' || github.ref_name == 'main')
+          (github.ref_name == 'dev' || github.ref_name == 'staging' || github.ref_name == 'main') &&
+          github.actor != 'dependabot[bot]' &&
+          !startsWith(github.event.head_commit.message, 'chore(deps)') &&
+          !contains(github.event.head_commit.message, 'dependabot/') &&
+          !contains(github.event.head_commit.message, '[skip deploy]')
         uses: actions/github-script@v9
         with:
           script: |
@@ -401,3 +410,15 @@ jobs:
               }
             });
             console.log(`🚀 Deploy triggered for ${branch} → ${environment}`);
+
+      - name: Deploy dispatch skipped (dependency bump or [skip deploy])
+        if: |
+          github.event_name == 'push' &&
+          (github.ref_name == 'dev' || github.ref_name == 'staging' || github.ref_name == 'main') &&
+          (github.actor == 'dependabot[bot]' ||
+           startsWith(github.event.head_commit.message, 'chore(deps)') ||
+           contains(github.event.head_commit.message, 'dependabot/') ||
+           contains(github.event.head_commit.message, '[skip deploy]'))
+        run: |
+          echo "⏭️  CI passed but deploy was NOT dispatched — dependency bump or [skip deploy] marker." | tee -a $GITHUB_STEP_SUMMARY
+          echo "Run deploy.yml manually (Actions → Deploy → Run workflow) if this change should ship." | tee -a $GITHUB_STEP_SUMMARY

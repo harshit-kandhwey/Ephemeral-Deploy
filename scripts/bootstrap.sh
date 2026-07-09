@@ -18,19 +18,28 @@
 #   SSM parameters  skips any parameter that already exists; never overwrites secrets
 #
 # Usage (run from repo root):
-#   export GITHUB_ORG=your-github-username
-#   export GITHUB_REPO=Ephemeral-Deploy    # exact repo name on GitHub
-#   export ENV=dev                          # dev or prod
+#   export GITHUB_ORG=your-github-username   # optional — derived from git remote if unset
+#   export GITHUB_REPO=Ephemeral-Deploy      # exact repo name on GitHub
+#   export ENV=staging                       # dev | staging | prod — prompted if unset
 #   make bootstrap
 #     OR
-#   MSYS_NO_PATHCONV=1 AWS_REGION=us-east-1 bash scripts/bootstrap.sh
+#   AWS_REGION=us-east-1 bash scripts/bootstrap.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
+
+# Git Bash / MSYS on Windows rewrites any argument that starts with "/" into a
+# Windows path (--name "/nexusdeploy/..." becomes "C:/Program Files/Git/nexusdeploy/...").
+# That silently corrupts every SSM parameter name passed to the AWS CLI —
+# put-parameter then fails with "Parameter name must be a fully qualified name"
+# and the exists-checks never match. Nothing in this script needs the
+# conversion, so disable it for everything the script runs.
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL="*"
 
 # ── Config ────────────────────────────────────
 REGION="${AWS_REGION:-us-east-1}"
 PROJECT="${PROJECT:-nexusdeploy}"
-ENV="${ENV:-dev}"
+ENV="${ENV:-}"
 STATE_BUCKET="${PROJECT}-terraform-state"
 LOCK_TABLE="${PROJECT}-terraform-locks"
 GITHUB_ORG="${GITHUB_ORG:-}"
@@ -49,6 +58,32 @@ log_warn()    { echo -e "${YELLOW}[WARN]${NC}  $1"; }
 log_error()   { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 # ── Pre-flight checks ─────────────────────────
+# Environment: taken from $ENV when exported, otherwise prompted.
+# Everything env-specific below (SSM paths, summary) keys off this value;
+# the S3 bucket, DynamoDB lock table, OIDC provider and deploy role are
+# shared across environments and created/verified on every run.
+until [[ "$ENV" == "dev" || "$ENV" == "staging" || "$ENV" == "prod" ]]; do
+  if [[ -n "$ENV" ]]; then
+    log_warn "Invalid environment '$ENV' — must be dev, staging, or prod"
+  fi
+  read -rp " Target environment (dev/staging/prod): " ENV
+  ENV="${ENV//$'\r'/}" # strip CR from Windows terminals
+done
+
+# GitHub org: use $GITHUB_ORG when exported, else derive from the git remote,
+# else prompt.
+if [[ -z "$GITHUB_ORG" ]]; then
+  ORIGIN_URL=$(git config --get remote.origin.url 2>/dev/null || echo "")
+  if [[ "$ORIGIN_URL" =~ github\.com[:/]([^/]+)/([^/.]+) ]]; then
+    GITHUB_ORG="${BASH_REMATCH[1]}"
+    GITHUB_REPO="${BASH_REMATCH[2]}"
+    log_info "GitHub repo derived from git remote: $GITHUB_ORG/$GITHUB_REPO"
+  fi
+fi
+if [[ -z "$GITHUB_ORG" ]]; then
+  read -rp " GitHub org/username: " GITHUB_ORG
+  GITHUB_ORG="${GITHUB_ORG//$'\r'/}"
+fi
 if [[ -z "$GITHUB_ORG" ]]; then
   log_error "GITHUB_ORG is not set.\n  Run: export GITHUB_ORG=your-github-username"
 fi
@@ -827,19 +862,32 @@ create_ssm_param() {
     return 0
   fi
 
-  if [[ "$secure" == "true" ]]; then
-    read -rsp "  [$param_type] $path  ($description): " value
-  else
-    read -rp  "  [$param_type] $path  ($description): " value
-  fi
-  echo ""
+  while :; do
+    if [[ "$secure" == "true" ]]; then
+      read -rsp "  [$param_type] $path  ($description): " value
+    else
+      read -rp  "  [$param_type] $path  ($description): " value
+    fi
+    echo ""
+    value="${value//$'\r'/}" # strip CR from Windows terminals
 
-  if [[ -z "$value" ]]; then
-    log_warn "  Skipped (empty input): $path"
-    return 0
-  fi
+    if [[ -z "$value" ]]; then
+      log_warn "  Skipped (empty input): $path"
+      return 0
+    fi
 
-  aws ssm put-parameter     --name "$path"     --value "$value"     --type "$param_type"     --description "$description"     --region "$REGION"     --no-cli-pager
+    # RDS rejects passwords containing / @ " or spaces — catch it here
+    # instead of failing the RDS create 20 minutes into the first deploy.
+    if [[ "$path" == */db/*password* && "$value" =~ [/@\"[:space:]] ]]; then
+      log_warn "  RDS passwords must not contain / @ \" or spaces — try again"
+      continue
+    fi
+    break
+  done
+
+  if ! aws ssm put-parameter     --name "$path"     --value "$value"     --type "$param_type"     --description "$description"     --region "$REGION"     --no-cli-pager; then
+    log_error "Failed to store $path — see the AWS error above (nothing after this parameter was created; re-run bootstrap to resume)"
+  fi
   # Tag separately — avoids MSYS path conversion mangling Key=Value on Windows
   aws ssm add-tags-to-resource     --resource-type "Parameter"     --resource-id "$path"     --tags "Key=Project,Value=$PROJECT" "Key=Environment,Value=$ENV" "Key=ManagedBy,Value=bootstrap"     --region "$REGION"     --no-cli-pager 2>/dev/null || true
   log_success "  Stored: $path"
@@ -873,14 +921,15 @@ echo "     Name:  AWS_DEPLOY_ROLE_ARN"
 echo "     Value: $ROLE_ARN"
 echo ""
 echo "  2. Create GitHub Environments (Settings → Environments):"
-echo "     • dev  — no approval gate"
-echo "     • prod — enable Required reviewers (add yourself)"
+echo "     • dev     — no approval gate"
+echo "     • staging — no approval gate; add variable MONITORING_ALLOWED_CIDR (your IP, e.g. 1.2.3.4/32)"
+echo "     • prod    — enable Required reviewers (add yourself); add variable MONITORING_ALLOWED_CIDR"
 echo ""
-echo "  3. Verify terraform.tfvars in both environments:"
-echo "     terraform/environments/dev/terraform.tfvars"
+echo "  3. Verify terraform.tfvars for the environment you bootstrapped:"
+echo "     terraform/environments/$ENV/terraform.tfvars"
 echo "       github_org  = \"$GITHUB_ORG\""
 echo "       github_repo = \"$GITHUB_REPO\""
 echo ""
 echo "  4. Push to trigger your first deployment:"
-echo "     git push origin dev"
+echo "     git push origin $ENV"
 echo ""
