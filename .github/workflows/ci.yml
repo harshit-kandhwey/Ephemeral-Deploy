@@ -313,6 +313,9 @@ jobs:
           TF_VAR_api_image: "placeholder"
           TF_VAR_worker_image: "placeholder"
           TF_VAR_git_commit: "ci-validate"
+          # Required by staging/prod; dev doesn't declare it — a TF_VAR env var
+          # is silently ignored there, unlike -var which is a hard error
+          TF_VAR_monitoring_allowed_cidr: "[]"
         run: |
           mkdir -p "$TF_PLUGIN_CACHE_DIR"
           for env in dev staging prod; do
@@ -322,13 +325,12 @@ jobs:
             terraform validate
             # plan -refresh=false catches templatefile() and function errors
             # that validate misses — no real AWS calls made with -backend=false
-            terraform plan -refresh=false \
+            terraform plan -refresh=false -input=false \
               -var-file=terraform.tfvars \
               -var="aws_region=us-east-1" \
               -var="tf_state_bucket=nexusdeploy-terraform-state" \
               -var="app_s3_bucket=nexusdeploy-attachments-${env}" \
               -var="db_name=nexusdeploy" \
-              -var='monitoring_allowed_cidr=[]' \
               2>&1 | grep -E "^Error:|^Warning:|Plan:|will be created|will be destroyed" || true
             cd ../../..
           done

@@ -87,6 +87,7 @@ jobs:
         working-directory: terraform/environments/${{ env.TF_ENV }}
         run: |
           terraform init \
+            -input=false \
             -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
             -backend-config="key=${{ env.TF_ENV }}/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" \
@@ -107,13 +108,17 @@ jobs:
           echo "🔥 Starting Terraform destroy for ${{ env.TF_ENV }}..."
 
           # dev uses a single module.ecs; staging/prod use blue-green split modules
-          if [[ "${{ env.TF_ENV }}" == "staging" ]]; then
-            ECS_TARGETS="-target=module.ecs_blue -target=module.ecs_green"
+          # plus an active_slot SSM parameter that must be destroyed too — the
+          # state file is wiped afterwards, so anything skipped here becomes an
+          # orphan that fails the next deploy with ParameterAlreadyExists.
+          if [[ "${{ env.TF_ENV }}" == "staging" || "${{ env.TF_ENV }}" == "prod" ]]; then
+            ECS_TARGETS="-target=module.ecs_blue -target=module.ecs_green -target=aws_ssm_parameter.active_slot"
           else
             ECS_TARGETS="-target=module.ecs"
           fi
 
           terraform destroy \
+            -input=false \
             -var-file="terraform.tfvars" \
             -auto-approve \
             -no-color \
@@ -222,17 +227,24 @@ jobs:
     name: Drain old slot (${{ github.event.inputs.old_slot }})
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'drain_old_slot'
+    # Sleep chunk (max 300 min) + drain must finish inside GitHub's 360-min job limit
+    timeout-minutes: 350
     environment: ${{ github.event.inputs.environment }}
 
     permissions:
       id-token: write
       contents: read
+      actions: write # needed to re-dispatch itself when delay > 300 min
 
     env:
       TF_ENV: ${{ github.event.inputs.environment }}
 
     steps:
+      # GitHub kills hosted-runner jobs at 360 min, so prod's 24h drain delay
+      # cannot sleep in a single job. Sleep at most 300 min per run; if delay
+      # remains, re-dispatch this workflow with the remainder and skip the drain.
       - name: Wait for delay
+        id: wait
         if: github.event.inputs.delay_minutes != '0' && github.event.inputs.delay_minutes != ''
         run: |
           DELAY='${{ github.event.inputs.delay_minutes || 0 }}'
@@ -240,11 +252,42 @@ jobs:
             echo "❌ Invalid delay_minutes: must be a non-negative integer, got: $DELAY"
             exit 1
           fi
-          echo "⏳ Waiting ${DELAY} minutes before draining old slot..."
-          echo "Reason: ${{ github.event.inputs.reason }}"
-          sleep $((DELAY * 60))
+          MAX_CHUNK=300
+          if (( DELAY > MAX_CHUNK )); then
+            echo "⏳ Delay ${DELAY} min exceeds job limit — sleeping ${MAX_CHUNK} min, then re-dispatching for the remaining $((DELAY - MAX_CHUNK)) min"
+            echo "Reason: ${{ github.event.inputs.reason }}"
+            sleep $((MAX_CHUNK * 60))
+            echo "remaining=$((DELAY - MAX_CHUNK))" >> $GITHUB_OUTPUT
+            echo "drain_now=false" >> $GITHUB_OUTPUT
+          else
+            echo "⏳ Waiting ${DELAY} minutes before draining old slot..."
+            echo "Reason: ${{ github.event.inputs.reason }}"
+            sleep $((DELAY * 60))
+            echo "drain_now=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Re-dispatch drain with remaining delay
+        if: steps.wait.outputs.drain_now == 'false'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'cleanup.yml',
+              ref: context.ref,
+              inputs: {
+                environment: '${{ github.event.inputs.environment }}',
+                action: 'drain_old_slot',
+                old_slot: '${{ github.event.inputs.old_slot }}',
+                delay_minutes: '${{ steps.wait.outputs.remaining }}',
+                reason: '${{ github.event.inputs.reason }}'
+              }
+            });
+            console.log('🔁 Drain re-dispatched with ${{ steps.wait.outputs.remaining }} min remaining');
 
       - name: Configure AWS credentials (OIDC)
+        if: steps.wait.outputs.drain_now != 'false'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
@@ -252,6 +295,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Scale down old slot
+        if: steps.wait.outputs.drain_now != 'false'
         run: |
           OLD_SLOT="${{ github.event.inputs.old_slot }}"
           ENV="${{ env.TF_ENV }}"
@@ -278,7 +322,7 @@ jobs:
           echo "✅ Old slot $OLD_SLOT drained"
 
       - name: Drain summary
-        if: always()
+        if: always() && steps.wait.outputs.drain_now != 'false'
         run: |
           echo "## 🔻 Blue-Green Old Slot Drained" >> $GITHUB_STEP_SUMMARY
           echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
