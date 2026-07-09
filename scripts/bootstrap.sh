@@ -87,6 +87,15 @@ fi
 if [[ -z "$GITHUB_ORG" ]]; then
   log_error "GITHUB_ORG is not set.\n  Run: export GITHUB_ORG=your-github-username"
 fi
+# GITHUB_REPO defaults to Ephemeral-Deploy in the config block; only empty
+# if the caller explicitly exported GITHUB_REPO=""
+if [[ -z "$GITHUB_REPO" ]]; then
+  read -rp " GitHub repo name: " GITHUB_REPO
+  GITHUB_REPO="${GITHUB_REPO//$'\r'/}"
+fi
+if [[ -z "$GITHUB_REPO" ]]; then
+  log_error "GITHUB_REPO is not set.\n  Run: export GITHUB_REPO=your-repo-name"
+fi
 
 echo ""
 echo "════════════════════════════════════════════════════════"
@@ -832,7 +841,8 @@ else
 echo "════════════════════════════════════════════════════════"
 echo " SSM Secrets Setup — ENV=$ENV"
 echo " You will be prompted for each value."
-echo " Press Enter to skip any that are already set."
+echo " Parameters that already exist are skipped automatically;"
+echo " you will only be prompted for the missing ones."
 echo "════════════════════════════════════════════════════════"
 echo ""
 
@@ -871,9 +881,13 @@ create_ssm_param() {
     echo ""
     value="${value//$'\r'/}" # strip CR from Windows terminals
 
+    # Every parameter here is read by a Terraform data source at deploy
+    # time — skipping a missing one only defers the failure into the
+    # workflow, so re-prompt instead of silently continuing.
     if [[ -z "$value" ]]; then
-      log_warn "  Skipped (empty input): $path"
-      return 0
+      log_warn "  A value is required — $path does not exist yet and Terraform reads it at deploy time"
+      echo    "     (Ctrl+C to abort; bootstrap is idempotent — re-run to resume from here)"
+      continue
     fi
 
     # RDS rejects passwords containing / @ " or spaces — catch it here
