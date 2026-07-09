@@ -67,7 +67,7 @@ jobs:
           role-session-name: Setup-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 2 # needed for git diff HEAD~1 HEAD in changed-files detection
 
@@ -165,7 +165,7 @@ jobs:
       registry: ${{ steps.ecr-login.outputs.registry }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v6
@@ -290,7 +290,7 @@ jobs:
       worker_image: ${{ steps.push.outputs.worker_image }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v6
@@ -358,7 +358,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v6
@@ -664,7 +664,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v6
