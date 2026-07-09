@@ -7,6 +7,13 @@ on:
     branches: [main, dev, staging]
   workflow_dispatch: # allow manual trigger
 
+# One CI run per branch — a newer push cancels the in-progress run for the
+# same ref, so a burst of merges (e.g. several dependabot PRs) doesn't queue
+# a pile of stale runs waiting for hosted runners.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   PYTHON_VERSION: "3.11"
   AWS_REGION: us-east-1
@@ -247,7 +254,9 @@ jobs:
 
       - name: Upload Grype results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v4
-        if: always()
+        # Skip when the scan never ran (e.g. docker build failed) — with a
+        # plain always() this step errored on the missing sarif_file input
+        if: always() && steps.grype.outputs.sarif != ''
         with:
           sarif_file: ${{ steps.grype.outputs.sarif }}
         continue-on-error: true
