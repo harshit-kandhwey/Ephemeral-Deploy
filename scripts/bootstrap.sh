@@ -66,7 +66,10 @@ until [[ "$ENV" == "dev" || "$ENV" == "staging" || "$ENV" == "prod" ]]; do
   if [[ -n "$ENV" ]]; then
     log_warn "Invalid environment '$ENV' — must be dev, staging, or prod"
   fi
-  read -rp " Target environment (dev/staging/prod): " ENV
+  # A failed read means stdin is closed (non-interactive run) — abort instead
+  # of looping forever on empty input.
+  read -rp " Target environment (dev/staging/prod): " ENV \
+    || log_error "No input available — run interactively or: export ENV=dev|staging|prod"
   ENV="${ENV//$'\r'/}" # strip CR from Windows terminals
 done
 
@@ -80,20 +83,22 @@ if [[ -z "$GITHUB_ORG" ]]; then
     log_info "GitHub repo derived from git remote: $GITHUB_ORG/$GITHUB_REPO"
   fi
 fi
-if [[ -z "$GITHUB_ORG" ]]; then
-  read -rp " GitHub org/username: " GITHUB_ORG
+if [[ -z "${GITHUB_ORG//[[:space:]]/}" ]]; then
+  read -rp " GitHub org/username: " GITHUB_ORG \
+    || log_error "No input available — run interactively or: export GITHUB_ORG=your-github-username"
   GITHUB_ORG="${GITHUB_ORG//$'\r'/}"
 fi
-if [[ -z "$GITHUB_ORG" ]]; then
+if [[ -z "${GITHUB_ORG//[[:space:]]/}" ]]; then
   log_error "GITHUB_ORG is not set.\n  Run: export GITHUB_ORG=your-github-username"
 fi
 # GITHUB_REPO defaults to Ephemeral-Deploy in the config block; only empty
 # if the caller explicitly exported GITHUB_REPO=""
-if [[ -z "$GITHUB_REPO" ]]; then
-  read -rp " GitHub repo name: " GITHUB_REPO
+if [[ -z "${GITHUB_REPO//[[:space:]]/}" ]]; then
+  read -rp " GitHub repo name: " GITHUB_REPO \
+    || log_error "No input available — run interactively or: export GITHUB_REPO=your-repo-name"
   GITHUB_REPO="${GITHUB_REPO//$'\r'/}"
 fi
-if [[ -z "$GITHUB_REPO" ]]; then
+if [[ -z "${GITHUB_REPO//[[:space:]]/}" ]]; then
   log_error "GITHUB_REPO is not set.\n  Run: export GITHUB_REPO=your-repo-name"
 fi
 
@@ -866,25 +871,35 @@ create_ssm_param() {
   local param_type
   param_type=$([[ "$secure" == "true" ]] && echo "SecureString" || echo "String")
 
-  # Check if already exists
-  if aws ssm get-parameter --name "$path" --region "$REGION" &>/dev/null; then
+  # Check if already exists — only ParameterNotFound means "missing".
+  # Any other lookup failure (AccessDenied, network) would make put-parameter
+  # fail the same way after prompting, so abort with the real error instead.
+  local lookup_err
+  if lookup_err=$(aws ssm get-parameter --name "$path" --region "$REGION" 2>&1 >/dev/null); then
     log_warn "Already exists — skipping: $path"
     return 0
+  elif [[ "$lookup_err" != *ParameterNotFound* ]]; then
+    log_error "Could not check $path — fix the underlying issue and re-run:\n$lookup_err"
   fi
 
   while :; do
+    # A failed read means stdin is closed (non-interactive run) — abort
+    # instead of looping forever on empty input.
     if [[ "$secure" == "true" ]]; then
-      read -rsp "  [$param_type] $path  ($description): " value
+      read -rsp "  [$param_type] $path  ($description): " value \
+        || log_error "Input stream closed while reading $path — run bootstrap interactively"
     else
-      read -rp  "  [$param_type] $path  ($description): " value
+      read -rp  "  [$param_type] $path  ($description): " value \
+        || log_error "Input stream closed while reading $path — run bootstrap interactively"
     fi
     echo ""
     value="${value//$'\r'/}" # strip CR from Windows terminals
 
     # Every parameter here is read by a Terraform data source at deploy
     # time — skipping a missing one only defers the failure into the
-    # workflow, so re-prompt instead of silently continuing.
-    if [[ -z "$value" ]]; then
+    # workflow, so re-prompt instead of silently continuing. Whitespace-only
+    # input counts as empty (it would create an unusable parameter).
+    if [[ -z "${value//[[:space:]]/}" ]]; then
       log_warn "  A value is required — $path does not exist yet and Terraform reads it at deploy time"
       echo    "     (Ctrl+C to abort; bootstrap is idempotent — re-run to resume from here)"
       continue

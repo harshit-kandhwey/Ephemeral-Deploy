@@ -4,9 +4,9 @@
 # Same pattern as prod/imports.tf. Bootstrap creates the OIDC provider and
 # deploy role once; staging imports them for reference only.
 #
-# ECR repos for staging are created by ecr-provision in CI (same as dev/prod).
-# Import blocks here ensure first `terraform apply` does not fail if repos
-# already exist from a previous run.
+# ECR repos for staging are created by the ecr-provision job and, when they
+# exist but state was wiped, re-adopted by the deploy job's adopt() step —
+# deliberately NOT via import blocks here (see note at the bottom).
 # ─────────────────────────────────────────────────────────────────────────────
 
 # GitHub Actions deploy IAM role — owned by bootstrap.sh, shared across all envs
