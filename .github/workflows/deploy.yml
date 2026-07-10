@@ -481,6 +481,8 @@ jobs:
           adopt module.iam.aws_iam_role.ecs_execution_worker    "nexusdeploy-dev-ecs-execution-worker"
           adopt module.iam.aws_iam_role.ecs_task                "nexusdeploy-dev-ecs-task"
           adopt module.iam.aws_iam_role.vpc_flow_log            "nexusdeploy-dev-vpc-flow-log"
+          adopt module.ecr.aws_ecr_repository.api               "nexusdeploy-api-dev"
+          adopt module.ecr.aws_ecr_repository.worker            "nexusdeploy-worker-dev"
 
       - name: Terraform Apply — full infrastructure
         timeout-minutes: 30
@@ -773,6 +775,8 @@ jobs:
           adopt module.iam.aws_iam_role.ecs_task                "nexusdeploy-staging-ecs-task"
           adopt module.iam.aws_iam_role.vpc_flow_log            "nexusdeploy-staging-vpc-flow-log"
           adopt aws_ssm_parameter.active_slot                   "/nexusdeploy/staging/deployment/active_slot"
+          adopt module.ecr.aws_ecr_repository.api               "nexusdeploy-api-staging"
+          adopt module.ecr.aws_ecr_repository.worker            "nexusdeploy-worker-staging"
 
       - name: Read active deployment slot from SSM
         id: slot
@@ -1150,6 +1154,8 @@ jobs:
           adopt module.iam.aws_iam_role.ecs_task                "nexusdeploy-prod-ecs-task"
           adopt module.iam.aws_iam_role.vpc_flow_log            "nexusdeploy-prod-vpc-flow-log"
           adopt aws_ssm_parameter.active_slot                   "/nexusdeploy/prod/deployment/active_slot"
+          adopt module.ecr.aws_ecr_repository.api               "nexusdeploy-api-prod"
+          adopt module.ecr.aws_ecr_repository.worker            "nexusdeploy-worker-prod"
 
       # ── Step 1: Read current active slot ──
       - name: Read active deployment slot from SSM

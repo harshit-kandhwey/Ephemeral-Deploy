@@ -26,13 +26,8 @@ import {
   id = "nexusdeploy-github-actions-deploy:nexusdeploy-github-actions-deploy-2"
 }
 
-# ECR repositories — staging uses separate repos tagged 'staging'
-import {
-  to = module.ecr.aws_ecr_repository.api
-  id = "nexusdeploy-api-staging"
-}
-
-import {
-  to = module.ecr.aws_ecr_repository.worker
-  id = "nexusdeploy-worker-staging"
-}
+# ECR repositories are managed by the ecr-provision job — NO import blocks here.
+# Import blocks hard-fail when the remote object doesn't exist, and ecr-provision's
+# targeted apply only runs when the repos are missing — exactly when the import
+# would fail. The repos-exist-but-state-wiped case is handled by the tolerant
+# adopt() step (terraform import || true) in deploy.yml instead.
