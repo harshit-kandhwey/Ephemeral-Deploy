@@ -673,6 +673,9 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      # Job-level permissions REPLACE the workflow defaults — without this the
+      # in-job "Schedule old slot drain" dispatch of cleanup.yml gets a 403.
+      actions: write
 
     steps:
       - uses: actions/checkout@v7
@@ -1043,6 +1046,9 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      # Job-level permissions REPLACE the workflow defaults — without this the
+      # in-job "Schedule old slot drain" dispatch of cleanup.yml gets a 403.
+      actions: write
 
     steps:
       - uses: actions/checkout@v7

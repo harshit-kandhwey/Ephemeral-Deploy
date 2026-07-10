@@ -80,7 +80,10 @@ resource "aws_ecs_task_definition" "api" {
       ]
 
       environment = [
-        { name = "ENV", value = var.environment == "dev" ? "development" : var.environment },
+        # ENV selects the app config in config.py, which only defines
+        # development/production/testing — blue-green slot names like
+        # "staging-green" must never leak into it (KeyError at startup).
+        { name = "ENV", value = var.environment == "dev" ? "development" : "production" },
         { name = "VERSION", value = var.git_commit }
       ]
 
@@ -134,13 +137,20 @@ resource "aws_ecs_task_definition" "worker" {
       essential = true
 
       environment = [
-        { name = "ENV", value = var.environment == "dev" ? "development" : var.environment },
+        # ENV selects the app config in config.py, which only defines
+        # development/production/testing — blue-green slot names like
+        # "staging-green" must never leak into it (KeyError at startup).
+        { name = "ENV", value = var.environment == "dev" ? "development" : "production" },
         { name = "VERSION", value = var.git_commit }
       ]
 
       secrets = [
         { name = "DATABASE_URL", valueFrom = "${var.secrets_arn}:DATABASE_URL::" },
         { name = "REDIS_URL", valueFrom = "${var.secrets_arn}:REDIS_URL::" },
+        # create_app validates these in production — the worker and the
+        # init_db one-shot both boot the full Flask app.
+        { name = "SECRET_KEY", valueFrom = "${var.secrets_arn}:SECRET_KEY::" },
+        { name = "JWT_SECRET_KEY", valueFrom = "${var.secrets_arn}:JWT_SECRET_KEY::" },
         { name = "CELERY_BROKER_URL", valueFrom = "${var.secrets_arn}:CELERY_BROKER_URL::" },
         { name = "CELERY_RESULT_BACKEND", valueFrom = "${var.secrets_arn}:CELERY_RESULT_BACKEND::" },
         { name = "DB_MASTER_USER", valueFrom = "${var.init_secrets_arn}:DB_MASTER_USER::" },
@@ -181,12 +191,20 @@ resource "aws_ecs_task_definition" "beat" {
       command   = ["celery", "-A", "src.celery_worker:celery", "beat", "--loglevel=info"]
 
       environment = [
-        { name = "ENV", value = var.environment == "dev" ? "development" : var.environment }
+        # Same rule as api/worker: only development/production are valid here.
+        { name = "ENV", value = var.environment == "dev" ? "development" : "production" }
       ]
 
+      # Beat boots the same Flask app as the worker (create_app validates
+      # SECRET_KEY/JWT in production and wires Redis/Celery), so it needs the
+      # full secret set — not just the broker URL.
       secrets = [
         { name = "DATABASE_URL", valueFrom = "${var.secrets_arn}:DATABASE_URL::" },
-        { name = "CELERY_BROKER_URL", valueFrom = "${var.secrets_arn}:CELERY_BROKER_URL::" }
+        { name = "REDIS_URL", valueFrom = "${var.secrets_arn}:REDIS_URL::" },
+        { name = "SECRET_KEY", valueFrom = "${var.secrets_arn}:SECRET_KEY::" },
+        { name = "JWT_SECRET_KEY", valueFrom = "${var.secrets_arn}:JWT_SECRET_KEY::" },
+        { name = "CELERY_BROKER_URL", valueFrom = "${var.secrets_arn}:CELERY_BROKER_URL::" },
+        { name = "CELERY_RESULT_BACKEND", valueFrom = "${var.secrets_arn}:CELERY_RESULT_BACKEND::" }
       ]
 
       logConfiguration = {
