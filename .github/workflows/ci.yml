@@ -44,6 +44,15 @@ jobs:
       - name: Detect changed paths
         id: filter
         run: |
+          # Manual dispatch = full run. Path filtering only applies to
+          # automatic triggers (push / pull_request).
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "app=true"   >> $GITHUB_OUTPUT
+            echo "infra=true" >> $GITHUB_OUTPUT
+            echo "🖐️ Manual dispatch — running all checks regardless of changed paths"
+            exit 0
+          fi
+
           CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "app/ terraform/")
 
           if echo "$CHANGED" | grep -q "^app/"; then
