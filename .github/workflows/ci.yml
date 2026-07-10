@@ -39,7 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 2
+          # Full history — a multi-commit push is diffed against
+          # github.event.before, which can be many commits back.
+          fetch-depth: 0
 
       - name: Detect changed paths
         id: filter
@@ -53,7 +55,19 @@ jobs:
             exit 0
           fi
 
-          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "app/ terraform/")
+          # Diff the whole trigger range, not just the last commit:
+          #   push         → event.before..HEAD covers every commit in the push
+          #   new branch   → event.before is all zeros — fall back to HEAD~1
+          #   pull_request → HEAD is the synthetic merge commit, so HEAD~1 is
+          #                  the base branch tip and the diff is the full PR
+          # If the diff fails (e.g. force push pruned event.before), fall back
+          # to treating everything as changed — safe, just runs more jobs.
+          BASE="HEAD~1"
+          if [[ "${{ github.event_name }}" == "push" && \
+                "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
+            BASE="${{ github.event.before }}"
+          fi
+          CHANGED=$(git diff --name-only "$BASE" HEAD 2>/dev/null || printf 'app/\nterraform/\n')
 
           if echo "$CHANGED" | grep -q "^app/"; then
             echo "app=true"  >> $GITHUB_OUTPUT
@@ -143,7 +157,7 @@ jobs:
     needs: [detect-changes, lint]
     # Only run when app code changed AND lint passed
     if: |
-      always() &&
+      !cancelled() &&
       needs.detect-changes.outputs.app_changed == 'true' &&
       (needs.lint.result == 'success' || needs.lint.result == 'skipped')
 
@@ -217,7 +231,7 @@ jobs:
     needs: [detect-changes, lint]
     # Parallel with test — only needs lint to pass, not test
     if: |
-      always() &&
+      !cancelled() &&
       needs.detect-changes.outputs.app_changed == 'true' &&
       (needs.lint.result == 'success' || needs.lint.result == 'skipped')
 
@@ -252,7 +266,7 @@ jobs:
           output-format: sarif
 
       - name: Display Grype scan summary
-        if: always()
+        if: ${{ !cancelled() }}
         run: |
           echo "::group::Grype Scan Results"
           cat ${{ steps.grype.outputs.sarif }} \
@@ -264,8 +278,9 @@ jobs:
       - name: Upload Grype results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v4
         # Skip when the scan never ran (e.g. docker build failed) — with a
-        # plain always() this step errored on the missing sarif_file input
-        if: always() && steps.grype.outputs.sarif != ''
+        # plain always() this step errored on the missing sarif_file input.
+        # !cancelled() (not always()) so a superseded run stops here too.
+        if: ${{ !cancelled() && steps.grype.outputs.sarif != '' }}
         with:
           sarif_file: ${{ steps.grype.outputs.sarif }}
         continue-on-error: true
@@ -361,7 +376,10 @@ jobs:
     name: CI Summary
     runs-on: ubuntu-latest
     needs: [detect-changes, lint, test, docker-build, terraform-lint]
-    if: always()
+    # !cancelled(), NOT always(): with always() a run cancelled by
+    # concurrency cancel-in-progress would still reach this job, count the
+    # cancelled jobs as passed, and dispatch a deploy for the stale commit.
+    if: ${{ !cancelled() }}
     steps:
       - name: Check all jobs passed
         run: |
