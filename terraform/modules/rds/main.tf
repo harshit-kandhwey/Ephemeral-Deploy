@@ -54,7 +54,10 @@ resource "aws_db_instance" "main" {
   multi_az                  = var.environment == "prod" # HA with automatic failover in prod
 
   # Storage
-  storage_type      = "gp2"
+  # gp3 over gp2: at this volume size gp2 grants ~3 IOPS/GB (about 100 baseline
+  # for a 20 GB volume), while gp3 provides a flat 3000 IOPS baseline at the
+  # same price. There is no downside at this size.
+  storage_type      = "gp3"
   storage_encrypted = true
 
   # Performance
