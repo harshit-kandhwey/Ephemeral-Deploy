@@ -1,10 +1,11 @@
-from flask import jsonify, request
+from flask import current_app, jsonify, request
 from flask_jwt_extended import get_jwt_identity, jwt_required
 
 from ...extensions import db
 from ...models.team import Team
 from ...models.user import User
 from ...utils.decorators import role_required
+from ...utils.validation import USER_ROLES, ValidationError, get_json_body, validate_password
 from . import api_v1
 
 
@@ -69,9 +70,14 @@ def update_user(user_id):
     if current_user_id != user_id and current_user.role != "admin":
         return jsonify({"error": "Insufficient permissions"}), 403
 
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "No data provided"}), 400
+    try:
+        data = get_json_body(request, required=True)
+        # Password changes here bypass /auth/register, so the policy is enforced
+        # at this entry point too — otherwise it is trivially sidestepped.
+        if "password" in data:
+            validate_password(data["password"], current_app.config["MIN_PASSWORD_LENGTH"])
+    except ValidationError as e:
+        return jsonify({"error": e.message}), 400
 
     if "full_name" in data:
         user.full_name = data["full_name"]
@@ -82,10 +88,9 @@ def update_user(user_id):
     # Only admins may change roles or active status
     if current_user.role == "admin":
         if "role" in data:
-            allowed_roles = ["admin", "manager", "developer"]
-            if data["role"] not in allowed_roles:
+            if data["role"] not in USER_ROLES:
                 return (
-                    jsonify({"error": f'Invalid role. Must be one of: {", ".join(allowed_roles)}'}),
+                    jsonify({"error": f'Invalid role. Must be one of: {", ".join(USER_ROLES)}'}),
                     400,
                 )
             user.role = data["role"]

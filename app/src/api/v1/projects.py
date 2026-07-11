@@ -1,10 +1,19 @@
 from flask import jsonify, request
-from flask_jwt_extended import get_jwt_identity, jwt_required
+from flask_jwt_extended import jwt_required
 
 from ...extensions import db
 from ...models.audit_log import AuditLog
 from ...models.project import Project
+from ...models.team import Team
 from ...utils.decorators import get_current_user_or_401, role_required
+from ...utils.validation import (
+    PROJECT_STATUSES,
+    ValidationError,
+    get_json_body,
+    require_fields,
+    resolve_entity,
+    validate_choice,
+)
 from . import api_v1
 
 
@@ -115,16 +124,26 @@ def create_project():
       201:
         description: Project created
     """
-    user_id = get_jwt_identity()
-    data = request.get_json()
+    user, error_response = get_current_user_or_401()
+    if error_response:
+        return error_response
 
-    if not data or "name" not in data or "team_id" not in data:
-        return jsonify({"error": "Missing required fields"}), 400
+    user_id = user.id
+
+    try:
+        data = get_json_body(request, required=True)
+        require_fields(data, "name", "team_id")
+
+        # An unknown team_id would otherwise reach the DB as a foreign-key
+        # violation — an IntegrityError and a 500 rather than a 400.
+        team = resolve_entity(db.session, Team, data["team_id"], "team_id")
+    except ValidationError as e:
+        return jsonify({"error": e.message}), 400
 
     project = Project(
         name=data["name"],
         description=data.get("description", ""),
-        team_id=data["team_id"],
+        team_id=team.id,
     )
 
     db.session.add(project)
@@ -185,9 +204,12 @@ def update_project(project_id):
     if user.role != "admin" and (not user.team or project.team_id != user.team.id):
         return jsonify({"error": "Access denied"}), 403
 
-    data = request.get_json(silent=True)
-    if not data:
-        return jsonify({"error": "No data provided"}), 400
+    try:
+        data = get_json_body(request, required=True)
+        if "status" in data:
+            validate_choice(data["status"], PROJECT_STATUSES, "status")
+    except ValidationError as e:
+        return jsonify({"error": e.message}), 400
 
     changes = {}
     if "name" in data:

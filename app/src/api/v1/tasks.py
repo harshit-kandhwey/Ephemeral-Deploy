@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from flask import jsonify, request
-from flask_jwt_extended import get_jwt_identity, jwt_required
+from flask_jwt_extended import jwt_required
 
 from ...extensions import db
 from ...models.audit_log import AuditLog
@@ -9,6 +9,16 @@ from ...models.project import Project
 from ...models.task import Task
 from ...models.user import User
 from ...utils.decorators import get_current_user_or_401, role_required
+from ...utils.validation import (
+    TASK_PRIORITIES,
+    TASK_STATUSES,
+    ValidationError,
+    get_json_body,
+    parse_datetime,
+    require_fields,
+    resolve_entity,
+    validate_choice,
+)
 from . import api_v1
 
 
@@ -47,16 +57,16 @@ def get_tasks():
       200:
         description: List of tasks
     """
-    user_id = get_jwt_identity()
-    user = db.session.get(User, user_id)
-
-    if not user:
-        return jsonify({"error": "User not found"}), 401
+    user, error_response = get_current_user_or_401()
+    if error_response:
+        return error_response
 
     # Base query
     query = Task.query
 
-    # Filters
+    # Filters. The id filters are coerced with type=int: passing the raw string
+    # through to the query sends a non-numeric value to an integer column, which
+    # Postgres rejects with a DataError — a 500 for what is really a bad request.
     if request.args.get("status"):
         query = query.filter_by(status=request.args.get("status"))
 
@@ -64,10 +74,16 @@ def get_tasks():
         query = query.filter_by(priority=request.args.get("priority"))
 
     if request.args.get("project_id"):
-        query = query.filter_by(project_id=request.args.get("project_id"))
+        project_id = request.args.get("project_id", type=int)
+        if project_id is None:
+            return jsonify({"error": "project_id must be an integer"}), 400
+        query = query.filter_by(project_id=project_id)
 
     if request.args.get("assignee_id"):
-        query = query.filter_by(assignee_id=request.args.get("assignee_id"))
+        assignee_id = request.args.get("assignee_id", type=int)
+        if assignee_id is None:
+            return jsonify({"error": "assignee_id must be an integer"}), 400
+        query = query.filter_by(assignee_id=assignee_id)
 
     # If not admin, only show tasks from user's team projects
     if user.role != "admin":
@@ -75,8 +91,8 @@ def get_tasks():
         query = query.filter(Task.project_id.in_(team_project_ids))
 
     # Pagination
-    page = request.args.get("page", 1, type=int)
-    per_page = min(request.args.get("per_page", 20, type=int), 100)
+    page = max(request.args.get("page", 1, type=int) or 1, 1)
+    per_page = max(1, min(request.args.get("per_page", 20, type=int) or 20, 100))
 
     tasks = query.order_by(Task.created_at.desc()).paginate(page=page, per_page=per_page, error_out=False)
 
@@ -171,26 +187,39 @@ def create_task():
         return error_response
 
     user_id = user.id
-    data = request.get_json()
 
-    if not data or "title" not in data or "project_id" not in data:
-        return jsonify({"error": "Missing required fields"}), 400
+    try:
+        data = get_json_body(request, required=True)
+        require_fields(data, "title", "project_id")
 
-    project = db.get_or_404(Project, data["project_id"])
+        # Resolve the project first: an unknown project_id would otherwise reach
+        # the DB as a foreign-key violation (500) instead of a 400.
+        project = resolve_entity(db.session, Project, data["project_id"], "project_id")
+
+        priority = validate_choice(data.get("priority", "medium"), TASK_PRIORITIES, "priority")
+        status = validate_choice(data.get("status", "todo"), TASK_STATUSES, "status")
+
+        assignee_id = None
+        if data.get("assignee_id") is not None:
+            assignee_id = resolve_entity(db.session, User, data["assignee_id"], "assignee_id").id
+
+        due_date = parse_datetime(data["due_date"], "due_date") if data.get("due_date") else None
+    except ValidationError as e:
+        return jsonify({"error": e.message}), 400
+
     if user.role != "admin" and (not user.team or project.team_id != user.team.id):
         return jsonify({"error": "Access denied"}), 403
 
     task = Task(
         title=data["title"],
         description=data.get("description", ""),
-        priority=data.get("priority", "medium"),
-        project_id=data["project_id"],
+        priority=priority,
+        status=status,
+        project_id=project.id,
         creator_id=user_id,
-        assignee_id=data.get("assignee_id"),
+        assignee_id=assignee_id,
+        due_date=due_date,
     )
-
-    if data.get("due_date"):
-        task.due_date = datetime.fromisoformat(data["due_date"])
 
     db.session.add(task)
     db.session.commit()
@@ -260,7 +289,23 @@ def update_task(task_id):
     if user.role != "admin" and (not user.team or task.project.team_id != user.team.id):
         return jsonify({"error": "Access denied"}), 403
 
-    data = request.get_json()
+    # A body of `null` parses to None, and `"title" in None` raises TypeError —
+    # a 500 on what is simply an empty request.
+    try:
+        data = get_json_body(request, required=True)
+
+        # Validate everything before mutating the task, so a bad field late in
+        # the body cannot leave the task half-updated.
+        if "status" in data:
+            validate_choice(data["status"], TASK_STATUSES, "status")
+        if "priority" in data:
+            validate_choice(data["priority"], TASK_PRIORITIES, "priority")
+        if "due_date" in data and data["due_date"] is not None:
+            parse_datetime(data["due_date"], "due_date")
+        if data.get("assignee_id") is not None:
+            resolve_entity(db.session, User, data["assignee_id"], "assignee_id")
+    except ValidationError as e:
+        return jsonify({"error": e.message}), 400
 
     changes = {}
 
@@ -282,6 +327,9 @@ def update_task(task_id):
     if "priority" in data:
         changes["priority"] = {"old": task.priority, "new": data["priority"]}
         task.priority = data["priority"]
+
+    if "due_date" in data:
+        task.due_date = parse_datetime(data["due_date"], "due_date") if data["due_date"] else None
 
     if "assignee_id" in data:
         old_assignee = task.assignee_id

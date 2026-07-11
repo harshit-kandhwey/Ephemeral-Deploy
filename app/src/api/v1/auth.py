@@ -7,6 +7,7 @@ from flask_jwt_extended import create_access_token, create_refresh_token, get_jw
 from ...extensions import db, limiter, redis_client
 from ...models.audit_log import AuditLog
 from ...models.user import User
+from ...utils.validation import ValidationError, get_json_body, require_fields, validate_password
 from . import api_v1
 
 
@@ -43,11 +44,12 @@ def register():
       400:
         description: Validation error
     """
-    data = request.get_json()
-
-    # Validation
-    if not data or not all(k in data for k in ["email", "username", "password"]):
-        return jsonify({"error": "Missing required fields"}), 400
+    try:
+        data = get_json_body(request, required=True)
+        require_fields(data, "email", "username", "password")
+        validate_password(data["password"], current_app.config["MIN_PASSWORD_LENGTH"])
+    except ValidationError as e:
+        return jsonify({"error": e.message}), 400
 
     # Check if user exists
     if User.query.filter_by(email=data["email"]).first():
@@ -118,14 +120,31 @@ def login():
       401:
         description: Invalid credentials
     """
-    data = request.get_json()
-
-    if not data or not all(k in data for k in ["username", "password"]):
-        return jsonify({"error": "Missing username or password"}), 400
+    try:
+        data = get_json_body(request, required=True)
+        require_fields(data, "username", "password")
+    except ValidationError as e:
+        return jsonify({"error": e.message}), 400
 
     user = User.query.filter_by(username=data["username"]).first()
 
     if not user or not user.check_password(data["password"]):
+        # Audit failed attempts too — a trail that only records successes cannot
+        # evidence a brute-force attempt. user_id is nullable, but entity_id is
+        # NOT NULL, so an unknown username uses 0 as the "no such user" sentinel
+        # and the attempted name is preserved in `changes` for forensics.
+        # The submitted password is never recorded.
+        audit = AuditLog(
+            user_id=user.id if user else None,
+            action="login_failed",
+            entity_type="auth",
+            entity_id=user.id if user else 0,
+            changes={"username": data["username"]},
+            ip_address=request.remote_addr,
+            user_agent=request.user_agent.string,
+        )
+        db.session.add(audit)
+        db.session.commit()
         return jsonify({"error": "Invalid credentials"}), 401
 
     if not user.is_active:
