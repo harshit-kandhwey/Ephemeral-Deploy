@@ -418,14 +418,16 @@ jobs:
       - name: Trigger deploy pipeline
         # Deploys cost real AWS money — dependency bumps should run CI but
         # never auto-deploy. Covers all three merge styles of a Dependabot PR:
-        # squash ("chore(deps): ..."), merge commit ("Merge pull request ...
-        # from <org>/dependabot/..."), and direct dependabot pushes.
+        # squash ("chore(deps): ..." or "chore(deps-dev): ..."), merge commit
+        # ("Merge pull request ... from <org>/dependabot/..."), and direct
+        # dependabot pushes. The 'chore(deps' prefix (no closing paren) matches
+        # both the deps and deps-dev groups.
         # An explicit [skip deploy] in the head commit message also skips it.
         if: |
           github.event_name == 'push' &&
           (github.ref_name == 'dev' || github.ref_name == 'staging' || github.ref_name == 'main') &&
           github.actor != 'dependabot[bot]' &&
-          !startsWith(github.event.head_commit.message, 'chore(deps)') &&
+          !startsWith(github.event.head_commit.message, 'chore(deps') &&
           !contains(github.event.head_commit.message, 'dependabot/') &&
           !contains(github.event.head_commit.message, '[skip deploy]')
         uses: actions/github-script@v9
@@ -452,7 +454,7 @@ jobs:
           github.event_name == 'push' &&
           (github.ref_name == 'dev' || github.ref_name == 'staging' || github.ref_name == 'main') &&
           (github.actor == 'dependabot[bot]' ||
-           startsWith(github.event.head_commit.message, 'chore(deps)') ||
+           startsWith(github.event.head_commit.message, 'chore(deps') ||
            contains(github.event.head_commit.message, 'dependabot/') ||
            contains(github.event.head_commit.message, '[skip deploy]'))
         run: |

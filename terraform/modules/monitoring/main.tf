@@ -198,7 +198,11 @@ resource "aws_instance" "monitoring" {
   vpc_security_group_ids = [var.monitoring_sg_id]
   iam_instance_profile   = aws_iam_instance_profile.monitoring.name
 
-  user_data = base64encode(templatefile("${path.module}/templates/monitoring-userdata.sh.tpl", {
+  # gzip + base64: cloud-init auto-decompresses gzipped user-data, and EC2
+  # measures the COMPRESSED size against its 16 KB limit. The plain script
+  # exceeds 16 KB (largely repeated box-drawing separators), so base64encode
+  # of the raw text fails aws_instance's 0-16384 validation; gzip crushes it.
+  user_data_base64 = base64gzip(templatefile("${path.module}/templates/monitoring-userdata.sh.tpl", {
     project           = var.project
     environment       = var.environment
     aws_region        = var.aws_region
