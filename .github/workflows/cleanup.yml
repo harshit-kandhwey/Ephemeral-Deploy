@@ -166,14 +166,16 @@ jobs:
       # force a full image rebuild on the next deploy even if app code unchanged.
 
       # ── Step 3: Clean monitoring configs from S3 ────────────────────────
-      # Delete the monitoring config objects uploaded by Terraform.
+      # Delete only THIS environment's monitoring config objects. Configs are
+      # env-scoped under monitoring/config/<env>/, so cleaning one environment
+      # never removes another's — safe when dev and staging run in parallel.
       # The S3 bucket itself is NEVER deleted — it is bootstrap infrastructure
-      # and holds all Terraform state. Only the monitoring/config/ prefix is cleaned.
+      # and holds all Terraform state.
       - name: Clean monitoring config objects from S3
         run: |
-          echo "🧹 Cleaning monitoring config objects from S3..."
-          aws s3 rm             "s3://${{ env.TF_STATE_BUCKET }}/monitoring/config/"             --recursive             --region "${{ env.AWS_REGION }}" 2>/dev/null || true
-          echo "✅ Monitoring configs cleaned (bucket itself preserved)"
+          echo "🧹 Cleaning monitoring config objects for ${{ env.TF_ENV }} from S3..."
+          aws s3 rm             "s3://${{ env.TF_STATE_BUCKET }}/monitoring/config/${{ env.TF_ENV }}/"             --recursive             --region "${{ env.AWS_REGION }}" 2>/dev/null || true
+          echo "✅ Monitoring configs cleaned for ${{ env.TF_ENV }} (bucket + other envs preserved)"
 
       # ── Step 4: Delete Terraform state from S3 ───────────────────────────
       - name: Delete Terraform state from S3

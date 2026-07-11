@@ -15,7 +15,7 @@ terraform {
 data "aws_caller_identity" "current" {}
 # Prometheus + Grafana on EC2 t3.micro (free tier)
 #
-# Config files are stored in S3 (s3://<state_bucket>/monitoring/config/)
+# Config files are stored in S3 (s3://<state_bucket>/monitoring/config/<env>/)
 # and downloaded at EC2 boot time. This keeps user_data under the 16KB limit.
 # ─────────────────────────────────────────────
 
@@ -23,7 +23,11 @@ data "aws_caller_identity" "current" {}
 # These files are downloaded by the EC2 instance at boot via aws s3 cp.
 # Storing them in S3 avoids the 16KB EC2 user_data size limit.
 locals {
-  config_prefix = "monitoring/config"
+  # Env-scoped so each environment's monitoring artifacts are isolated in S3.
+  # This lets a cleanup of one env (aws s3 rm .../monitoring/config/<env>/)
+  # never touch another env's configs — critical when dev and staging run
+  # in parallel.
+  config_prefix = "monitoring/config/${var.environment}"
 
   # Static config files uploaded as-is
   static_config_files = {
@@ -31,6 +35,8 @@ locals {
     "cloudwatch-exporter.yml"    = "${path.module}/files/cloudwatch-exporter.yml"
     "grafana-dashboards.yml"     = "${path.module}/files/grafana-dashboards.yml"
     "nexusdeploy-dashboard.json" = "${path.module}/files/nexusdeploy-dashboard.json"
+    # Static frontend console served by nginx (reverse-proxies /api to ECS tasks)
+    "frontend-index.html" = "${path.module}/files/frontend/index.html"
   }
 
   # Rendered config files using templatefile() — region injected at deploy time

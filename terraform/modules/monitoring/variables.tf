@@ -29,7 +29,7 @@ variable "ecs_cluster_names" {
 }
 
 variable "state_bucket" {
-  description = "S3 bucket name used for Terraform state — monitoring configs are stored here under monitoring/config/"
+  description = "S3 bucket name used for Terraform state — monitoring configs are stored here under monitoring/config/<env>/"
   type        = string
 }
 
