@@ -1,6 +1,12 @@
 # ─────────────────────────────────────────────
-# Dev Environment - Cost-optimized, short-lived
-# Branch: dev → auto-destroys after 30 minutes
+# Staging Environment — mirrors prod exactly
+# Branch: staging
+#
+# Purpose: validate prod deployment patterns before
+# promoting changes to main. Same blue-green strategy,
+# same provider pin, same secrets flow as prod.
+#
+# Manual destroy required — no auto-cleanup TTL.
 # ─────────────────────────────────────────────
 
 terraform {
@@ -9,18 +15,13 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "~> 5.40.0" # Pinned — same as prod for parity
     }
   }
 
-  # ── Remote State Backend ──────────────────
-  # State stored in S3 per environment.
-  # Bucket/key/region passed via -backend-config flags in CI/CD (deploy.yml).
-  #
   backend "s3" {
-    # All values passed via -backend-config in deploy.yml:
     # -backend-config="bucket=nexusdeploy-terraform-state"
-    # -backend-config="key=dev/terraform.tfstate"
+    # -backend-config="key=staging/terraform.tfstate"
     # -backend-config="region=us-east-1"
     # -backend-config="encrypt=true"
     # -backend-config="dynamodb_table=nexusdeploy-terraform-locks"
@@ -30,18 +31,16 @@ terraform {
 provider "aws" {
   region = var.aws_region
 
-  # All resources automatically get these tags via provider default_tags.
-  # This is critical - the cleanup script uses these tags to find and
-  # delete every resource if terraform destroy fails.
   default_tags {
     tags = local.common_tags
   }
 }
 
-# ── Locals ────────────────────────────────────
 locals {
-  environment = "dev"
+  environment = "staging"
   project     = "nexusdeploy"
+
+  active_slot = var.deployment_slot # "slot1" or "slot2"
 
   common_tags = {
     Project     = local.project
@@ -49,26 +48,13 @@ locals {
     ManagedBy   = "terraform"
     GitCommit   = var.git_commit
     Owner       = "devops-team"
-    TTL         = "30m"
   }
 }
 
-data "aws_caller_identity" "current" {}
-
 # ══════════════════════════════════════════════
-# SECRETS — Zero hardcoded values
-#
-# All credentials follow this flow:
-#   1. bootstrap.sh creates SSM SecureString parameters (run once manually)
-#   2. Terraform reads them via data sources (never stored in .tf or .tfvars)
-#   3. Terraform builds Secrets Manager secret from SSM values
-#   4. ECS injects Secrets Manager values as env vars at container launch
-#   5. App code reads standard env vars — has no knowledge of AWS
-#
-# DB has two users:
-#   master_user  → RDS superuser (only used by Terraform / init scripts)
-#   app_user     → Limited-privilege user the Flask app connects as
-#                  Created by the db-init ECS task on first boot
+# SECRETS — SSM → Secrets Manager → ECS injection
+# Same flow as prod. Bootstrap must be run for staging
+# before first deploy: ./scripts/bootstrap.sh --env staging
 # ══════════════════════════════════════════════
 
 data "aws_ssm_parameter" "db_master_username" {
@@ -101,25 +87,17 @@ data "aws_ssm_parameter" "jwt_secret_key" {
   with_decryption = true
 }
 
-data "aws_ssm_parameter" "grafana_admin_password" {
-  name            = "/${local.project}/${local.environment}/monitoring/grafana_password"
-  with_decryption = true
-}
 
-# ── Secrets Manager (ECS runtime injection) ──
 resource "aws_secretsmanager_secret" "app" {
   name                    = "${local.project}/${local.environment}/app-secrets"
   description             = "Runtime secrets injected by ECS at container launch"
-  recovery_window_in_days = 0 # Instant deletion in dev (no 30-day hold)
+  recovery_window_in_days = 0 # Instant deletion — staging is ephemeral (torn down like dev); a 7-day hold traps the name and blocks re-apply
   tags                    = local.common_tags
 }
 
 resource "aws_secretsmanager_secret_version" "app" {
   secret_id = aws_secretsmanager_secret.app.id
 
-  # All values sourced from SSM - zero hardcoding
-  # DB_MASTER_USER/PASSWORD intentionally excluded — injected only into the
-  # worker init task via a separate init-secrets secret (see below).
   secret_string = jsonencode({
     DATABASE_URL          = "postgresql://${data.aws_ssm_parameter.db_app_username.value}:${data.aws_ssm_parameter.db_app_password.value}@${module.rds.db_endpoint}/${var.db_name}?sslmode=require"
     REDIS_URL             = "redis://${module.elasticache.redis_endpoint}:6379/0"
@@ -134,11 +112,10 @@ resource "aws_secretsmanager_secret_version" "app" {
   })
 }
 
-# ── Init secrets (DB master credentials for worker startup only) ─
 resource "aws_secretsmanager_secret" "init" {
   name                    = "${local.project}/${local.environment}/init-secrets"
   description             = "DB master credentials for worker DB initialisation only"
-  recovery_window_in_days = 0 # Instant deletion in dev
+  recovery_window_in_days = 0 # Instant deletion — staging is ephemeral (torn down like dev)
   tags                    = local.common_tags
 }
 
@@ -166,7 +143,7 @@ module "iam" {
   app_s3_bucket        = var.app_s3_bucket
   secrets_arn          = aws_secretsmanager_secret.app.arn
   init_secrets_arn     = aws_secretsmanager_secret.init.arn
-  create_oidc_provider = true
+  create_oidc_provider = false # Shared with dev/prod — created once by bootstrap
   common_tags          = local.common_tags
 }
 
@@ -177,11 +154,10 @@ module "vpc" {
   environment           = local.environment
   vpc_cidr              = var.vpc_cidr
   availability_zones    = var.availability_zones
-  enable_nat_gateway    = false # VPC endpoints used instead — saves ~$1/day
-  aws_region            = var.aws_region
+  enable_nat_gateway    = false
   flow_log_role_arn     = module.iam.vpc_flow_log_role_arn
-  flow_log_traffic_type = "REJECT" # Cost-optimised: capture security events only
-  log_retention_days    = 3
+  flow_log_traffic_type = "ALL" # Full visibility — matches prod
+  log_retention_days    = 14
   common_tags           = local.common_tags
 }
 
@@ -193,7 +169,7 @@ module "security_groups" {
   vpc_id                  = module.vpc.vpc_id
   vpc_cidr                = var.vpc_cidr
   monitoring_enabled      = true
-  monitoring_allowed_cidr = ["0.0.0.0/0"]
+  monitoring_allowed_cidr = var.monitoring_allowed_cidr
   common_tags             = local.common_tags
 }
 
@@ -231,14 +207,18 @@ module "elasticache" {
   common_tags              = local.common_tags
 }
 
-module "ecs" {
+# ══════════════════════════════════════════════
+# BLUE-GREEN ECS DEPLOYMENT — same as prod
+# ══════════════════════════════════════════════
+
+module "ecs_slot1" {
   source = "../../modules/ecs"
 
   project                       = local.project
-  environment                   = local.environment
+  environment                   = "${local.environment}-slot1"
   aws_region                    = var.aws_region
-  api_image                     = var.api_image
-  worker_image                  = var.worker_image
+  api_image                     = local.active_slot == "slot1" ? var.api_image : var.previous_api_image
+  worker_image                  = local.active_slot == "slot1" ? var.worker_image : var.previous_worker_image
   git_commit                    = var.git_commit
   private_app_subnet_ids        = module.vpc.private_app_subnet_ids
   api_sg_id                     = module.security_groups.api_sg_id
@@ -248,14 +228,17 @@ module "ecs" {
   ecs_task_role_arn             = module.iam.ecs_task_role_arn
   secrets_arn                   = aws_secretsmanager_secret.app.arn
   init_secrets_arn              = aws_secretsmanager_secret.init.arn
-  log_retention_days            = 3
-  api_cpu                       = 256
-  api_memory                    = 512
-  worker_cpu                    = 256
-  worker_memory                 = 512
-  api_desired_count             = 1
-  worker_desired_count          = 1
-  common_tags                   = local.common_tags
+  log_retention_days            = 14
+
+  api_desired_count    = local.active_slot == "slot1" ? 1 : 0
+  worker_desired_count = local.active_slot == "slot1" ? 1 : 0
+  beat_desired_count   = local.active_slot == "slot1" ? 1 : 0
+  api_cpu              = 256
+  api_memory           = 512
+  worker_cpu           = 256
+  worker_memory        = 512
+
+  common_tags = merge(local.common_tags, { Slot = "slot1" })
 
   depends_on = [
     aws_secretsmanager_secret_version.app,
@@ -265,12 +248,43 @@ module "ecs" {
   ]
 }
 
-# ── Monitoring: Prometheus + Grafana on EC2 ──
-# t3.micro = free tier (750 hrs/month)
-# Dual monitoring strategy:
-#   1. Prometheus scrapes the Flask /metrics endpoint on ECS tasks
-#   2. CloudWatch Logs Insights for log analysis (both use same log groups)
-# Grafana visualizes both data sources in one dashboard
+module "ecs_slot2" {
+  source = "../../modules/ecs"
+
+  project                       = local.project
+  environment                   = "${local.environment}-slot2"
+  aws_region                    = var.aws_region
+  api_image                     = local.active_slot == "slot2" ? var.api_image : var.previous_api_image
+  worker_image                  = local.active_slot == "slot2" ? var.worker_image : var.previous_worker_image
+  git_commit                    = var.git_commit
+  private_app_subnet_ids        = module.vpc.private_app_subnet_ids
+  api_sg_id                     = module.security_groups.api_sg_id
+  worker_sg_id                  = module.security_groups.worker_sg_id
+  ecs_execution_role_arn        = module.iam.ecs_execution_role_arn
+  ecs_execution_worker_role_arn = module.iam.ecs_execution_worker_role_arn
+  ecs_task_role_arn             = module.iam.ecs_task_role_arn
+  secrets_arn                   = aws_secretsmanager_secret.app.arn
+  init_secrets_arn              = aws_secretsmanager_secret.init.arn
+  log_retention_days            = 14
+
+  api_desired_count    = local.active_slot == "slot2" ? 1 : 0
+  worker_desired_count = local.active_slot == "slot2" ? 1 : 0
+  beat_desired_count   = local.active_slot == "slot2" ? 1 : 0
+  api_cpu              = 256
+  api_memory           = 512
+  worker_cpu           = 256
+  worker_memory        = 512
+
+  common_tags = merge(local.common_tags, { Slot = "slot2" })
+
+  depends_on = [
+    aws_secretsmanager_secret_version.app,
+    aws_secretsmanager_secret_version.init,
+    module.rds,
+    module.elasticache,
+  ]
+}
+
 module "monitoring" {
   source = "../../modules/monitoring"
 
@@ -279,49 +293,58 @@ module "monitoring" {
   aws_region       = var.aws_region
   public_subnet_id = module.vpc.public_subnet_ids[0]
   monitoring_sg_id = module.security_groups.monitoring_sg_id
-  # Constructed name, not a module output — lets monitoring provision in
-  # parallel with ECS; the discovery cron picks tasks up once they exist.
-  ecs_cluster_names = ["${local.project}-${local.environment}"]
-  state_bucket      = var.tf_state_bucket
-  common_tags       = local.common_tags
-
-  depends_on = [
-    module.vpc, # Monitoring EC2 placed in VPC public subnet
+  # Constructed names, not module outputs: monitoring watches BOTH slot
+  # clusters (the active one alternates) and provisions in parallel with ECS
+  # instead of waiting on it — the discovery cron tolerates missing clusters.
+  ecs_cluster_names = [
+    "${local.project}-${local.environment}-slot1",
+    "${local.project}-${local.environment}-slot2",
   ]
+  state_bucket = var.tf_state_bucket
+  common_tags  = local.common_tags
+}
+
+resource "aws_ssm_parameter" "active_slot" {
+  name  = "/${local.project}/${local.environment}/deployment/active_slot"
+  type  = "String"
+  value = local.active_slot
+
+  tags = local.common_tags
+
+  lifecycle {
+    ignore_changes = [value]
+  }
 }
 
 # ── Outputs ───────────────────────────────────────────────────────────────────
 output "app_secret_arn" {
-  description = "ARN of the app secrets in Secrets Manager"
-  value       = aws_secretsmanager_secret.app.arn
+  value = aws_secretsmanager_secret.app.arn
 }
 
 output "db_endpoint" {
-  description = "RDS PostgreSQL endpoint"
-  value       = module.rds.db_endpoint
+  value = module.rds.db_endpoint
 }
 
-output "ecs_cluster_name" {
-  description = "ECS cluster name"
-  value       = module.ecs.cluster_name
+output "ecs_cluster_name_slot1" {
+  value = module.ecs_slot1.cluster_name
 }
 
-output "private_app_subnet_ids" {
-  description = "Private app subnet IDs for ECS tasks"
-  value       = module.vpc.private_app_subnet_ids
+output "ecs_cluster_name_slot2" {
+  value = module.ecs_slot2.cluster_name
 }
 
 output "worker_sg_id" {
-  description = "Worker security group ID"
-  value       = module.security_groups.worker_sg_id
+  value = module.security_groups.worker_sg_id
+}
+
+output "private_app_subnet_ids" {
+  value = module.vpc.private_app_subnet_ids
 }
 
 output "grafana_url" {
-  description = "Grafana URL"
-  value       = try("http://${module.monitoring.monitoring_public_ip}:3000", "")
+  value = try("http://${module.monitoring.monitoring_public_ip}:3000", "")
 }
 
 output "prometheus_url" {
-  description = "Prometheus URL"
-  value       = try("http://${module.monitoring.monitoring_public_ip}:9090", "")
+  value = try("http://${module.monitoring.monitoring_public_ip}:9090", "")
 }

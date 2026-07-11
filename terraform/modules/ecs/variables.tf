@@ -113,6 +113,16 @@ variable "worker_desired_count" {
   default     = 1
 }
 
+variable "beat_desired_count" {
+  description = "Desired number of running Beat tasks. Must be 0 or 1 (Beat is a singleton). In blue-green, only the active slot runs Beat; the idle slot passes 0 so two schedulers never fire duplicate tasks. Dev (single slot) uses the default of 1."
+  type        = number
+  default     = 1
+  validation {
+    condition     = contains([0, 1], var.beat_desired_count)
+    error_message = "beat_desired_count must be 0 or 1 — Beat is a singleton and must never run more than one instance."
+  }
+}
+
 variable "api_max_count" {
   description = "Maximum number of API tasks for auto-scaling"
   type        = number

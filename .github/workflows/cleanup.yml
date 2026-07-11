@@ -15,7 +15,7 @@ on:
         type: choice
         options: [destroy, drain_old_slot]
       old_slot:
-        description: "Old blue-green slot to drain (blue or green) — drain_old_slot only"
+        description: "Old blue-green slot to drain (slot1 or slot2) — drain_old_slot only"
         required: false
         default: ""
       delay_minutes:
@@ -35,8 +35,7 @@ env:
   AWS_REGION: us-east-1
   TF_VERSION: 1.7.0
   TF_STATE_BUCKET: nexusdeploy-terraform-state
-  # TF_LOCK_TABLE intentionally omitted — DynamoDB locking disabled (single-dev)
-  # See: scripts/bootstrap.sh and terraform/environments/dev/main.tf for rationale
+  TF_LOCK_TABLE: nexusdeploy-terraform-locks
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -88,12 +87,12 @@ jobs:
         working-directory: terraform/environments/${{ env.TF_ENV }}
         run: |
           terraform init \
+            -input=false \
             -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
             -backend-config="key=${{ env.TF_ENV }}/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" \
-            -backend-config="encrypt=true"
-          # Note: no dynamodb_table — DynamoDB locking intentionally disabled.
-          # Single-developer workflow, no concurrent runs possible.
+            -backend-config="encrypt=true" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
 
       # ── Step 1: Graceful Terraform destroy ──────────────────────────────
       - name: Terraform Destroy
@@ -103,13 +102,27 @@ jobs:
           TF_VAR_api_image: "placeholder"
           TF_VAR_worker_image: "placeholder"
           TF_VAR_git_commit: "cleanup"
+          # Required by staging/prod (no default in variables.tf); unused for destroy
+          TF_VAR_monitoring_allowed_cidr: "[]"
         run: |
           echo "🔥 Starting Terraform destroy for ${{ env.TF_ENV }}..."
+
+          # dev uses a single module.ecs; staging/prod use blue-green split modules
+          # plus an active_slot SSM parameter that must be destroyed too — the
+          # state file is wiped afterwards, so anything skipped here becomes an
+          # orphan that fails the next deploy with ParameterAlreadyExists.
+          if [[ "${{ env.TF_ENV }}" == "staging" || "${{ env.TF_ENV }}" == "prod" ]]; then
+            ECS_TARGETS="-target=module.ecs_slot1 -target=module.ecs_slot2 -target=aws_ssm_parameter.active_slot"
+          else
+            ECS_TARGETS="-target=module.ecs"
+          fi
+
           terraform destroy \
+            -input=false \
             -var-file="terraform.tfvars" \
             -auto-approve \
             -no-color \
-            -target=module.ecs \
+            $ECS_TARGETS \
             -target=module.rds \
             -target=module.elasticache \
             -target=module.vpc \
@@ -153,14 +166,16 @@ jobs:
       # force a full image rebuild on the next deploy even if app code unchanged.
 
       # ── Step 3: Clean monitoring configs from S3 ────────────────────────
-      # Delete the monitoring config objects uploaded by Terraform.
+      # Delete only THIS environment's monitoring config objects. Configs are
+      # env-scoped under monitoring/config/<env>/, so cleaning one environment
+      # never removes another's — safe when dev and staging run in parallel.
       # The S3 bucket itself is NEVER deleted — it is bootstrap infrastructure
-      # and holds all Terraform state. Only the monitoring/config/ prefix is cleaned.
+      # and holds all Terraform state.
       - name: Clean monitoring config objects from S3
         run: |
-          echo "🧹 Cleaning monitoring config objects from S3..."
-          aws s3 rm             "s3://${{ env.TF_STATE_BUCKET }}/monitoring/config/"             --recursive             --region "${{ env.AWS_REGION }}" 2>/dev/null || true
-          echo "✅ Monitoring configs cleaned (bucket itself preserved)"
+          echo "🧹 Cleaning monitoring config objects for ${{ env.TF_ENV }} from S3..."
+          aws s3 rm             "s3://${{ env.TF_STATE_BUCKET }}/monitoring/config/${{ env.TF_ENV }}/"             --recursive             --region "${{ env.AWS_REGION }}" 2>/dev/null || true
+          echo "✅ Monitoring configs cleaned for ${{ env.TF_ENV }} (bucket + other envs preserved)"
 
       # ── Step 4: Delete Terraform state from S3 ───────────────────────────
       - name: Delete Terraform state from S3
@@ -190,6 +205,32 @@ jobs:
             echo "ℹ️ No state file found for ${{ env.TF_ENV }}"
           fi
 
+          # Remove the S3-backend state-checksum row from the lock table.
+          # Without this, a later `terraform init` fails with "checksum
+          # calculated for the state stored in S3 does not match the checksum
+          # stored in DynamoDB" because the digest outlives the deleted state.
+          DIGEST_ID="${{ env.TF_STATE_BUCKET }}/$STATE_KEY-md5"
+          aws dynamodb delete-item \
+            --table-name "${{ env.TF_LOCK_TABLE }}" \
+            --key "{\"LockID\":{\"S\":\"$DIGEST_ID\"}}" \
+            --region "${{ env.AWS_REGION }}" 2>/dev/null \
+          && echo "✅ Stale state digest removed from ${{ env.TF_LOCK_TABLE }}" \
+          || echo "ℹ️ No state digest to remove"
+
+          # Drop the lock mutex row too. Terraform releases it after a clean
+          # destroy, but a killed/timed-out destroy leaves it stale and blocks
+          # the next init/apply with "Error acquiring the state lock". Once the
+          # env is torn down it is orphaned garbage, so removing it makes cleanup
+          # self-healing. Safe here: nothing legitimately operates on an env that
+          # is being destroyed.
+          LOCK_ID="${{ env.TF_STATE_BUCKET }}/$STATE_KEY"
+          aws dynamodb delete-item \
+            --table-name "${{ env.TF_LOCK_TABLE }}" \
+            --key "{\"LockID\":{\"S\":\"$LOCK_ID\"}}" \
+            --region "${{ env.AWS_REGION }}" 2>/dev/null \
+          && echo "✅ Stale state lock removed from ${{ env.TF_LOCK_TABLE }}" \
+          || echo "ℹ️ No state lock to remove"
+
       # ── Summary ──────────────────────────────────────────────────────────
       - name: Cleanup summary
         if: always()
@@ -214,17 +255,24 @@ jobs:
     name: Drain old slot (${{ github.event.inputs.old_slot }})
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'drain_old_slot'
+    # Sleep chunk (max 300 min) + drain must finish inside GitHub's 360-min job limit
+    timeout-minutes: 350
     environment: ${{ github.event.inputs.environment }}
 
     permissions:
       id-token: write
       contents: read
+      actions: write # needed to re-dispatch itself when delay > 300 min
 
     env:
       TF_ENV: ${{ github.event.inputs.environment }}
 
     steps:
+      # GitHub kills hosted-runner jobs at 360 min, so prod's 24h drain delay
+      # cannot sleep in a single job. Sleep at most 300 min per run; if delay
+      # remains, re-dispatch this workflow with the remainder and skip the drain.
       - name: Wait for delay
+        id: wait
         if: github.event.inputs.delay_minutes != '0' && github.event.inputs.delay_minutes != ''
         run: |
           DELAY='${{ github.event.inputs.delay_minutes || 0 }}'
@@ -232,11 +280,42 @@ jobs:
             echo "❌ Invalid delay_minutes: must be a non-negative integer, got: $DELAY"
             exit 1
           fi
-          echo "⏳ Waiting ${DELAY} minutes before draining old slot..."
-          echo "Reason: ${{ github.event.inputs.reason }}"
-          sleep $((DELAY * 60))
+          MAX_CHUNK=300
+          if (( DELAY > MAX_CHUNK )); then
+            echo "⏳ Delay ${DELAY} min exceeds job limit — sleeping ${MAX_CHUNK} min, then re-dispatching for the remaining $((DELAY - MAX_CHUNK)) min"
+            echo "Reason: ${{ github.event.inputs.reason }}"
+            sleep $((MAX_CHUNK * 60))
+            echo "remaining=$((DELAY - MAX_CHUNK))" >> $GITHUB_OUTPUT
+            echo "drain_now=false" >> $GITHUB_OUTPUT
+          else
+            echo "⏳ Waiting ${DELAY} minutes before draining old slot..."
+            echo "Reason: ${{ github.event.inputs.reason }}"
+            sleep $((DELAY * 60))
+            echo "drain_now=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Re-dispatch drain with remaining delay
+        if: steps.wait.outputs.drain_now == 'false'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'cleanup.yml',
+              ref: context.ref,
+              inputs: {
+                environment: '${{ github.event.inputs.environment }}',
+                action: 'drain_old_slot',
+                old_slot: '${{ github.event.inputs.old_slot }}',
+                delay_minutes: '${{ steps.wait.outputs.remaining }}',
+                reason: '${{ github.event.inputs.reason }}'
+              }
+            });
+            console.log('🔁 Drain re-dispatched with ${{ steps.wait.outputs.remaining }} min remaining');
 
       - name: Configure AWS credentials (OIDC)
+        if: steps.wait.outputs.drain_now != 'false'
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
@@ -244,6 +323,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Scale down old slot
+        if: steps.wait.outputs.drain_now != 'false'
         run: |
           OLD_SLOT="${{ github.event.inputs.old_slot }}"
           ENV="${{ env.TF_ENV }}"
@@ -270,7 +350,7 @@ jobs:
           echo "✅ Old slot $OLD_SLOT drained"
 
       - name: Drain summary
-        if: always()
+        if: always() && steps.wait.outputs.drain_now != 'false'
         run: |
           echo "## 🔻 Blue-Green Old Slot Drained" >> $GITHUB_STEP_SUMMARY
           echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY

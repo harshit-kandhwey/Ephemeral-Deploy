@@ -1,34 +1,21 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # imports.tf — Adopt bootstrap-created resources into Terraform state
 #
-# The GitHub OIDC provider and deploy IAM role are owned by bootstrap.sh.
-# Bootstrap is the source of truth for their permissions — Terraform imports
-# them into state so it can reference them, but never modifies them.
+# Same pattern as prod/imports.tf. Bootstrap creates the OIDC provider and
+# deploy role once; staging imports them for reference only.
 #
-# lifecycle { ignore_changes = all } in modules/iam/main.tf ensures Terraform
-# will never overwrite what bootstrap created, even if the config differs.
-#
-# How it works (Terraform 1.5+):
-#   First apply  → imports existing resource into state, no changes made
-#   Subsequent   → resource already in state, import block silently ignored
-#
-# NOTE: import block `id` values must be literal strings — expressions are
-# not supported. Account ID 415838720130 is hardcoded intentionally.
+# ECR repos for staging are created by the ecr-provision job and, when they
+# exist but state was wiped, re-adopted by the deploy job's adopt() step —
+# deliberately NOT via import blocks here (see note at the bottom).
 # ─────────────────────────────────────────────────────────────────────────────
 
-# GitHub OIDC provider: create_oidc_provider = false in prod, so the resource
-# has count = 0 and cannot be imported here. The provider is created by dev env
-# (create_oidc_provider = true) and shared — reference it via var.oidc_provider_arn
-# if the IAM module trust policy needs it.
-
-# GitHub Actions deploy IAM role — owned by bootstrap.sh, shared
+# GitHub Actions deploy IAM role — owned by bootstrap.sh, shared across all envs
 import {
   to = module.iam.aws_iam_role.github_actions_deploy
   id = "nexusdeploy-github-actions-deploy"
 }
 
 # Inline policies — split into two to stay under 10240 char limit per policy
-# Same policies as dev; these are shared bootstrap-owned resources
 import {
   to = module.iam.aws_iam_role_policy.github_actions_deploy
   id = "nexusdeploy-github-actions-deploy:nexusdeploy-github-actions-deploy-1"

@@ -205,6 +205,24 @@ resource "aws_security_group" "monitoring" {
     cidr_blocks = var.monitoring_allowed_cidr
   }
 
+  # Frontend console (nginx) — same allowlist as Grafana/Prometheus.
+  # HTTP served alongside HTTPS (self-signed) for the demo console.
+  ingress {
+    description = "Frontend HTTP"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = var.monitoring_allowed_cidr
+  }
+
+  ingress {
+    description = "Frontend HTTPS (self-signed)"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = var.monitoring_allowed_cidr
+  }
+
   # Node exporter - only within VPC (Prometheus scrapes this internally)
   ingress {
     description = "Node exporter from VPC"

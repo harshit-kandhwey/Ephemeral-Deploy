@@ -11,15 +11,26 @@ echo "=== Monitoring setup started at $(date) ==="
 PROJECT="${project}"
 ENVIRONMENT="${environment}"
 AWS_REGION="${aws_region}"
-ECS_CLUSTER="${ecs_cluster_name}"
 STATE_BUCKET="${state_bucket}"
-CONFIG_PREFIX="monitoring/config"
+CONFIG_PREFIX="monitoring/config/$ENVIRONMENT"
 
 echo "Project: $PROJECT | Environment: $ENVIRONMENT | Region: $AWS_REGION"
 
 # ── System packages (awscli needed before SSM fetch) ─────────────────────────
 echo "Installing system packages..."
 export DEBIAN_FRONTEND=noninteractive
+
+# EC2 first boot races: cloud-init's own apt and unattended-upgrades hold the
+# dpkg/apt lock. Under `set -e` a failed apt-get aborts the ENTIRE script,
+# leaving every service uninstalled. Wait for boot-time apt to finish, and make
+# every apt-get wait up to 5 min for the lock as a backstop.
+echo 'DPkg::Lock::Timeout "300";' > /etc/apt/apt.conf.d/99lock-timeout
+for i in $(seq 1 60); do
+  pgrep -x apt-get >/dev/null || pgrep -x apt >/dev/null || pgrep -x dpkg >/dev/null || break
+  echo "Waiting for boot-time apt/dpkg to finish... ($i)"
+  sleep 5
+done
+
 apt-get update -qq
 apt-get install -y -qq wget curl jq unzip
 # awscli not in Ubuntu 24.04 apt repos — install v2 via official installer
@@ -147,14 +158,15 @@ escape_sed() { printf '%s\n' "$1" | sed -e 's/[]\/$*.^[&]/\\&/g'; }
 PROJECT_ESC=$(escape_sed "$PROJECT")
 ENV_ESC=$(escape_sed "$ENVIRONMENT")
 REGION_ESC=$(escape_sed "$AWS_REGION")
-CLUSTER_ESC=$(escape_sed "$ECS_CLUSTER")
+# No NEXUSDEPLOY_CLUSTER substitution: Prometheus discovers API tasks via the
+# file-based ecs-targets.json (below) and YACE discovers via resource tags —
+# neither config file embeds a cluster name, and blue-green has two clusters.
 
 for f in /etc/prometheus/prometheus.yml /etc/yace/config.yml /var/lib/grafana/dashboards/nexusdeploy.json; do
   sed -i \
     -e "s/NEXUSDEPLOY_PROJECT/$PROJECT_ESC/g" \
     -e "s/NEXUSDEPLOY_ENV/$ENV_ESC/g" \
     -e "s/NEXUSDEPLOY_REGION/$REGION_ESC/g" \
-    -e "s/NEXUSDEPLOY_CLUSTER/$CLUSTER_ESC/g" \
     "$f"
 done
 echo "✅ Placeholders substituted"
@@ -183,29 +195,101 @@ systemctl enable --now node_exporter
 systemctl enable --now prometheus
 systemctl enable --now grafana-server
 
+# ── Frontend console (nginx reverse proxy) ────────────────────────────────────
+# Serves a lightweight static console on 80 + 443 (self-signed TLS) and
+# reverse-proxies /api and /health to the ECS API tasks. The API stays private;
+# only nginx on this box (already allowed to reach API:5000) talks to it, and
+# access is gated by the monitoring SG's allowlist. The upstream server list is
+# kept current by ecs-discovery.sh below, so it survives blue-green cutovers.
+echo "Setting up frontend console (nginx)..."
+apt-get install -y -qq nginx openssl
+
+mkdir -p /var/www/frontend
+aws s3 cp "s3://$STATE_BUCKET/$CONFIG_PREFIX/frontend-index.html" /var/www/frontend/index.html --region "$AWS_REGION"
+
+# Self-signed TLS cert (demo/POC — browsers will warn; CN is cosmetic here)
+mkdir -p /etc/nginx/ssl
+openssl req -x509 -nodes -newkey rsa:2048 -days 365 \
+  -keyout /etc/nginx/ssl/selfsigned.key \
+  -out /etc/nginx/ssl/selfsigned.crt \
+  -subj "/C=US/ST=NA/L=NA/O=$PROJECT/CN=$PROJECT-$ENVIRONMENT-console"
+chmod 600 /etc/nginx/ssl/selfsigned.key
+
+# Placeholder upstream so nginx is valid before any API task is discovered.
+# ecs-discovery.sh replaces this with the live task IPs and reloads nginx.
+cat > /etc/nginx/conf.d/api_upstream.conf << 'EOF'
+upstream api_backend {
+  server 127.0.0.1:5000; # placeholder — replaced by ecs-discovery.sh
+}
+EOF
+
+rm -f /etc/nginx/sites-enabled/default
+cat > /etc/nginx/sites-available/nexusdeploy << 'EOF'
+server {
+  listen 80 default_server;
+  listen [::]:80 default_server;
+  listen 443 ssl default_server;
+  listen [::]:443 ssl default_server;
+  server_name _;
+
+  ssl_certificate     /etc/nginx/ssl/selfsigned.crt;
+  ssl_certificate_key /etc/nginx/ssl/selfsigned.key;
+
+  root /var/www/frontend;
+  index index.html;
+
+  proxy_set_header Host              $host;
+  proxy_set_header X-Real-IP         $remote_addr;
+  proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_connect_timeout 5s;
+  proxy_read_timeout    30s;
+
+  location / {
+    try_files $uri $uri/ /index.html;
+  }
+
+  # REST API + health checks proxied to the ECS API tasks.
+  location /api/     { proxy_pass http://api_backend; }
+  location = /health { proxy_pass http://api_backend; }
+  location = /ready  { proxy_pass http://api_backend; }
+}
+EOF
+ln -sf /etc/nginx/sites-available/nexusdeploy /etc/nginx/sites-enabled/nexusdeploy
+
+if nginx -t; then
+  systemctl enable --now nginx
+  systemctl reload nginx
+  echo "✅ Frontend console configured"
+else
+  echo "❌ nginx config test failed"
+fi
+
 # ── ECS Service Discovery ─────────────────────────────────────────────────────
 # Creates /etc/prometheus/ecs-targets.json by querying ECS for running API tasks.
 # Runs every 30s via cron so targets update automatically after deployments.
 cat > /usr/local/bin/ecs-discovery.sh << 'DISCOVERY'
 #!/bin/bash
 set -e
-CLUSTER="${ecs_cluster_name}"
+# One cluster per blue-green slot (dev passes a single cluster). Clusters that
+# don't exist yet or have no running tasks contribute nothing — monitoring can
+# come up before ECS and pick tasks up on a later cron run.
+CLUSTERS="${ecs_cluster_names}"
 REGION="${aws_region}"
 OUTPUT="/etc/prometheus/ecs-targets.json"
 
-TASKS=$(aws ecs list-tasks   --cluster "$CLUSTER"   --family nexusdeploy-${environment}-api   --region "$REGION"   --query 'taskArns' --output text 2>/dev/null || echo "")
-
-if [[ -z "$TASKS" ]]; then
-  echo "[]" > "$OUTPUT"
-  exit 0
-fi
-
-IPS=$(aws ecs describe-tasks   --cluster "$CLUSTER"   --tasks $TASKS   --region "$REGION"   --query 'tasks[*].attachments[0].details[?name==`privateIPv4Address`].value'   --output text 2>/dev/null || echo "")
-
 TARGETS=()
-for IP in $IPS; do
-  [[ -z "$IP" || "$IP" == "None" ]] && continue
-  TARGETS+=("$IP:5000")
+for CLUSTER in $CLUSTERS; do
+  # API services and task families are named "<cluster>-api"
+  TASKS=$(aws ecs list-tasks   --cluster "$CLUSTER"   --family "$CLUSTER-api"   --region "$REGION"   --query 'taskArns' --output text 2>/dev/null || echo "")
+  [[ -z "$TASKS" || "$TASKS" == "None" ]] && continue
+
+  IPS=$(aws ecs describe-tasks   --cluster "$CLUSTER"   --tasks $TASKS   --region "$REGION"   --query 'tasks[*].attachments[0].details[?name==`privateIPv4Address`].value'   --output text 2>/dev/null || echo "")
+
+  for IP in $IPS; do
+    [[ -z "$IP" || "$IP" == "None" ]] && continue
+    TARGETS+=("$IP:5000")
+  done
 done
 
 if [[ $${#TARGETS[@]} -eq 0 ]]; then
@@ -215,6 +299,31 @@ else
     split("\n") | map(select(length > 0)) |
     [{ targets: ., labels: { job: "nexusdeploy-api", environment: "${environment}" }}]
   ' > "$OUTPUT"
+fi
+
+# Keep the nginx reverse-proxy upstream in sync with the same discovered IPs so
+# the frontend console reaches whichever slot is currently active. Reload only
+# when the list actually changes to avoid a reload every cron tick.
+NGINX_UPSTREAM="/etc/nginx/conf.d/api_upstream.conf"
+if [[ -d /etc/nginx/conf.d ]]; then
+  TMP=$(mktemp)
+  if [[ $${#TARGETS[@]} -eq 0 ]]; then
+    printf 'upstream api_backend {\n  server 127.0.0.1:5000; # no API tasks discovered\n}\n' > "$TMP"
+  else
+    {
+      echo "upstream api_backend {"
+      for T in "$${TARGETS[@]}"; do
+        echo "  server $T max_fails=2 fail_timeout=10s;"
+      done
+      echo "}"
+    } > "$TMP"
+  fi
+  if ! cmp -s "$TMP" "$NGINX_UPSTREAM"; then
+    mv "$TMP" "$NGINX_UPSTREAM"
+    nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || true
+  else
+    rm -f "$TMP"
+  fi
 fi
 DISCOVERY
 
@@ -233,6 +342,7 @@ systemctl is-active yace           && echo "✅ yace"          || echo "❌ yace
 systemctl is-active node_exporter  && echo "✅ node_exporter" || echo "❌ node_exporter failed"
 systemctl is-active prometheus     && echo "✅ prometheus"     || echo "❌ prometheus failed"
 systemctl is-active grafana-server && echo "✅ grafana"        || echo "❌ grafana failed"
+systemctl is-active nginx          && echo "✅ nginx"          || echo "❌ nginx failed"
 
 # ── Public IP via IMDSv2 ──────────────────────────────────────────────────────
 IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
@@ -243,6 +353,7 @@ PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
 echo ""
 echo "════════════════════════════════════════════"
 echo " Monitoring Stack Ready!"
+echo " Console:    http://$PUBLIC_IP  (https:// self-signed)"
 echo " Grafana:    http://$PUBLIC_IP:3000"
 echo " Prometheus: http://$PUBLIC_IP:9090"
 echo "════════════════════════════════════════════"

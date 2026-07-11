@@ -83,7 +83,7 @@ main       ──push─▶ deploy.yml ─▶  prod environment         (blue-gr
 │  │  │  Flask/Gunicorn │  │  Celery         │  │  Celery Beat     │      │   │
 │  │  │  FARGATE_SPOT   │  │  FARGATE_SPOT   │  │  Singleton       │      │   │
 │  │  └─────────────────┘  └─────────────────┘  └──────────────────┘      │   │
-│  │  prod: two complete sets of the above (blue slot + green slot)       │   │
+│  │  prod: two complete sets of the above (slot1 + slot2)                │   │
 │  │                                                                      │   │
 │  │  ── Tier 3: Private DB Subnets ────────────────────────────────────  │   │
 │  │  ┌────────────────────────────────────────────────────────────────┐  │   │
@@ -132,7 +132,7 @@ ephemeral-deploy/
 │   │       └── files/                Prometheus config, Grafana datasources, dashboard JSON, SD script
 │   └── environments/
 │       ├── dev/                      Calls all modules with dev sizing; TTL tag triggers auto-cleanup
-│       └── prod/                     Calls all modules with prod sizing; instantiates blue + green ECS sets
+│       └── prod/                     Calls all modules with prod sizing; instantiates the slot1 + slot2 ECS sets
 │
 ├── .github/workflows/
 │   ├── ci.yml                        Lint · format · test · Grype scan · terraform validate
@@ -453,35 +453,35 @@ The IAM role has a least-privilege inline policy maintained in `bootstrap.sh`. I
 
 ## 10. Blue-Green Deployment (prod)
 
-Prod uses a Terraform-native blue-green strategy. Two complete sets of ECS services (`-blue` and `-green`) are defined in Terraform. The inactive set runs at `desired_count = 0` — it costs nothing while standing by.
+Prod uses a Terraform-native blue-green strategy. Two complete sets of ECS services — the slots, named `-slot1` and `-slot2` — are defined in Terraform. The inactive slot runs at `desired_count = 0` — it costs nothing while standing by. (Blue-green is the *strategy*; the slots themselves are positional, since whichever one is live alternates on every deploy.)
 
 ### Deployment Flow
 
 ```
 State before deploy:
-  blue   desired=1  running=1  ← ACTIVE (serving traffic)
-  green  desired=0  running=0  ← IDLE
+  slot1  desired=1  running=1  ← ACTIVE (serving traffic)
+  slot2  desired=0  running=0  ← IDLE
 
 Push to main:
-  blue   desired=1  running=1  ← unchanged, traffic unaffected
-  green  desired=1  running=1  ← new image deployed to inactive slot
+  slot1  desired=1  running=1  ← unchanged, traffic unaffected
+  slot2  desired=1  running=1  ← new image deployed to inactive slot
 
 Health check loop (every 30s, max 5 minutes):
-  Polls:  aws ecs describe-services  for green.runningCount == green.desiredCount
+  Polls:  aws ecs describe-services  for slot2.runningCount == slot2.desiredCount
 
 If health check PASSES:
-  ├── SSM  /nexusdeploy/prod/deployment/active_slot  ←  "green"
+  ├── SSM  /nexusdeploy/prod/deployment/active_slot  ←  "slot2"
   ├── Previous image tags stored in SSM for rollback reference
-  └── cleanup.yml dispatched with delay=1440min (24h) to drain blue
+  └── cleanup.yml dispatched with delay=1440min (24h) to drain slot1
 
   After 24h:
-  blue   desired=0  running=0  ← drained, idle for next cycle
-  green  desired=1  running=1  ← active
+  slot1  desired=0  running=0  ← drained, idle for next cycle
+  slot2  desired=1  running=1  ← active
 
 If health check FAILS (or terraform apply itself fails):
-  ├── green scaled to desired=0 immediately
-  ├── SSM active_slot unchanged → blue keeps serving
-  └── Next push targets green again — no manual intervention needed
+  ├── slot2 scaled to desired=0 immediately
+  ├── SSM active_slot unchanged → slot1 keeps serving
+  └── Next push targets slot2 again — no manual intervention needed
 ```
 
 ### Slot Tracking
@@ -489,7 +489,7 @@ If health check FAILS (or terraform apply itself fails):
 The active slot is tracked in SSM Parameter Store at:
 
 ```
-/nexusdeploy/prod/deployment/active_slot   →   "blue" or "green"
+/nexusdeploy/prod/deployment/active_slot   →   "slot1" or "slot2"
 ```
 
 Terraform reads this at plan time to determine which slot gets the new image. The SSM value has `lifecycle { ignore_changes = [value] }` — Terraform creates it on first apply but never overwrites it after that. Only `deploy.yml` writes to it (after a confirmed healthy deploy).
@@ -758,16 +758,17 @@ When ALB is enabled, the `X-Forwarded-For` header carries the real client IP. Th
 
 ### Pre-flight checklist — what must be set before each push
 
-| # | What | Where to set | dev | prod |
-|---|------|-------------|:---:|:----:|
-| 1 | `AWS_DEPLOY_ROLE_ARN` — IAM role ARN output by bootstrap | GitHub → Settings → Secrets and variables → Actions → **Repository secrets** | ✅ | ✅ |
-| 2 | `dev` GitHub Environment (no approval gate) | GitHub → Settings → **Environments** → New environment | ✅ | — |
-| 3 | `prod` GitHub Environment (Required reviewers enabled) | GitHub → Settings → **Environments** → New environment | — | ✅ |
-| 4 | `MONITORING_ALLOWED_CIDR` — CIDR(s) allowed inbound to Grafana (:3000) and Prometheus (:9090) | GitHub → Settings → Environments → **prod** → Variables → New variable | — | ✅ |
-| 5 | SSM Parameter Store secrets (DB passwords, JWT key, Grafana password) | Run `make bootstrap` once — prompts you interactively | ✅ | ✅ |
-| 6 | `github_org` + `github_repo` set in tfvars | `terraform/environments/dev/terraform.tfvars` and `prod/terraform.tfvars` | ✅ | ✅ |
+| #   | What                                                                                          | Where to set                                                                 | dev | prod |
+| --- | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | :-: | :--: |
+| 1   | `AWS_DEPLOY_ROLE_ARN` — IAM role ARN output by bootstrap                                      | GitHub → Settings → Secrets and variables → Actions → **Repository secrets** | ✅  |  ✅  |
+| 2   | `dev` GitHub Environment (no approval gate)                                                   | GitHub → Settings → **Environments** → New environment                       | ✅  |  —   |
+| 3   | `prod` GitHub Environment (Required reviewers enabled)                                        | GitHub → Settings → **Environments** → New environment                       |  —  |  ✅  |
+| 4   | `MONITORING_ALLOWED_CIDR` — CIDR(s) allowed inbound to Grafana (:3000) and Prometheus (:9090) | GitHub → Settings → Environments → **prod** → Variables → New variable       |  —  |  ✅  |
+| 5   | SSM Parameter Store secrets (DB passwords, JWT key, Grafana password)                         | Run `make bootstrap` once — prompts you interactively                        | ✅  |  ✅  |
+| 6   | `github_org` + `github_repo` set in tfvars                                                    | `terraform/environments/dev/terraform.tfvars` and `prod/terraform.tfvars`    | ✅  |  ✅  |
 
 **Notes on `MONITORING_ALLOWED_CIDR`:**
+
 - Format: a JSON list of CIDR strings, e.g. `["203.0.113.42/32"]` or `["10.0.0.0/8","203.0.113.0/24"]`
 - Set to your home/office IP or VPN egress CIDR — this is the only address that can reach Grafana and Prometheus in prod
 - dev ignores this variable (dev hardcodes `0.0.0.0/0` — ephemeral environments, acceptable)
@@ -879,7 +880,7 @@ make monitoring-url ENV=prod  # Print Grafana URL from Terraform output
 make monitoring-logs ENV=dev  # Tail the monitoring EC2 setup log via SSM
 
 # Prod blue-green
-make prod-active-slot         # Print current active slot (blue or green)
+make prod-active-slot         # Print current active slot (slot1 or slot2)
 make prod-state-download      # Download prod state file for local destroy
 
 # Secrets

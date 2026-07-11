@@ -10,7 +10,7 @@ on:
         description: "Target environment"
         required: true
         type: choice
-        options: [dev, prod]
+        options: [dev, staging, prod]
       action:
         description: "Action"
         required: true
@@ -35,8 +35,7 @@ env:
   TF_VERSION: 1.7.0
   TF_STATE_BUCKET: nexusdeploy-terraform-state
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # DynamoDB locking - commented intentionally (single-dev, no concurrency risk)
-  # TF_LOCK_TABLE: nexusdeploy-terraform-locks
+  TF_LOCK_TABLE: nexusdeploy-terraform-locks
 
 jobs:
   # ─────────────────────────────────────────────
@@ -183,10 +182,12 @@ jobs:
         working-directory: terraform/environments/${{ needs.setup.outputs.environment }}
         run: |
           terraform init \
+            -input=false \
             -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
             -backend-config="key=${{ needs.setup.outputs.environment }}/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" \
-            -backend-config="encrypt=true"
+            -backend-config="encrypt=true" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
 
       - name: Check if ECR repositories already exist
         id: ecr-check
@@ -216,13 +217,18 @@ jobs:
         # Only runs when repos don't exist yet (first deploy or after full teardown).
         # Skipped when repos already exist — avoids redundant Terraform runs.
         if: steps.ecr-check.outputs.repos_exist == 'false'
+        timeout-minutes: 30
         working-directory: terraform/environments/${{ needs.setup.outputs.environment }}
         env:
           TF_VAR_api_image: "placeholder"
           TF_VAR_worker_image: "placeholder"
           TF_VAR_git_commit: ${{ github.sha }}
+          # Required by staging/prod (no default in variables.tf); silently ignored by dev.
+          # Even with -target=module.ecr, Terraform evaluates the whole config.
+          TF_VAR_monitoring_allowed_cidr: "[]"
         run: |
           terraform apply \
+            -input=false \
             -target=module.ecr \
             -var-file=terraform.tfvars \
             -auto-approve
@@ -376,11 +382,12 @@ jobs:
         working-directory: terraform/environments/dev
         run: |
           terraform init \
+            -input=false \
             -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
             -backend-config="key=dev/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" \
-            -backend-config="encrypt=true"
-          # Note: no dynamodb_table - see backend comment in main.tf
+            -backend-config="encrypt=true" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
 
       - name: Delete orphaned resources (prevents EntityAlreadyExists / ResourceAlreadyExistsException)
         # Some resources survive failed cleanups but aren't in Terraform state.
@@ -474,14 +481,17 @@ jobs:
           adopt module.iam.aws_iam_role.ecs_execution_worker    "nexusdeploy-dev-ecs-execution-worker"
           adopt module.iam.aws_iam_role.ecs_task                "nexusdeploy-dev-ecs-task"
           adopt module.iam.aws_iam_role.vpc_flow_log            "nexusdeploy-dev-vpc-flow-log"
+          adopt module.ecr.aws_ecr_repository.api               "nexusdeploy-api-dev"
+          adopt module.ecr.aws_ecr_repository.worker            "nexusdeploy-worker-dev"
 
       - name: Terraform Apply — full infrastructure
+        timeout-minutes: 30
         working-directory: terraform/environments/dev
         env:
           TF_VAR_api_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}
           TF_VAR_worker_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.worker_image || needs.setup.outputs.current_worker }}
           TF_VAR_git_commit: ${{ github.sha }}
-        run: terraform apply -var-file=terraform.tfvars -auto-approve
+        run: terraform apply -input=false -var-file=terraform.tfvars -auto-approve
 
       - name: Run database init (ECS one-off task inside VPC)
         # Runs init_db.py as ECS task inside VPC — can reach private RDS.
@@ -639,6 +649,463 @@ jobs:
             }
 
   # ─────────────────────────────────────────────
+  # STAGING DEPLOYMENT — Blue-Green (branch: staging)
+  #
+  # Mirrors prod exactly: same provider pin, same blue-green slot rotation,
+  # same secrets flow. Purpose: catch prod-only issues before they hit main.
+  #
+  # Differences from prod:
+  #   - Old slot drains after 2h (not 24h) — staging TTL is shorter
+  #   - init_db runs on deploy (like dev) — staging DB is ephemeral
+  #   - No manual approval gate
+  # ─────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy → staging (blue-green)
+    runs-on: ubuntu-latest
+    needs: [setup, ecr-provision, push-image]
+    if: |
+      always() &&
+      needs.setup.outputs.environment == 'staging' &&
+      needs.setup.outputs.tf_action == 'apply' &&
+      (needs.ecr-provision.result == 'success' || needs.ecr-provision.result == 'skipped') &&
+      (needs.push-image.result == 'success' || needs.setup.outputs.app_changed == 'false')
+    environment: staging
+    permissions:
+      id-token: write
+      contents: read
+      # Job-level permissions REPLACE the workflow defaults — without this the
+      # in-job "Schedule old slot drain" dispatch of cleanup.yml gets a 403.
+      actions: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: DeployStaging-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: terraform/environments/staging
+        run: |
+          terraform init \
+            -input=false \
+            -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
+            -backend-config="key=staging/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
+
+      - name: Check state freshness
+        id: state_check
+        working-directory: terraform/environments/staging
+        run: |
+          # Orphan reconciliation (delete + adopt below) exists ONLY to recover
+          # from a wiped state after a cleanup. When state persists across a
+          # normal deploy it already tracks every resource, so we skip it —
+          # otherwise the delete step would churn live log groups every deploy.
+          # Fail CLOSED: a backend/lock/auth/network error must not read as an
+          # empty state and trigger destructive reconciliation of live resources.
+          if ! state_list=$(terraform state list 2>&1); then
+            echo "::error::'terraform state list' failed — aborting to avoid destructive reconciliation on an unknown state."
+            echo "$state_list"
+            exit 1
+          fi
+          if [[ -z "$state_list" ]]; then
+            echo "🆕 State is empty (post-cleanup or first deploy) — orphan reconciliation will run."
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "📦 State has resources — skipping orphan reconciliation (persistent state)."
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Delete orphaned resources
+        if: steps.state_check.outputs.fresh == 'true'
+        continue-on-error: true
+        run: |
+          ENV="staging"
+          REGION="${{ env.AWS_REGION }}"
+          PROJECT="nexusdeploy"
+
+          for slot in slot1 slot2; do
+            for svc in api worker beat; do
+              lg="/ecs/$PROJECT/$ENV-$slot/$svc"
+              if aws logs describe-log-groups \
+                  --log-group-name-prefix "$lg" --region "$REGION" \
+                  --query 'logGroups[0].logGroupName' --output text 2>/dev/null | grep -q "$lg"; then
+                echo "🗑️  Deleting orphaned log group: $lg"
+                aws logs delete-log-group --log-group-name "$lg" --region "$REGION" 2>/dev/null || true
+              fi
+            done
+          done
+
+          for secret_id in "$PROJECT/$ENV/app-secrets" "$PROJECT/$ENV/init-secrets"; do
+            SECRET_STATE=$(aws secretsmanager describe-secret \
+              --secret-id "$secret_id" --region "$REGION" \
+              --query 'DeletedDate' --output text 2>/dev/null || echo "NOT_FOUND")
+            if [[ "$SECRET_STATE" != "NOT_FOUND" && "$SECRET_STATE" != "None" ]]; then
+              echo "🗑️  Force-deleting secret pending deletion: $secret_id"
+              aws secretsmanager delete-secret \
+                --secret-id "$secret_id" \
+                --force-delete-without-recovery \
+                --region "$REGION" 2>/dev/null || true
+            fi
+          done
+
+          MONITORING_ROLE="$PROJECT-$ENV-monitoring-ec2"
+          MONITORING_PROFILE="$PROJECT-$ENV-monitoring"
+          if aws iam get-instance-profile --instance-profile-name "$MONITORING_PROFILE" 2>/dev/null; then
+            aws iam remove-role-from-instance-profile \
+              --instance-profile-name "$MONITORING_PROFILE" \
+              --role-name "$MONITORING_ROLE" 2>/dev/null || true
+            aws iam delete-instance-profile \
+              --instance-profile-name "$MONITORING_PROFILE" 2>/dev/null || true
+          fi
+          if aws iam get-role --role-name "$MONITORING_ROLE" 2>/dev/null; then
+            for policy in $(aws iam list-attached-role-policies \
+              --role-name "$MONITORING_ROLE" \
+              --query 'AttachedPolicies[*].PolicyArn' --output text 2>/dev/null || echo ""); do
+              aws iam detach-role-policy --role-name "$MONITORING_ROLE" --policy-arn "$policy" 2>/dev/null || true
+            done
+            for policy in $(aws iam list-role-policies \
+              --role-name "$MONITORING_ROLE" \
+              --query 'PolicyNames[*]' --output text 2>/dev/null || echo ""); do
+              aws iam delete-role-policy --role-name "$MONITORING_ROLE" --policy-name "$policy" 2>/dev/null || true
+            done
+            aws iam delete-role --role-name "$MONITORING_ROLE" 2>/dev/null || true
+          fi
+          echo "✅ Orphaned resource cleanup complete"
+
+      - name: Adopt orphaned Terraform resources
+        # Runs on EVERY deploy: adopt() self-skips resources already in state, so
+        # it is a no-op on healthy persistent state, but on a partial state (e.g.
+        # a re-run after a mid-apply failure) it still imports surviving resources
+        # like ECR repos and the VPC flow-log group that outlive a cleanup.
+        working-directory: terraform/environments/staging
+        env:
+          TF_VAR_api_image: "placeholder"
+          TF_VAR_worker_image: "placeholder"
+          TF_VAR_git_commit: "placeholder"
+          TF_VAR_monitoring_allowed_cidr: "[]"
+        run: |
+          adopt() {
+            local addr=$1 id=$2
+            terraform state show "$addr" &>/dev/null && return 0
+            terraform import -var-file=terraform.tfvars "$addr" "$id" || true
+          }
+          adopt aws_secretsmanager_secret.app                   "nexusdeploy/staging/app-secrets"
+          adopt aws_secretsmanager_secret.init                  "nexusdeploy/staging/init-secrets"
+          adopt module.iam.aws_iam_role.ecs_execution           "nexusdeploy-staging-ecs-execution"
+          adopt module.iam.aws_iam_role.ecs_execution_worker    "nexusdeploy-staging-ecs-execution-worker"
+          adopt module.iam.aws_iam_role.ecs_task                "nexusdeploy-staging-ecs-task"
+          adopt module.iam.aws_iam_role.vpc_flow_log            "nexusdeploy-staging-vpc-flow-log"
+          adopt module.vpc.aws_cloudwatch_log_group.vpc_flow_logs "/aws/vpc/flowlogs/nexusdeploy-staging"
+          adopt aws_ssm_parameter.active_slot                   "/nexusdeploy/staging/deployment/active_slot"
+          adopt module.ecr.aws_ecr_repository.api               "nexusdeploy-api-staging"
+          adopt module.ecr.aws_ecr_repository.worker            "nexusdeploy-worker-staging"
+
+      - name: Read active deployment slot from SSM
+        id: slot
+        run: |
+          CURRENT=$(aws ssm get-parameter \
+            --name "/nexusdeploy/staging/deployment/active_slot" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Parameter.Value' \
+            --output text 2>/dev/null || echo "none")
+
+          # Fresh environment (no SSM param yet) or an unexpected value →
+          # deploy to slot1; otherwise flip to the opposite slot.
+          if [[ "$CURRENT" == "slot1" ]]; then
+            NEW_SLOT="slot2"
+          else
+            NEW_SLOT="slot1"
+          fi
+
+          echo "current_slot=$CURRENT" >> $GITHUB_OUTPUT
+          echo "new_slot=$NEW_SLOT"    >> $GITHUB_OUTPUT
+          echo "🔵 Current active: $CURRENT → 🟢 Deploying to: $NEW_SLOT"
+
+      - name: Capture old slot capacity (for rollback)
+        id: oldcap
+        run: |
+          OLD_SLOT="${{ steps.slot.outputs.current_slot }}"
+          # Captured BEFORE apply scales the old slot to 0, so a rollback restores
+          # its REAL capacity (autoscaled, or a future api_desired_count > 1)
+          # instead of a hard-coded 1. Defaults to 1 for a first deploy or an
+          # unreadable service. Beat is a singleton — always restored to 1.
+          API=1; WORKER=1
+          if [[ "$OLD_SLOT" == "slot1" || "$OLD_SLOT" == "slot2" ]]; then
+            OLD_CLUSTER="nexusdeploy-staging-$OLD_SLOT"
+            for svc in api worker; do
+              DC=$(aws ecs describe-services --cluster "$OLD_CLUSTER" --services "$OLD_CLUSTER-$svc" \
+                --region ${{ env.AWS_REGION }} --query 'services[0].desiredCount' --output text 2>/dev/null || echo "")
+              if [[ "$DC" =~ ^[0-9]+$ && "$DC" -gt 0 ]]; then
+                [[ "$svc" == "api" ]] && API=$DC || WORKER=$DC
+              fi
+            done
+          fi
+          echo "api=$API"       >> $GITHUB_OUTPUT
+          echo "worker=$WORKER" >> $GITHUB_OUTPUT
+          echo "Captured old slot ($OLD_SLOT) desired counts: api=$API worker=$WORKER (beat singleton=1)"
+
+      - name: Read previous images from SSM
+        id: prev_images
+        run: |
+          # Fall back to "placeholder" (the variables.tf default) on first deploy —
+          # an empty TF_VAR still counts as "set" and would register a task def with image ""
+          PREV_API=$(aws ssm get-parameter \
+            --name "/nexusdeploy/staging/deployment/prev_api_image" \
+            --query 'Parameter.Value' --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "placeholder")
+          echo "api=${PREV_API:-placeholder}" >> $GITHUB_OUTPUT
+
+          PREV_WORKER=$(aws ssm get-parameter \
+            --name "/nexusdeploy/staging/deployment/prev_worker_image" \
+            --query 'Parameter.Value' --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "placeholder")
+          echo "worker=${PREV_WORKER:-placeholder}" >> $GITHUB_OUTPUT
+
+      - name: Terraform Apply → new slot
+        id: tf_apply
+        timeout-minutes: 30
+        working-directory: terraform/environments/staging
+        env:
+          TF_VAR_api_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}
+          TF_VAR_worker_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.worker_image || needs.setup.outputs.current_worker }}
+          TF_VAR_git_commit: ${{ github.sha }}
+          TF_VAR_deployment_slot: ${{ steps.slot.outputs.new_slot }}
+          TF_VAR_previous_api_image: ${{ steps.prev_images.outputs.api }}
+          TF_VAR_previous_worker_image: ${{ steps.prev_images.outputs.worker }}
+          # Set in GitHub → Settings → Environments → staging → Variables → MONITORING_ALLOWED_CIDR
+          # Accepts plain CIDR (1.2.3.4/32) or JSON array (["1.2.3.4/32"]) — normalized below
+          TF_VAR_monitoring_allowed_cidr: ${{ vars.MONITORING_ALLOWED_CIDR }}
+        run: |
+          if [[ -z "${TF_VAR_monitoring_allowed_cidr:-}" ]]; then
+            echo "::error::MONITORING_ALLOWED_CIDR is not set. Add it in GitHub → Settings → Environments → staging → Variables."
+            exit 1
+          fi
+          # Normalize: wrap plain CIDR in JSON array so Terraform never falls into interactive prompt
+          if [[ "${TF_VAR_monitoring_allowed_cidr}" != \[* ]]; then
+            export TF_VAR_monitoring_allowed_cidr='["'"${TF_VAR_monitoring_allowed_cidr}"'"]'
+          fi
+          terraform apply -input=false -var-file=terraform.tfvars -auto-approve
+        continue-on-error: true
+
+      - name: Health check new slot
+        id: health
+        if: steps.tf_apply.outcome == 'success'
+        run: |
+          NEW_SLOT="${{ steps.slot.outputs.new_slot }}"
+          CLUSTER="nexusdeploy-staging-$NEW_SLOT"
+          SERVICE="nexusdeploy-staging-$NEW_SLOT-api"
+          MAX_WAIT=300
+          INTERVAL=30
+          ELAPSED=0
+
+          echo "health_ok=false" >> $GITHUB_OUTPUT
+          echo "⏳ Waiting for $SERVICE to reach RUNNING state..."
+
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            RUNNING=$(aws ecs describe-services \
+              --cluster $CLUSTER \
+              --services $SERVICE \
+              --region ${{ env.AWS_REGION }} \
+              --query 'services[0].runningCount' \
+              --output text 2>/dev/null || echo "0")
+
+            DESIRED=$(aws ecs describe-services \
+              --cluster $CLUSTER \
+              --services $SERVICE \
+              --region ${{ env.AWS_REGION }} \
+              --query 'services[0].desiredCount' \
+              --output text 2>/dev/null || echo "1")
+
+            echo "  Running: $RUNNING / Desired: $DESIRED (${ELAPSED}s elapsed)"
+
+            # describe-services on a missing service exits 0 with "None" values —
+            # require numeric counts so that never passes as healthy
+            if [[ "$RUNNING" =~ ^[0-9]+$ && "$RUNNING" == "$DESIRED" && "$RUNNING" != "0" ]]; then
+              echo "health_ok=true" >> $GITHUB_OUTPUT
+              echo "✅ New slot is healthy!"
+              exit 0
+            fi
+
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          echo "health_ok=false" >> $GITHUB_OUTPUT
+          echo "❌ New slot failed to become healthy"
+
+      - name: Run database init (ECS one-off task inside VPC)
+        if: steps.health.outputs.health_ok == 'true'
+        continue-on-error: true
+        working-directory: terraform/environments/staging
+        run: |
+          SECRET_ARN=$(terraform output -raw app_secret_arn 2>/dev/null | grep -v '│' | tail -1 || echo "")
+          NEW_SLOT="${{ steps.slot.outputs.new_slot }}"
+          CLUSTER="nexusdeploy-staging-$NEW_SLOT"
+          SUBNET_ID=$(terraform output -json private_app_subnet_ids 2>/dev/null | python3 -c "import sys,json; ids=json.load(sys.stdin); print(ids[0])" || echo "")
+          SG_ID=$(terraform output -raw worker_sg_id 2>/dev/null | grep -v '│' | tail -1 || echo "")
+
+          if [[ -z "$SECRET_ARN" || -z "$SUBNET_ID" || -z "$SG_ID" ]]; then
+            echo "⚠️  Missing Terraform outputs — skipping init_db"
+            exit 0
+          fi
+
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition "nexusdeploy-staging-$NEW_SLOT-worker" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          OVERRIDES='{"containerOverrides":[{"name":"worker","command":["python","-m","src.init_db"],"environment":[{"name":"ENV","value":"production"},{"name":"SEED_DB","value":"true"}]}]}'
+
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "$CLUSTER" \
+            --task-definition "$TASK_DEF" \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_ID],securityGroups=[$SG_ID],assignPublicIp=DISABLED}" \
+            --overrides "$OVERRIDES" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'tasks[0].taskArn' --output text)
+
+          echo "Task ARN: $TASK_ARN"
+          aws ecs wait tasks-stopped \
+            --cluster "$CLUSTER" \
+            --tasks "$TASK_ARN" \
+            --region ${{ env.AWS_REGION }}
+
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster "$CLUSTER" \
+            --tasks "$TASK_ARN" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+
+          if [[ "$EXIT_CODE" == "0" ]]; then
+            echo "✅ Database initialized successfully"
+          else
+            echo "⚠️  init_db exited with code: $EXIT_CODE — check logs"
+          fi
+
+      - name: Promote new slot (update SSM active_slot)
+        if: steps.health.outputs.health_ok == 'true'
+        run: |
+          aws ssm put-parameter \
+            --name "/nexusdeploy/staging/deployment/active_slot" \
+            --value "${{ steps.slot.outputs.new_slot }}" \
+            --type String \
+            --overwrite \
+            --region ${{ env.AWS_REGION }}
+          echo "✅ SSM active_slot updated to ${{ steps.slot.outputs.new_slot }}"
+
+      - name: Store current images as 'previous' for next deploy
+        if: steps.health.outputs.health_ok == 'true'
+        run: |
+          # Same fallback as tf_apply: on infra-only deploys push-image is skipped
+          # and its outputs are empty — SSM rejects empty values, so store the
+          # image that was actually deployed (current_api/current_worker).
+          aws ssm put-parameter \
+            --name "/nexusdeploy/staging/deployment/prev_api_image" \
+            --value "${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}" \
+            --type String --overwrite --region ${{ env.AWS_REGION }}
+          aws ssm put-parameter \
+            --name "/nexusdeploy/staging/deployment/prev_worker_image" \
+            --value "${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.worker_image || needs.setup.outputs.current_worker }}" \
+            --type String --overwrite --region ${{ env.AWS_REGION }}
+
+      - name: Schedule old slot drain (2h)
+        if: steps.health.outputs.health_ok == 'true'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'cleanup.yml',
+                ref: 'staging',
+                inputs: {
+                  environment: 'staging',
+                  action: 'drain_old_slot',
+                  old_slot: '${{ steps.slot.outputs.current_slot }}',
+                  delay_minutes: '120',
+                  reason: 'Blue-green: draining old staging slot after 2h'
+                }
+              });
+              console.log('🕐 Old staging slot drain scheduled in 2h');
+            } catch (err) {
+              if (err.status === 422) {
+                console.warn('⚠️  cleanup.yml is disabled — skipping drain.');
+              } else {
+                throw err;
+              }
+            }
+
+      - name: Rollback - revert to old slot
+        if: steps.tf_apply.outcome == 'failure' || steps.health.outputs.health_ok != 'true'
+        run: |
+          NEW_SLOT="${{ steps.slot.outputs.new_slot }}"
+          OLD_SLOT="${{ steps.slot.outputs.current_slot }}"
+          echo "⚠️ Deployment failed - rolling back to $OLD_SLOT"
+
+          # Scale the failed new slot down.
+          FAILED_CLUSTER="nexusdeploy-staging-$NEW_SLOT"
+          for svc in api worker beat; do
+            aws ecs update-service \
+              --cluster "$FAILED_CLUSTER" \
+              --service "nexusdeploy-staging-$NEW_SLOT-$svc" \
+              --desired-count 0 \
+              --region ${{ env.AWS_REGION }} 2>/dev/null || true
+          done
+
+          # terraform apply tied desired counts (and SSM active_slot) to the new
+          # slot, scaling the previously-serving slot to 0. Restore it so a failed
+          # deploy doesn't leave BOTH slots down. Skipped on a first deploy where
+          # there is no prior slot ("none"). (Pragmatic rollback — a proper
+          # zero-overlap redesign is tracked as a follow-up.)
+          if [[ "$OLD_SLOT" == "slot1" || "$OLD_SLOT" == "slot2" ]]; then
+            OLD_CLUSTER="nexusdeploy-staging-$OLD_SLOT"
+            # Restore each service to the capacity captured BEFORE this apply
+            # (steps.oldcap); beat stays a singleton.
+            API_DC="${{ steps.oldcap.outputs.api }}"; WORKER_DC="${{ steps.oldcap.outputs.worker }}"
+            aws ecs update-service --cluster "$OLD_CLUSTER" --service "$OLD_CLUSTER-api" \
+              --desired-count "${API_DC:-1}" --region ${{ env.AWS_REGION }} 2>/dev/null || true
+            aws ecs update-service --cluster "$OLD_CLUSTER" --service "$OLD_CLUSTER-worker" \
+              --desired-count "${WORKER_DC:-1}" --region ${{ env.AWS_REGION }} 2>/dev/null || true
+            aws ecs update-service --cluster "$OLD_CLUSTER" --service "$OLD_CLUSTER-beat" \
+              --desired-count 1 --region ${{ env.AWS_REGION }} 2>/dev/null || true
+            aws ssm put-parameter \
+              --name "/nexusdeploy/staging/deployment/active_slot" \
+              --value "$OLD_SLOT" --type String --overwrite \
+              --region ${{ env.AWS_REGION }} 2>/dev/null || true
+            echo "✅ Rollback complete — restored $OLD_SLOT (api=${API_DC:-1} worker=${WORKER_DC:-1} beat=1, active_slot reset)"
+          else
+            echo "✅ Rollback complete — no prior slot to restore (first deploy)"
+          fi
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          if [[ "${{ steps.health.outputs.health_ok }}" == "true" ]]; then
+            echo "## ✅ Staging Blue-Green Deployment Complete" >> $GITHUB_STEP_SUMMARY
+            echo "| | |" >> $GITHUB_STEP_SUMMARY
+            echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+            echo "| Previous slot | ${{ steps.slot.outputs.current_slot }} (draining in 2h) |" >> $GITHUB_STEP_SUMMARY
+            echo "| Active slot   | ${{ steps.slot.outputs.new_slot }} ✅ |" >> $GITHUB_STEP_SUMMARY
+            echo "| Image         | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ Staging Deployment Failed - Rolled Back" >> $GITHUB_STEP_SUMMARY
+            echo "Active slot remains: ${{ steps.slot.outputs.current_slot }}" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ─────────────────────────────────────────────
   # PROD DEPLOYMENT — Blue-Green (branch: main)
   #
   # Flow:
@@ -662,6 +1129,9 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      # Job-level permissions REPLACE the workflow defaults — without this the
+      # in-job "Schedule old slot drain" dispatch of cleanup.yml gets a 403.
+      actions: write
 
     steps:
       - uses: actions/checkout@v7
@@ -682,12 +1152,38 @@ jobs:
         working-directory: terraform/environments/prod
         run: |
           terraform init \
+            -input=false \
             -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
             -backend-config="key=prod/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" \
-            -backend-config="encrypt=true"
+            -backend-config="encrypt=true" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
+
+      - name: Check state freshness
+        id: state_check
+        working-directory: terraform/environments/prod
+        run: |
+          # Orphan reconciliation (delete + adopt below) exists ONLY to recover
+          # from a wiped state after a cleanup. When state persists across a
+          # normal deploy it already tracks every resource, so we skip it —
+          # otherwise the delete step would churn live log groups every deploy.
+          # Fail CLOSED: a backend/lock/auth/network error must not read as an
+          # empty state and trigger destructive reconciliation of live resources.
+          if ! state_list=$(terraform state list 2>&1); then
+            echo "::error::'terraform state list' failed — aborting to avoid destructive reconciliation on an unknown state."
+            echo "$state_list"
+            exit 1
+          fi
+          if [[ -z "$state_list" ]]; then
+            echo "🆕 State is empty (post-cleanup or first deploy) — orphan reconciliation will run."
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "📦 State has resources — skipping orphan reconciliation (persistent state)."
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Delete orphaned resources
+        if: steps.state_check.outputs.fresh == 'true'
         continue-on-error: true
         run: |
           ENV="prod"
@@ -695,7 +1191,7 @@ jobs:
           PROJECT="nexusdeploy"
 
           # CloudWatch log groups (both slots)
-          for slot in blue green; do
+          for slot in slot1 slot2; do
             for svc in api worker beat; do
               lg="/ecs/$PROJECT/$ENV-$slot/$svc"
               if aws logs describe-log-groups \
@@ -753,6 +1249,10 @@ jobs:
           echo "✅ Orphaned resource cleanup complete"
 
       - name: Adopt orphaned Terraform resources
+        # Runs on EVERY deploy: adopt() self-skips resources already in state, so
+        # it is a no-op on healthy persistent state, but on a partial state (e.g.
+        # a re-run after a mid-apply failure) it still imports surviving resources
+        # like ECR repos and the VPC flow-log group that outlive a cleanup.
         working-directory: terraform/environments/prod
         env:
           TF_VAR_api_image: "placeholder"
@@ -765,11 +1265,16 @@ jobs:
             terraform state show "$addr" &>/dev/null && return 0
             terraform import -var-file=terraform.tfvars "$addr" "$id" || true
           }
+          adopt aws_secretsmanager_secret.app                   "nexusdeploy/prod/app-secrets"
           adopt aws_secretsmanager_secret.init                  "nexusdeploy/prod/init-secrets"
           adopt module.iam.aws_iam_role.ecs_execution           "nexusdeploy-prod-ecs-execution"
           adopt module.iam.aws_iam_role.ecs_execution_worker    "nexusdeploy-prod-ecs-execution-worker"
           adopt module.iam.aws_iam_role.ecs_task                "nexusdeploy-prod-ecs-task"
           adopt module.iam.aws_iam_role.vpc_flow_log            "nexusdeploy-prod-vpc-flow-log"
+          adopt module.vpc.aws_cloudwatch_log_group.vpc_flow_logs "/aws/vpc/flowlogs/nexusdeploy-prod"
+          adopt aws_ssm_parameter.active_slot                   "/nexusdeploy/prod/deployment/active_slot"
+          adopt module.ecr.aws_ecr_repository.api               "nexusdeploy-api-prod"
+          adopt module.ecr.aws_ecr_repository.worker            "nexusdeploy-worker-prod"
 
       # ── Step 1: Read current active slot ──
       - name: Read active deployment slot from SSM
@@ -779,38 +1284,66 @@ jobs:
             --name "/nexusdeploy/prod/deployment/active_slot" \
             --region ${{ env.AWS_REGION }} \
             --query 'Parameter.Value' \
-            --output text 2>/dev/null || echo "blue")
+            --output text 2>/dev/null || echo "none")
 
-          # New deployment goes to the OPPOSITE slot
-          if [[ "$CURRENT" == "blue" ]]; then
-            NEW_SLOT="green"
+          # New deployment goes to the OPPOSITE slot. Fresh environment (no
+          # SSM param yet) or an unexpected value → deploy to slot1.
+          if [[ "$CURRENT" == "slot1" ]]; then
+            NEW_SLOT="slot2"
           else
-            NEW_SLOT="blue"
+            NEW_SLOT="slot1"
           fi
 
           echo "current_slot=$CURRENT" >> $GITHUB_OUTPUT
           echo "new_slot=$NEW_SLOT"    >> $GITHUB_OUTPUT
           echo "🔵 Current active: $CURRENT → 🟢 Deploying to: $NEW_SLOT"
 
+      # ── Step 1b: Capture old slot capacity (for rollback) ──
+      - name: Capture old slot capacity (for rollback)
+        id: oldcap
+        run: |
+          OLD_SLOT="${{ steps.slot.outputs.current_slot }}"
+          # Captured BEFORE apply scales the old slot to 0, so a rollback restores
+          # its REAL capacity (autoscaled, or a future api_desired_count > 1)
+          # instead of a hard-coded 1. Defaults to 1 for a first deploy or an
+          # unreadable service. Beat is a singleton — always restored to 1.
+          API=1; WORKER=1
+          if [[ "$OLD_SLOT" == "slot1" || "$OLD_SLOT" == "slot2" ]]; then
+            OLD_CLUSTER="nexusdeploy-prod-$OLD_SLOT"
+            for svc in api worker; do
+              DC=$(aws ecs describe-services --cluster "$OLD_CLUSTER" --services "$OLD_CLUSTER-$svc" \
+                --region ${{ env.AWS_REGION }} --query 'services[0].desiredCount' --output text 2>/dev/null || echo "")
+              if [[ "$DC" =~ ^[0-9]+$ && "$DC" -gt 0 ]]; then
+                [[ "$svc" == "api" ]] && API=$DC || WORKER=$DC
+              fi
+            done
+          fi
+          echo "api=$API"       >> $GITHUB_OUTPUT
+          echo "worker=$WORKER" >> $GITHUB_OUTPUT
+          echo "Captured old slot ($OLD_SLOT) desired counts: api=$API worker=$WORKER (beat singleton=1)"
+
       # ── Step 1c: Read previous images from SSM ──
       - name: Read previous images from SSM
         id: prev_images
         run: |
+          # Fall back to "placeholder" (the variables.tf default) on first deploy —
+          # an empty TF_VAR still counts as "set" and would register a task def with image ""
           PREV_API=$(aws ssm get-parameter \
             --name "/nexusdeploy/prod/deployment/prev_api_image" \
             --query 'Parameter.Value' --output text \
-            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
-          echo "api=${PREV_API}" >> $GITHUB_OUTPUT
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "placeholder")
+          echo "api=${PREV_API:-placeholder}" >> $GITHUB_OUTPUT
 
           PREV_WORKER=$(aws ssm get-parameter \
             --name "/nexusdeploy/prod/deployment/prev_worker_image" \
             --query 'Parameter.Value' --output text \
-            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
-          echo "worker=${PREV_WORKER}" >> $GITHUB_OUTPUT
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "placeholder")
+          echo "worker=${PREV_WORKER:-placeholder}" >> $GITHUB_OUTPUT
 
       # ── Step 2: Deploy to new (inactive) slot ──
       - name: Terraform Apply → new slot
         id: tf_apply
+        timeout-minutes: 30
         working-directory: terraform/environments/prod
         env:
           TF_VAR_api_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}
@@ -822,14 +1355,18 @@ jobs:
           TF_VAR_previous_api_image: ${{ steps.prev_images.outputs.api }}
           TF_VAR_previous_worker_image: ${{ steps.prev_images.outputs.worker }}
           # Set in GitHub → Settings → Environments → prod → Variables → MONITORING_ALLOWED_CIDR
-          # Format: '["1.2.3.4/32","10.0.0.0/8"]' — never commit real CIDRs to repo
+          # Accepts plain CIDR (1.2.3.4/32) or JSON array (["1.2.3.4/32"]) — normalized below
           TF_VAR_monitoring_allowed_cidr: ${{ vars.MONITORING_ALLOWED_CIDR }}
         run: |
           if [[ -z "${TF_VAR_monitoring_allowed_cidr:-}" ]]; then
             echo "::error::MONITORING_ALLOWED_CIDR is not set. Add it in GitHub → Settings → Environments → prod → Variables."
             exit 1
           fi
-          terraform apply -var-file=terraform.tfvars -auto-approve
+          # Normalize: wrap plain CIDR in JSON array so Terraform never falls into interactive prompt
+          if [[ "${TF_VAR_monitoring_allowed_cidr}" != \[* ]]; then
+            export TF_VAR_monitoring_allowed_cidr='["'"${TF_VAR_monitoring_allowed_cidr}"'"]'
+          fi
+          terraform apply -input=false -var-file=terraform.tfvars -auto-approve
         continue-on-error: true
 
       # ── Step 3: Health check new slot (24 hours) ──
@@ -867,7 +1404,9 @@ jobs:
 
             echo "  Running: $RUNNING / Desired: $DESIRED (${ELAPSED}s elapsed)"
 
-            if [[ "$RUNNING" == "$DESIRED" && "$RUNNING" != "0" ]]; then
+            # describe-services on a missing service exits 0 with "None" values —
+            # require numeric counts so that never passes as healthy
+            if [[ "$RUNNING" =~ ^[0-9]+$ && "$RUNNING" == "$DESIRED" && "$RUNNING" != "0" ]]; then
               HEALTH_OK=true
               echo "health_ok=true" >> $GITHUB_OUTPUT
               echo "✅ New slot is healthy!"
@@ -899,13 +1438,16 @@ jobs:
       - name: Store current images as 'previous' for next deploy
         if: steps.health.outputs.health_ok == 'true'
         run: |
+          # Same fallback as tf_apply: on infra-only deploys push-image is skipped
+          # and its outputs are empty — SSM rejects empty values, so store the
+          # image that was actually deployed (current_api/current_worker).
           aws ssm put-parameter \
             --name "/nexusdeploy/prod/deployment/prev_api_image" \
-            --value "${{ needs.push-image.outputs.api_image }}" \
+            --value "${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}" \
             --type String --overwrite --region ${{ env.AWS_REGION }}
           aws ssm put-parameter \
             --name "/nexusdeploy/prod/deployment/prev_worker_image" \
-            --value "${{ needs.push-image.outputs.worker_image }}" \
+            --value "${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.worker_image || needs.setup.outputs.current_worker }}" \
             --type String --overwrite --region ${{ env.AWS_REGION }}
 
       # Schedule old slot scale-down after 24 hours (gives time for monitoring)
@@ -941,20 +1483,44 @@ jobs:
       - name: Rollback - revert to old slot
         if: steps.tf_apply.outcome == 'failure' || steps.health.outputs.health_ok != 'true'
         run: |
-          echo "⚠️ Deployment failed - rolling back to ${{ steps.slot.outputs.current_slot }}"
+          NEW_SLOT="${{ steps.slot.outputs.new_slot }}"
+          OLD_SLOT="${{ steps.slot.outputs.current_slot }}"
+          echo "⚠️ Deployment failed - rolling back to $OLD_SLOT"
 
-          # Scale new (failed) slot back to 0
-          FAILED_CLUSTER="nexusdeploy-prod-${{ steps.slot.outputs.new_slot }}"
+          # Scale the failed new slot down.
+          FAILED_CLUSTER="nexusdeploy-prod-$NEW_SLOT"
           for svc in api worker beat; do
             aws ecs update-service \
-              --cluster $FAILED_CLUSTER \
-              --service "nexusdeploy-prod-${{ steps.slot.outputs.new_slot }}-$svc" \
+              --cluster "$FAILED_CLUSTER" \
+              --service "nexusdeploy-prod-$NEW_SLOT-$svc" \
               --desired-count 0 \
               --region ${{ env.AWS_REGION }} 2>/dev/null || true
           done
 
-          # SSM unchanged - old slot remains active
-          echo "✅ Rollback complete - ${{ steps.slot.outputs.current_slot }} remains active"
+          # terraform apply tied desired counts (and SSM active_slot) to the new
+          # slot, scaling the previously-serving slot to 0. Restore it so a failed
+          # deploy doesn't leave BOTH slots down. Skipped on a first deploy where
+          # there is no prior slot ("none"). (Pragmatic rollback — a proper
+          # zero-overlap redesign is tracked as a follow-up.)
+          if [[ "$OLD_SLOT" == "slot1" || "$OLD_SLOT" == "slot2" ]]; then
+            OLD_CLUSTER="nexusdeploy-prod-$OLD_SLOT"
+            # Restore each service to the capacity captured BEFORE this apply
+            # (steps.oldcap); beat stays a singleton.
+            API_DC="${{ steps.oldcap.outputs.api }}"; WORKER_DC="${{ steps.oldcap.outputs.worker }}"
+            aws ecs update-service --cluster "$OLD_CLUSTER" --service "$OLD_CLUSTER-api" \
+              --desired-count "${API_DC:-1}" --region ${{ env.AWS_REGION }} 2>/dev/null || true
+            aws ecs update-service --cluster "$OLD_CLUSTER" --service "$OLD_CLUSTER-worker" \
+              --desired-count "${WORKER_DC:-1}" --region ${{ env.AWS_REGION }} 2>/dev/null || true
+            aws ecs update-service --cluster "$OLD_CLUSTER" --service "$OLD_CLUSTER-beat" \
+              --desired-count 1 --region ${{ env.AWS_REGION }} 2>/dev/null || true
+            aws ssm put-parameter \
+              --name "/nexusdeploy/prod/deployment/active_slot" \
+              --value "$OLD_SLOT" --type String --overwrite \
+              --region ${{ env.AWS_REGION }} 2>/dev/null || true
+            echo "✅ Rollback complete — restored $OLD_SLOT (api=${API_DC:-1} worker=${WORKER_DC:-1} beat=1, active_slot reset)"
+          else
+            echo "✅ Rollback complete — no prior slot to restore (first deploy)"
+          fi
 
       - name: Deployment summary
         if: always()

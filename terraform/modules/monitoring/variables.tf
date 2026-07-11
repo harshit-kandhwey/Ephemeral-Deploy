@@ -23,13 +23,13 @@ variable "monitoring_sg_id" {
   type        = string
 }
 
-variable "ecs_cluster_name" {
-  description = "ECS cluster name for Prometheus service discovery"
-  type        = string
+variable "ecs_cluster_names" {
+  description = "ECS cluster names for Prometheus service discovery and alarms — one per blue-green slot (single-element list for dev). API services and task families are named \"<cluster>-api\"."
+  type        = list(string)
 }
 
 variable "state_bucket" {
-  description = "S3 bucket name used for Terraform state — monitoring configs are stored here under monitoring/config/"
+  description = "S3 bucket name used for Terraform state — monitoring configs are stored here under monitoring/config/<env>/"
   type        = string
 }
 

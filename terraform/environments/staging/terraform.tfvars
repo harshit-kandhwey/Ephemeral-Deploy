@@ -1,0 +1,6 @@
+github_org      = "harshit-kandhwey"
+github_repo     = "Ephemeral-Deploy"
+tf_state_bucket = "nexusdeploy-terraform-state"
+app_s3_bucket   = "nexusdeploy-attachments-staging"
+vpc_cidr        = "10.2.0.0/16"
+db_name         = "nexusdeploy"

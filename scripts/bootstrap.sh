@@ -18,19 +18,28 @@
 #   SSM parameters  skips any parameter that already exists; never overwrites secrets
 #
 # Usage (run from repo root):
-#   export GITHUB_ORG=your-github-username
-#   export GITHUB_REPO=Ephemeral-Deploy    # exact repo name on GitHub
-#   export ENV=dev                          # dev or prod
+#   export GITHUB_ORG=your-github-username   # optional — derived from git remote if unset
+#   export GITHUB_REPO=Ephemeral-Deploy      # exact repo name on GitHub
+#   export ENV=staging                       # dev | staging | prod — prompted if unset
 #   make bootstrap
 #     OR
-#   MSYS_NO_PATHCONV=1 AWS_REGION=us-east-1 bash scripts/bootstrap.sh
+#   AWS_REGION=us-east-1 bash scripts/bootstrap.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
+
+# Git Bash / MSYS on Windows rewrites any argument that starts with "/" into a
+# Windows path (--name "/nexusdeploy/..." becomes "C:/Program Files/Git/nexusdeploy/...").
+# That silently corrupts every SSM parameter name passed to the AWS CLI —
+# put-parameter then fails with "Parameter name must be a fully qualified name"
+# and the exists-checks never match. Nothing in this script needs the
+# conversion, so disable it for everything the script runs.
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL="*"
 
 # ── Config ────────────────────────────────────
 REGION="${AWS_REGION:-us-east-1}"
 PROJECT="${PROJECT:-nexusdeploy}"
-ENV="${ENV:-dev}"
+ENV="${ENV:-}"
 STATE_BUCKET="${PROJECT}-terraform-state"
 LOCK_TABLE="${PROJECT}-terraform-locks"
 GITHUB_ORG="${GITHUB_ORG:-}"
@@ -49,8 +58,48 @@ log_warn()    { echo -e "${YELLOW}[WARN]${NC}  $1"; }
 log_error()   { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 # ── Pre-flight checks ─────────────────────────
+# Environment: taken from $ENV when exported, otherwise prompted.
+# Everything env-specific below (SSM paths, summary) keys off this value;
+# the S3 bucket, DynamoDB lock table, OIDC provider and deploy role are
+# shared across environments and created/verified on every run.
+until [[ "$ENV" == "dev" || "$ENV" == "staging" || "$ENV" == "prod" ]]; do
+  if [[ -n "$ENV" ]]; then
+    log_warn "Invalid environment '$ENV' — must be dev, staging, or prod"
+  fi
+  # A failed read means stdin is closed (non-interactive run) — abort instead
+  # of looping forever on empty input.
+  read -rp " Target environment (dev/staging/prod): " ENV \
+    || log_error "No input available — run interactively or: export ENV=dev|staging|prod"
+  ENV="${ENV//$'\r'/}" # strip CR from Windows terminals
+done
+
+# GitHub org: use $GITHUB_ORG when exported, else derive from the git remote,
+# else prompt.
 if [[ -z "$GITHUB_ORG" ]]; then
+  ORIGIN_URL=$(git config --get remote.origin.url 2>/dev/null || echo "")
+  if [[ "$ORIGIN_URL" =~ github\.com[:/]([^/]+)/([^/.]+) ]]; then
+    GITHUB_ORG="${BASH_REMATCH[1]}"
+    GITHUB_REPO="${BASH_REMATCH[2]}"
+    log_info "GitHub repo derived from git remote: $GITHUB_ORG/$GITHUB_REPO"
+  fi
+fi
+if [[ -z "${GITHUB_ORG//[[:space:]]/}" ]]; then
+  read -rp " GitHub org/username: " GITHUB_ORG \
+    || log_error "No input available — run interactively or: export GITHUB_ORG=your-github-username"
+  GITHUB_ORG="${GITHUB_ORG//$'\r'/}"
+fi
+if [[ -z "${GITHUB_ORG//[[:space:]]/}" ]]; then
   log_error "GITHUB_ORG is not set.\n  Run: export GITHUB_ORG=your-github-username"
+fi
+# GITHUB_REPO defaults to Ephemeral-Deploy in the config block; only empty
+# if the caller explicitly exported GITHUB_REPO=""
+if [[ -z "${GITHUB_REPO//[[:space:]]/}" ]]; then
+  read -rp " GitHub repo name: " GITHUB_REPO \
+    || log_error "No input available — run interactively or: export GITHUB_REPO=your-repo-name"
+  GITHUB_REPO="${GITHUB_REPO//$'\r'/}"
+fi
+if [[ -z "${GITHUB_REPO//[[:space:]]/}" ]]; then
+  log_error "GITHUB_REPO is not set.\n  Run: export GITHUB_REPO=your-repo-name"
 fi
 
 echo ""
@@ -124,31 +173,26 @@ aws s3api put-public-access-block \
 log_success "Public access blocked on s3://$STATE_BUCKET"
 
 # ──────────────────────────────────────────────
-# STEP 2: DYNAMODB STATE LOCKING (commented out)
-# Single-developer workflow — no concurrent runs possible,
-# so locking adds cost/complexity with no benefit.
-#
-# To enable for a team:
-#   1. Uncomment the block below
-#   2. Add dynamodb_table to backend config in deploy.yml
-#   3. Add dynamodb_table to backend block in each environment's main.tf
-# Cost: $0 — DynamoDB PAY_PER_REQUEST with <25 ops/day is negligible
+# STEP 2: DYNAMODB STATE LOCKING
+# One shared table handles all environments — lock keys include the
+# state path (e.g. staging/terraform.tfstate) so there is no collision.
+# Cost: $0 — PAY_PER_REQUEST with <25 ops/day is negligible.
 # ──────────────────────────────────────────────
 
-# log_info "Creating DynamoDB state lock table: $LOCK_TABLE"
-# if aws dynamodb describe-table --table-name "$LOCK_TABLE" --region "$REGION" 2>/dev/null; then
-#   log_warn "Table $LOCK_TABLE already exists — skipping"
-# else
-#   aws dynamodb create-table \
-#     --table-name "$LOCK_TABLE" \
-#     --attribute-definitions AttributeName=LockID,AttributeType=S \
-#     --key-schema AttributeName=LockID,KeyType=HASH \
-#     --billing-mode PAY_PER_REQUEST \
-#     --region "$REGION" \
-#     --tags Key=Project,Value="$PROJECT" Key=ManagedBy,Value=bootstrap
-#   aws dynamodb wait table-exists --table-name "$LOCK_TABLE" --region "$REGION"
-#   log_success "Created DynamoDB table: $LOCK_TABLE"
-# fi
+log_info "Creating DynamoDB state lock table: $LOCK_TABLE"
+if aws dynamodb describe-table --table-name "$LOCK_TABLE" --region "$REGION" 2>/dev/null; then
+  log_warn "Table $LOCK_TABLE already exists — skipping"
+else
+  aws dynamodb create-table \
+    --table-name "$LOCK_TABLE" \
+    --attribute-definitions AttributeName=LockID,AttributeType=S \
+    --key-schema AttributeName=LockID,KeyType=HASH \
+    --billing-mode PAY_PER_REQUEST \
+    --region "$REGION" \
+    --tags Key=Project,Value="$PROJECT" Key=ManagedBy,Value=bootstrap
+  aws dynamodb wait table-exists --table-name "$LOCK_TABLE" --region "$REGION"
+  log_success "Created DynamoDB table: $LOCK_TABLE"
+fi
 
 # ──────────────────────────────────────────────
 # STEP 3: GITHUB OIDC PROVIDER
@@ -283,6 +327,17 @@ DEPLOY_POLICY1=$(cat <<ENDPOLICY1
         "arn:aws:s3:::${STATE_BUCKET}",
         "arn:aws:s3:::${STATE_BUCKET}/*"
       ]
+    },
+    {
+      "Sid": "DynamoDBLock",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable"
+      ],
+      "Resource": "arn:aws:dynamodb:*:${ACCOUNT_ID}:table/${LOCK_TABLE}"
     },
     {
       "Sid": "SSM",
@@ -791,7 +846,8 @@ else
 echo "════════════════════════════════════════════════════════"
 echo " SSM Secrets Setup — ENV=$ENV"
 echo " You will be prompted for each value."
-echo " Press Enter to skip any that are already set."
+echo " Parameters that already exist are skipped automatically;"
+echo " you will only be prompted for the missing ones."
 echo "════════════════════════════════════════════════════════"
 echo ""
 
@@ -815,25 +871,52 @@ create_ssm_param() {
   local param_type
   param_type=$([[ "$secure" == "true" ]] && echo "SecureString" || echo "String")
 
-  # Check if already exists
-  if aws ssm get-parameter --name "$path" --region "$REGION" &>/dev/null; then
+  # Check if already exists — only ParameterNotFound means "missing".
+  # Any other lookup failure (AccessDenied, network) would make put-parameter
+  # fail the same way after prompting, so abort with the real error instead.
+  local lookup_err
+  if lookup_err=$(aws ssm get-parameter --name "$path" --region "$REGION" 2>&1 >/dev/null); then
     log_warn "Already exists — skipping: $path"
     return 0
+  elif [[ "$lookup_err" != *ParameterNotFound* ]]; then
+    log_error "Could not check $path — fix the underlying issue and re-run:\n$lookup_err"
   fi
 
-  if [[ "$secure" == "true" ]]; then
-    read -rsp "  [$param_type] $path  ($description): " value
-  else
-    read -rp  "  [$param_type] $path  ($description): " value
-  fi
-  echo ""
+  while :; do
+    # A failed read means stdin is closed (non-interactive run) — abort
+    # instead of looping forever on empty input.
+    if [[ "$secure" == "true" ]]; then
+      read -rsp "  [$param_type] $path  ($description): " value \
+        || log_error "Input stream closed while reading $path — run bootstrap interactively"
+    else
+      read -rp  "  [$param_type] $path  ($description): " value \
+        || log_error "Input stream closed while reading $path — run bootstrap interactively"
+    fi
+    echo ""
+    value="${value//$'\r'/}" # strip CR from Windows terminals
 
-  if [[ -z "$value" ]]; then
-    log_warn "  Skipped (empty input): $path"
-    return 0
-  fi
+    # Every parameter here is read by a Terraform data source at deploy
+    # time — skipping a missing one only defers the failure into the
+    # workflow, so re-prompt instead of silently continuing. Whitespace-only
+    # input counts as empty (it would create an unusable parameter).
+    if [[ -z "${value//[[:space:]]/}" ]]; then
+      log_warn "  A value is required — $path does not exist yet and Terraform reads it at deploy time"
+      echo    "     (Ctrl+C to abort; bootstrap is idempotent — re-run to resume from here)"
+      continue
+    fi
 
-  aws ssm put-parameter     --name "$path"     --value "$value"     --type "$param_type"     --description "$description"     --region "$REGION"     --no-cli-pager
+    # RDS rejects passwords containing / @ " or spaces — catch it here
+    # instead of failing the RDS create 20 minutes into the first deploy.
+    if [[ "$path" == */db/*password* && "$value" =~ [/@\"[:space:]] ]]; then
+      log_warn "  RDS passwords must not contain / @ \" or spaces — try again"
+      continue
+    fi
+    break
+  done
+
+  if ! aws ssm put-parameter     --name "$path"     --value "$value"     --type "$param_type"     --description "$description"     --region "$REGION"     --no-cli-pager; then
+    log_error "Failed to store $path — see the AWS error above (nothing after this parameter was created; re-run bootstrap to resume)"
+  fi
   # Tag separately — avoids MSYS path conversion mangling Key=Value on Windows
   aws ssm add-tags-to-resource     --resource-type "Parameter"     --resource-id "$path"     --tags "Key=Project,Value=$PROJECT" "Key=Environment,Value=$ENV" "Key=ManagedBy,Value=bootstrap"     --region "$REGION"     --no-cli-pager 2>/dev/null || true
   log_success "  Stored: $path"
@@ -867,14 +950,15 @@ echo "     Name:  AWS_DEPLOY_ROLE_ARN"
 echo "     Value: $ROLE_ARN"
 echo ""
 echo "  2. Create GitHub Environments (Settings → Environments):"
-echo "     • dev  — no approval gate"
-echo "     • prod — enable Required reviewers (add yourself)"
+echo "     • dev     — no approval gate"
+echo "     • staging — no approval gate; add variable MONITORING_ALLOWED_CIDR (your IP, e.g. 1.2.3.4/32)"
+echo "     • prod    — enable Required reviewers (add yourself); add variable MONITORING_ALLOWED_CIDR"
 echo ""
-echo "  3. Verify terraform.tfvars in both environments:"
-echo "     terraform/environments/dev/terraform.tfvars"
+echo "  3. Verify terraform.tfvars for the environment you bootstrapped:"
+echo "     terraform/environments/$ENV/terraform.tfvars"
 echo "       github_org  = \"$GITHUB_ORG\""
 echo "       github_repo = \"$GITHUB_REPO\""
 echo ""
 echo "  4. Push to trigger your first deployment:"
-echo "     git push origin dev"
+echo "     git push origin $ENV"
 echo ""

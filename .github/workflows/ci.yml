@@ -2,10 +2,17 @@ name: CI - Test & Build
 
 on:
   push:
-    branches: [main, dev, "feature/**"]
+    branches: [main, dev, staging, "feature/**"]
   pull_request:
-    branches: [main, dev]
+    branches: [main, dev, staging]
   workflow_dispatch: # allow manual trigger
+
+# One CI run per branch — a newer push cancels the in-progress run for the
+# same ref, so a burst of merges (e.g. several dependabot PRs) doesn't queue
+# a pile of stale runs waiting for hosted runners.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   PYTHON_VERSION: "3.11"
@@ -32,12 +39,35 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 2
+          # Full history — a multi-commit push is diffed against
+          # github.event.before, which can be many commits back.
+          fetch-depth: 0
 
       - name: Detect changed paths
         id: filter
         run: |
-          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "app/ terraform/")
+          # Manual dispatch = full run. Path filtering only applies to
+          # automatic triggers (push / pull_request).
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "app=true"   >> $GITHUB_OUTPUT
+            echo "infra=true" >> $GITHUB_OUTPUT
+            echo "🖐️ Manual dispatch — running all checks regardless of changed paths"
+            exit 0
+          fi
+
+          # Diff the whole trigger range, not just the last commit:
+          #   push         → event.before..HEAD covers every commit in the push
+          #   new branch   → event.before is all zeros — fall back to HEAD~1
+          #   pull_request → HEAD is the synthetic merge commit, so HEAD~1 is
+          #                  the base branch tip and the diff is the full PR
+          # If the diff fails (e.g. force push pruned event.before), fall back
+          # to treating everything as changed — safe, just runs more jobs.
+          BASE="HEAD~1"
+          if [[ "${{ github.event_name }}" == "push" && \
+                "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
+            BASE="${{ github.event.before }}"
+          fi
+          CHANGED=$(git diff --name-only "$BASE" HEAD 2>/dev/null || printf 'app/\nterraform/\n')
 
           if echo "$CHANGED" | grep -q "^app/"; then
             echo "app=true"  >> $GITHUB_OUTPUT
@@ -127,7 +157,7 @@ jobs:
     needs: [detect-changes, lint]
     # Only run when app code changed AND lint passed
     if: |
-      always() &&
+      !cancelled() &&
       needs.detect-changes.outputs.app_changed == 'true' &&
       (needs.lint.result == 'success' || needs.lint.result == 'skipped')
 
@@ -201,7 +231,7 @@ jobs:
     needs: [detect-changes, lint]
     # Parallel with test — only needs lint to pass, not test
     if: |
-      always() &&
+      !cancelled() &&
       needs.detect-changes.outputs.app_changed == 'true' &&
       (needs.lint.result == 'success' || needs.lint.result == 'skipped')
 
@@ -236,7 +266,7 @@ jobs:
           output-format: sarif
 
       - name: Display Grype scan summary
-        if: always()
+        if: ${{ !cancelled() }}
         run: |
           echo "::group::Grype Scan Results"
           cat ${{ steps.grype.outputs.sarif }} \
@@ -247,7 +277,10 @@ jobs:
 
       - name: Upload Grype results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v4
-        if: always()
+        # Skip when the scan never ran (e.g. docker build failed) — with a
+        # plain always() this step errored on the missing sarif_file input.
+        # !cancelled() (not always()) so a superseded run stops here too.
+        if: ${{ !cancelled() && steps.grype.outputs.sarif != '' }}
         with:
           sarif_file: ${{ steps.grype.outputs.sarif }}
         continue-on-error: true
@@ -313,16 +346,25 @@ jobs:
           TF_VAR_api_image: "placeholder"
           TF_VAR_worker_image: "placeholder"
           TF_VAR_git_commit: "ci-validate"
+          # Required by staging/prod; dev doesn't declare it — a TF_VAR env var
+          # is silently ignored there, unlike -var which is a hard error
+          TF_VAR_monitoring_allowed_cidr: "[]"
         run: |
           mkdir -p "$TF_PLUGIN_CACHE_DIR"
-          for env in dev prod; do
+          for env in dev staging prod; do
             echo "Validating $env..."
             cd terraform/environments/$env
             terraform init -backend=false -input=false
             terraform validate
             # plan -refresh=false catches templatefile() and function errors
             # that validate misses — no real AWS calls made with -backend=false
-            terraform plan -refresh=false               -var-file=terraform.tfvars               -var="aws_region=us-east-1"               -var="tf_state_bucket=nexusdeploy-terraform-state"               -var="app_s3_bucket=nexusdeploy-attachments-dev"               -var="db_name=nexusdeploy"               2>&1 | grep -E "^Error:|^Warning:|Plan:|will be created|will be destroyed" || true
+            terraform plan -refresh=false -input=false \
+              -var-file=terraform.tfvars \
+              -var="aws_region=us-east-1" \
+              -var="tf_state_bucket=nexusdeploy-terraform-state" \
+              -var="app_s3_bucket=nexusdeploy-attachments-${env}" \
+              -var="db_name=nexusdeploy" \
+              2>&1 | grep -E "^Error:|^Warning:|Plan:|will be created|will be destroyed" || true
             cd ../../..
           done
 
@@ -334,7 +376,10 @@ jobs:
     name: CI Summary
     runs-on: ubuntu-latest
     needs: [detect-changes, lint, test, docker-build, terraform-lint]
-    if: always()
+    # !cancelled(), NOT always(): with always() a run cancelled by
+    # concurrency cancel-in-progress would still reach this job, count the
+    # cancelled jobs as passed, and dispatch a deploy for the stale commit.
+    if: ${{ !cancelled() }}
     steps:
       - name: Check all jobs passed
         run: |
@@ -371,22 +416,47 @@ jobs:
           echo "   Infra jobs: ${{ needs.terraform-lint.result }}"
 
       - name: Trigger deploy pipeline
+        # Deploys cost real AWS money — dependency bumps should run CI but
+        # never auto-deploy. Covers all three merge styles of a Dependabot PR:
+        # squash ("chore(deps): ..." or "chore(deps-dev): ..."), merge commit
+        # ("Merge pull request ... from <org>/dependabot/..."), and direct
+        # dependabot pushes. The 'chore(deps' prefix (no closing paren) matches
+        # both the deps and deps-dev groups.
+        # An explicit [skip deploy] in the head commit message also skips it.
         if: |
           github.event_name == 'push' &&
-          (github.ref_name == 'dev' || github.ref_name == 'main')
+          (github.ref_name == 'dev' || github.ref_name == 'staging' || github.ref_name == 'main') &&
+          github.actor != 'dependabot[bot]' &&
+          !startsWith(github.event.head_commit.message, 'chore(deps') &&
+          !contains(github.event.head_commit.message, 'dependabot/') &&
+          !contains(github.event.head_commit.message, '[skip deploy]')
         uses: actions/github-script@v9
         with:
           script: |
             const branch = context.ref.replace('refs/heads/', '');
+            const envMap = { main: 'prod', staging: 'staging', dev: 'dev' };
+            const environment = envMap[branch] || 'dev';
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo:  context.repo.repo,
               workflow_id: 'deploy.yml',
               ref: context.ref,
               inputs: {
-                environment: branch === 'main' ? 'prod' : 'dev',
+                environment,
                 action: 'apply',
                 app_changed: '${{ needs.detect-changes.outputs.app_changed }}'
               }
             });
-            console.log(`🚀 Deploy triggered for ${branch}`);
+            console.log(`🚀 Deploy triggered for ${branch} → ${environment}`);
+
+      - name: Deploy dispatch skipped (dependency bump or [skip deploy])
+        if: |
+          github.event_name == 'push' &&
+          (github.ref_name == 'dev' || github.ref_name == 'staging' || github.ref_name == 'main') &&
+          (github.actor == 'dependabot[bot]' ||
+           startsWith(github.event.head_commit.message, 'chore(deps') ||
+           contains(github.event.head_commit.message, 'dependabot/') ||
+           contains(github.event.head_commit.message, '[skip deploy]'))
+        run: |
+          echo "⏭️  CI passed but deploy was NOT dispatched — dependency bump or [skip deploy] marker." | tee -a $GITHUB_STEP_SUMMARY
+          echo "Run deploy.yml manually (Actions → Deploy → Run workflow) if this change should ship." | tee -a $GITHUB_STEP_SUMMARY

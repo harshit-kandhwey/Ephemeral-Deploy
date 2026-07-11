@@ -24,9 +24,7 @@ terraform {
     # -backend-config="key=prod/terraform.tfstate"
     # -backend-config="region=us-east-1"
     # -backend-config="encrypt=true"
-    #
-    # DynamoDB locking (recommended for prod team use - enable when needed):
-    # dynamodb_table = "nexusdeploy-terraform-locks"
+    # -backend-config="dynamodb_table=nexusdeploy-terraform-locks"
   }
 }
 
@@ -44,7 +42,7 @@ locals {
 
   # Blue-green: determine active slot from variable
   # deploy.yml sets this based on what's currently running
-  active_slot = var.deployment_slot # "blue" or "green"
+  active_slot = var.deployment_slot # "slot1" or "slot2"
 
   common_tags = {
     Project     = local.project
@@ -102,10 +100,6 @@ data "aws_ssm_parameter" "jwt_secret_key" {
   with_decryption = true
 }
 
-data "aws_ssm_parameter" "grafana_admin_password" {
-  name            = "/${local.project}/${local.environment}/monitoring/grafana_password"
-  with_decryption = true
-}
 
 # ── Secrets Manager (ECS runtime injection) ──
 resource "aws_secretsmanager_secret" "app" {
@@ -237,31 +231,29 @@ module "elasticache" {
 # ══════════════════════════════════════════════
 # BLUE-GREEN ECS DEPLOYMENT
 #
-# How it works:
-#   1. First deploy: slot = "blue", only blue ECS service runs
-#   2. Next deploy:  slot = "green"
-#      - Green service launches with new image (new tasks start)
-#      - Both blue and green run simultaneously for 24 hours
-#      - deploy.yml polls green health for 24h, then destroys blue
-#   3. If green fails health checks → deploy.yml reverts slot to "blue"
+# How it works (slots are named slot1/slot2; the strategy is blue-green):
+#   1. First deploy: slot = "slot1", only the slot1 ECS services run
+#   2. Next deploy:  slot = "slot2"
+#      - slot2 services launch with the new image (new tasks start)
+#      - Both slots run simultaneously for 24 hours
+#      - deploy.yml polls slot2 health for 24h, then drains slot1
+#   3. If slot2 fails health checks → deploy.yml reverts slot to "slot1"
 #
 # Terraform manages both slots. The inactive one has desired_count=0
 # so it costs nothing while standing by.
 # ══════════════════════════════════════════════
 
 # ── Blue slot ─────────────────────────────────
-module "ecs_blue" {
+module "ecs_slot1" {
   source = "../../modules/ecs"
 
   project                       = local.project
-  environment                   = "${local.environment}-blue" # Separate service names
+  environment                   = "${local.environment}-slot1" # Separate service names
   aws_region                    = var.aws_region
-  api_image                     = local.active_slot == "blue" ? var.api_image : var.previous_api_image
-  worker_image                  = local.active_slot == "blue" ? var.worker_image : var.previous_worker_image
+  api_image                     = local.active_slot == "slot1" ? var.api_image : var.previous_api_image
+  worker_image                  = local.active_slot == "slot1" ? var.worker_image : var.previous_worker_image
   git_commit                    = var.git_commit
-  vpc_id                        = module.vpc.vpc_id
   private_app_subnet_ids        = module.vpc.private_app_subnet_ids
-  public_subnet_ids             = module.vpc.public_subnet_ids
   api_sg_id                     = module.security_groups.api_sg_id
   worker_sg_id                  = module.security_groups.worker_sg_id
   ecs_execution_role_arn        = module.iam.ecs_execution_role_arn
@@ -271,15 +263,16 @@ module "ecs_blue" {
   init_secrets_arn              = aws_secretsmanager_secret.init.arn
   log_retention_days            = 14
 
-  # Blue is active when deployment_slot = "blue", else it's being drained
-  api_desired_count    = local.active_slot == "blue" ? 1 : 0
-  worker_desired_count = local.active_slot == "blue" ? 1 : 0
+  # slot1 is active when deployment_slot = "slot1", else it's being drained
+  api_desired_count    = local.active_slot == "slot1" ? 1 : 0
+  worker_desired_count = local.active_slot == "slot1" ? 1 : 0
+  beat_desired_count   = local.active_slot == "slot1" ? 1 : 0
   api_cpu              = 256
   api_memory           = 512
   worker_cpu           = 256
   worker_memory        = 512
 
-  common_tags = merge(local.common_tags, { Slot = "blue" })
+  common_tags = merge(local.common_tags, { Slot = "slot1" })
 
   depends_on = [
     aws_secretsmanager_secret_version.app,
@@ -290,18 +283,16 @@ module "ecs_blue" {
 }
 
 # ── Green slot ────────────────────────────────
-module "ecs_green" {
+module "ecs_slot2" {
   source = "../../modules/ecs"
 
   project                       = local.project
-  environment                   = "${local.environment}-green"
+  environment                   = "${local.environment}-slot2"
   aws_region                    = var.aws_region
-  api_image                     = local.active_slot == "green" ? var.api_image : var.previous_api_image
-  worker_image                  = local.active_slot == "green" ? var.worker_image : var.previous_worker_image
+  api_image                     = local.active_slot == "slot2" ? var.api_image : var.previous_api_image
+  worker_image                  = local.active_slot == "slot2" ? var.worker_image : var.previous_worker_image
   git_commit                    = var.git_commit
-  vpc_id                        = module.vpc.vpc_id
   private_app_subnet_ids        = module.vpc.private_app_subnet_ids
-  public_subnet_ids             = module.vpc.public_subnet_ids
   api_sg_id                     = module.security_groups.api_sg_id
   worker_sg_id                  = module.security_groups.worker_sg_id
   ecs_execution_role_arn        = module.iam.ecs_execution_role_arn
@@ -311,15 +302,16 @@ module "ecs_green" {
   init_secrets_arn              = aws_secretsmanager_secret.init.arn
   log_retention_days            = 14
 
-  # Green is active when deployment_slot = "green"
-  api_desired_count    = local.active_slot == "green" ? 1 : 0
-  worker_desired_count = local.active_slot == "green" ? 1 : 0
+  # slot2 is active when deployment_slot = "slot2"
+  api_desired_count    = local.active_slot == "slot2" ? 1 : 0
+  worker_desired_count = local.active_slot == "slot2" ? 1 : 0
+  beat_desired_count   = local.active_slot == "slot2" ? 1 : 0
   api_cpu              = 256
   api_memory           = 512
   worker_cpu           = 256
   worker_memory        = 512
 
-  common_tags = merge(local.common_tags, { Slot = "green" })
+  common_tags = merge(local.common_tags, { Slot = "slot2" })
 
   depends_on = [
     aws_secretsmanager_secret_version.app,
@@ -333,26 +325,20 @@ module "ecs_green" {
 module "monitoring" {
   source = "../../modules/monitoring"
 
-  project                = local.project
-  environment            = local.environment
-  aws_region             = var.aws_region
-  vpc_id                 = module.vpc.vpc_id
-  public_subnet_id       = module.vpc.public_subnet_ids[0]
-  monitoring_sg_id       = module.security_groups.monitoring_sg_id
-  ecs_cluster_name       = module.ecs_blue.cluster_name # Cluster is shared
-  grafana_admin_password = data.aws_ssm_parameter.grafana_admin_password.value
-  cloudwatch_log_groups = [
-    "/ecs/${local.project}/${local.environment}-blue/api",
-    "/ecs/${local.project}/${local.environment}-green/api",
-    "/ecs/${local.project}/${local.environment}-blue/worker",
-    "/ecs/${local.project}/${local.environment}-green/worker",
+  project          = local.project
+  environment      = local.environment
+  aws_region       = var.aws_region
+  public_subnet_id = module.vpc.public_subnet_ids[0]
+  monitoring_sg_id = module.security_groups.monitoring_sg_id
+  # Constructed names, not module outputs: monitoring watches BOTH slot
+  # clusters (the active one alternates) and provisions in parallel with ECS
+  # instead of waiting on it — the discovery cron tolerates missing clusters.
+  ecs_cluster_names = [
+    "${local.project}-${local.environment}-slot1",
+    "${local.project}-${local.environment}-slot2",
   ]
-  common_tags = local.common_tags
-
-  depends_on = [
-    module.ecs_blue,
-    module.ecs_green,
-  ]
+  state_bucket = var.tf_state_bucket
+  common_tags  = local.common_tags
 }
 
 # ── SSM: Store active slot for next deployment ─
@@ -380,14 +366,14 @@ output "db_endpoint" {
   value       = module.rds.db_endpoint
 }
 
-output "ecs_cluster_name_blue" {
-  description = "Blue ECS cluster name"
-  value       = module.ecs_blue.cluster_name
+output "ecs_cluster_name_slot1" {
+  description = "Slot 1 ECS cluster name"
+  value       = module.ecs_slot1.cluster_name
 }
 
-output "ecs_cluster_name_green" {
-  description = "Green ECS cluster name"
-  value       = module.ecs_green.cluster_name
+output "ecs_cluster_name_slot2" {
+  description = "Slot 2 ECS cluster name"
+  value       = module.ecs_slot2.cluster_name
 }
 
 output "worker_sg_id" {

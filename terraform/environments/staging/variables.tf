@@ -26,7 +26,7 @@ variable "app_s3_bucket" {
 
 variable "vpc_cidr" {
   type    = string
-  default = "10.1.0.0/16"
+  default = "10.2.0.0/16" # dev=10.0, prod=10.1, staging=10.2
 }
 
 variable "availability_zones" {

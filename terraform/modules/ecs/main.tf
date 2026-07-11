@@ -13,13 +13,20 @@ terraform {
 # ECS Module - Fargate containers for API + Worker + Beat
 # ─────────────────────────────────────────────
 
+locals {
+  # var.environment carries the slot suffix in blue-green environments
+  # ("prod-slot1", "prod-slot2"), so an equality check against "prod" would
+  # silently put production on FARGATE_SPOT with container insights off.
+  is_production = startswith(var.environment, "prod")
+}
+
 # ── ECS Cluster ──────────────────────────────
 resource "aws_ecs_cluster" "main" {
   name = "${var.project}-${var.environment}"
 
   setting {
     name  = "containerInsights"
-    value = var.environment == "prod" ? "enabled" : "disabled" # Cost optimization
+    value = local.is_production ? "enabled" : "disabled" # Cost optimization
   }
 
   tags = var.common_tags
@@ -28,10 +35,10 @@ resource "aws_ecs_cluster" "main" {
 resource "aws_ecs_cluster_capacity_providers" "main" {
   cluster_name = aws_ecs_cluster.main.name
 
-  capacity_providers = var.environment == "prod" ? ["FARGATE"] : ["FARGATE", "FARGATE_SPOT"]
+  capacity_providers = local.is_production ? ["FARGATE"] : ["FARGATE", "FARGATE_SPOT"]
 
   default_capacity_provider_strategy {
-    capacity_provider = var.environment == "prod" ? "FARGATE" : "FARGATE_SPOT"
+    capacity_provider = local.is_production ? "FARGATE" : "FARGATE_SPOT"
     weight            = 1
     base              = 1
   }
@@ -80,7 +87,10 @@ resource "aws_ecs_task_definition" "api" {
       ]
 
       environment = [
-        { name = "ENV", value = var.environment == "dev" ? "development" : var.environment },
+        # ENV selects the app config in config.py, which only defines
+        # development/production/testing — blue-green slot names like
+        # "staging-green" must never leak into it (KeyError at startup).
+        { name = "ENV", value = var.environment == "dev" ? "development" : "production" },
         { name = "VERSION", value = var.git_commit }
       ]
 
@@ -134,13 +144,20 @@ resource "aws_ecs_task_definition" "worker" {
       essential = true
 
       environment = [
-        { name = "ENV", value = var.environment == "dev" ? "development" : var.environment },
+        # ENV selects the app config in config.py, which only defines
+        # development/production/testing — blue-green slot names like
+        # "staging-green" must never leak into it (KeyError at startup).
+        { name = "ENV", value = var.environment == "dev" ? "development" : "production" },
         { name = "VERSION", value = var.git_commit }
       ]
 
       secrets = [
         { name = "DATABASE_URL", valueFrom = "${var.secrets_arn}:DATABASE_URL::" },
         { name = "REDIS_URL", valueFrom = "${var.secrets_arn}:REDIS_URL::" },
+        # create_app validates these in production — the worker and the
+        # init_db one-shot both boot the full Flask app.
+        { name = "SECRET_KEY", valueFrom = "${var.secrets_arn}:SECRET_KEY::" },
+        { name = "JWT_SECRET_KEY", valueFrom = "${var.secrets_arn}:JWT_SECRET_KEY::" },
         { name = "CELERY_BROKER_URL", valueFrom = "${var.secrets_arn}:CELERY_BROKER_URL::" },
         { name = "CELERY_RESULT_BACKEND", valueFrom = "${var.secrets_arn}:CELERY_RESULT_BACKEND::" },
         { name = "DB_MASTER_USER", valueFrom = "${var.init_secrets_arn}:DB_MASTER_USER::" },
@@ -181,12 +198,20 @@ resource "aws_ecs_task_definition" "beat" {
       command   = ["celery", "-A", "src.celery_worker:celery", "beat", "--loglevel=info"]
 
       environment = [
-        { name = "ENV", value = var.environment == "dev" ? "development" : var.environment }
+        # Same rule as api/worker: only development/production are valid here.
+        { name = "ENV", value = var.environment == "dev" ? "development" : "production" }
       ]
 
+      # Beat boots the same Flask app as the worker (create_app validates
+      # SECRET_KEY/JWT in production and wires Redis/Celery), so it needs the
+      # full secret set — not just the broker URL.
       secrets = [
         { name = "DATABASE_URL", valueFrom = "${var.secrets_arn}:DATABASE_URL::" },
-        { name = "CELERY_BROKER_URL", valueFrom = "${var.secrets_arn}:CELERY_BROKER_URL::" }
+        { name = "REDIS_URL", valueFrom = "${var.secrets_arn}:REDIS_URL::" },
+        { name = "SECRET_KEY", valueFrom = "${var.secrets_arn}:SECRET_KEY::" },
+        { name = "JWT_SECRET_KEY", valueFrom = "${var.secrets_arn}:JWT_SECRET_KEY::" },
+        { name = "CELERY_BROKER_URL", valueFrom = "${var.secrets_arn}:CELERY_BROKER_URL::" },
+        { name = "CELERY_RESULT_BACKEND", valueFrom = "${var.secrets_arn}:CELERY_RESULT_BACKEND::" }
       ]
 
       logConfiguration = {
@@ -213,7 +238,7 @@ resource "aws_ecs_service" "api" {
   health_check_grace_period_seconds = 60
 
   capacity_provider_strategy {
-    capacity_provider = var.environment == "prod" ? "FARGATE" : "FARGATE_SPOT"
+    capacity_provider = local.is_production ? "FARGATE" : "FARGATE_SPOT"
     weight            = 1
     base              = 1
   }
@@ -256,7 +281,7 @@ resource "aws_ecs_service" "worker" {
   desired_count   = var.worker_desired_count
 
   capacity_provider_strategy {
-    capacity_provider = var.environment == "prod" ? "FARGATE" : "FARGATE_SPOT"
+    capacity_provider = local.is_production ? "FARGATE" : "FARGATE_SPOT"
     weight            = 1
     base              = 0
   }
@@ -283,10 +308,13 @@ resource "aws_ecs_service" "beat" {
   name            = "${var.project}-${var.environment}-beat"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.beat.arn
-  desired_count   = 1 # Beat scheduler must be singleton
+  # Beat is a singleton: at most one instance ever. In blue-green only the
+  # active slot passes 1; the idle slot passes 0 so two schedulers can't both
+  # fire scheduled tasks. Dev (single slot) defaults to 1.
+  desired_count = var.beat_desired_count
 
   capacity_provider_strategy {
-    capacity_provider = var.environment == "prod" ? "FARGATE" : "FARGATE_SPOT"
+    capacity_provider = local.is_production ? "FARGATE" : "FARGATE_SPOT"
     weight            = 1
   }
 
