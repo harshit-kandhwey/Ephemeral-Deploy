@@ -15,7 +15,7 @@ on:
         type: choice
         options: [destroy, drain_old_slot]
       old_slot:
-        description: "Old blue-green slot to drain (blue or green) — drain_old_slot only"
+        description: "Old blue-green slot to drain (slot1 or slot2) — drain_old_slot only"
         required: false
         default: ""
       delay_minutes:
@@ -112,7 +112,7 @@ jobs:
           # state file is wiped afterwards, so anything skipped here becomes an
           # orphan that fails the next deploy with ParameterAlreadyExists.
           if [[ "${{ env.TF_ENV }}" == "staging" || "${{ env.TF_ENV }}" == "prod" ]]; then
-            ECS_TARGETS="-target=module.ecs_blue -target=module.ecs_green -target=aws_ssm_parameter.active_slot"
+            ECS_TARGETS="-target=module.ecs_slot1 -target=module.ecs_slot2 -target=aws_ssm_parameter.active_slot"
           else
             ECS_TARGETS="-target=module.ecs"
           fi

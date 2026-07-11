@@ -11,7 +11,6 @@ echo "=== Monitoring setup started at $(date) ==="
 PROJECT="${project}"
 ENVIRONMENT="${environment}"
 AWS_REGION="${aws_region}"
-ECS_CLUSTER="${ecs_cluster_name}"
 STATE_BUCKET="${state_bucket}"
 CONFIG_PREFIX="monitoring/config"
 
@@ -147,14 +146,15 @@ escape_sed() { printf '%s\n' "$1" | sed -e 's/[]\/$*.^[&]/\\&/g'; }
 PROJECT_ESC=$(escape_sed "$PROJECT")
 ENV_ESC=$(escape_sed "$ENVIRONMENT")
 REGION_ESC=$(escape_sed "$AWS_REGION")
-CLUSTER_ESC=$(escape_sed "$ECS_CLUSTER")
+# No NEXUSDEPLOY_CLUSTER substitution: Prometheus discovers API tasks via the
+# file-based ecs-targets.json (below) and YACE discovers via resource tags —
+# neither config file embeds a cluster name, and blue-green has two clusters.
 
 for f in /etc/prometheus/prometheus.yml /etc/yace/config.yml /var/lib/grafana/dashboards/nexusdeploy.json; do
   sed -i \
     -e "s/NEXUSDEPLOY_PROJECT/$PROJECT_ESC/g" \
     -e "s/NEXUSDEPLOY_ENV/$ENV_ESC/g" \
     -e "s/NEXUSDEPLOY_REGION/$REGION_ESC/g" \
-    -e "s/NEXUSDEPLOY_CLUSTER/$CLUSTER_ESC/g" \
     "$f"
 done
 echo "✅ Placeholders substituted"
@@ -189,23 +189,25 @@ systemctl enable --now grafana-server
 cat > /usr/local/bin/ecs-discovery.sh << 'DISCOVERY'
 #!/bin/bash
 set -e
-CLUSTER="${ecs_cluster_name}"
+# One cluster per blue-green slot (dev passes a single cluster). Clusters that
+# don't exist yet or have no running tasks contribute nothing — monitoring can
+# come up before ECS and pick tasks up on a later cron run.
+CLUSTERS="${ecs_cluster_names}"
 REGION="${aws_region}"
 OUTPUT="/etc/prometheus/ecs-targets.json"
 
-TASKS=$(aws ecs list-tasks   --cluster "$CLUSTER"   --family nexusdeploy-${environment}-api   --region "$REGION"   --query 'taskArns' --output text 2>/dev/null || echo "")
-
-if [[ -z "$TASKS" ]]; then
-  echo "[]" > "$OUTPUT"
-  exit 0
-fi
-
-IPS=$(aws ecs describe-tasks   --cluster "$CLUSTER"   --tasks $TASKS   --region "$REGION"   --query 'tasks[*].attachments[0].details[?name==`privateIPv4Address`].value'   --output text 2>/dev/null || echo "")
-
 TARGETS=()
-for IP in $IPS; do
-  [[ -z "$IP" || "$IP" == "None" ]] && continue
-  TARGETS+=("$IP:5000")
+for CLUSTER in $CLUSTERS; do
+  # API services and task families are named "<cluster>-api"
+  TASKS=$(aws ecs list-tasks   --cluster "$CLUSTER"   --family "$CLUSTER-api"   --region "$REGION"   --query 'taskArns' --output text 2>/dev/null || echo "")
+  [[ -z "$TASKS" || "$TASKS" == "None" ]] && continue
+
+  IPS=$(aws ecs describe-tasks   --cluster "$CLUSTER"   --tasks $TASKS   --region "$REGION"   --query 'tasks[*].attachments[0].details[?name==`privateIPv4Address`].value'   --output text 2>/dev/null || echo "")
+
+  for IP in $IPS; do
+    [[ -z "$IP" || "$IP" == "None" ]] && continue
+    TARGETS+=("$IP:5000")
+  done
 done
 
 if [[ $${#TARGETS[@]} -eq 0 ]]; then

@@ -199,11 +199,11 @@ resource "aws_instance" "monitoring" {
   iam_instance_profile   = aws_iam_instance_profile.monitoring.name
 
   user_data = base64encode(templatefile("${path.module}/templates/monitoring-userdata.sh.tpl", {
-    project          = var.project
-    environment      = var.environment
-    aws_region       = var.aws_region
-    ecs_cluster_name = var.ecs_cluster_name
-    state_bucket     = var.state_bucket
+    project           = var.project
+    environment       = var.environment
+    aws_region        = var.aws_region
+    ecs_cluster_names = join(" ", var.ecs_cluster_names)
+    state_bucket      = var.state_bucket
     # grafana_password intentionally omitted — fetched at runtime from SSM
     # to avoid embedding secrets in EC2 user_data (visible in AWS console)
   }))
@@ -223,8 +223,13 @@ resource "aws_instance" "monitoring" {
 }
 
 # ── CloudWatch Alarms ─────────────────────────────────────────────────────────
+# One API CPU alarm per cluster: blue-green environments run two clusters
+# (one per slot) and the active one alternates, so both must be watched.
+# The idle slot has desired_count=0 → no data → notBreaching keeps it green.
 resource "aws_cloudwatch_metric_alarm" "ecs_api_cpu_high" {
-  alarm_name          = "${var.project}-${var.environment}-api-cpu-high"
+  for_each = toset(var.ecs_cluster_names)
+
+  alarm_name          = "${each.value}-api-cpu-high"
   alarm_description   = "ECS API service CPU > 80% for 4 minutes"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
@@ -235,8 +240,8 @@ resource "aws_cloudwatch_metric_alarm" "ecs_api_cpu_high" {
   threshold           = 80
   treat_missing_data  = "notBreaching"
   dimensions = {
-    ClusterName = var.ecs_cluster_name
-    ServiceName = "${var.project}-${var.environment}-api"
+    ClusterName = each.value
+    ServiceName = "${each.value}-api"
   }
   tags = var.common_tags
 }
@@ -284,10 +289,11 @@ resource "aws_cloudwatch_dashboard" "main" {
         type = "metric", x = 0, y = 0, width = 8, height = 6
         properties = {
           title = "ECS API - CPU & Memory"
-          metrics = [
-            ["AWS/ECS", "CPUUtilization", "ClusterName", var.ecs_cluster_name, "ServiceName", "${var.project}-${var.environment}-api"],
-            ["AWS/ECS", "MemoryUtilization", "ClusterName", var.ecs_cluster_name, "ServiceName", "${var.project}-${var.environment}-api"]
-          ]
+          # One line per slot cluster — whichever slot is active shows data
+          metrics = concat(
+            [for c in var.ecs_cluster_names : ["AWS/ECS", "CPUUtilization", "ClusterName", c, "ServiceName", "${c}-api"]],
+            [for c in var.ecs_cluster_names : ["AWS/ECS", "MemoryUtilization", "ClusterName", c, "ServiceName", "${c}-api"]]
+          )
           period = 60, stat = "Average", region = var.aws_region
         }
       },
@@ -316,8 +322,9 @@ resource "aws_cloudwatch_dashboard" "main" {
       {
         type = "log", x = 0, y = 6, width = 24, height = 6
         properties = {
-          title  = "API Error Logs (last 30 min)"
-          query  = "SOURCE '/ecs/${var.project}/${var.environment}/api' | fields @timestamp, @message | filter @message like /ERROR/ | sort @timestamp desc | limit 50"
+          title = "API Error Logs (last 30 min)"
+          # Log groups are per slot: /ecs/<project>/<cluster minus project prefix>/api
+          query  = "${join(" | ", [for c in var.ecs_cluster_names : "SOURCE '/ecs/${var.project}/${trimprefix(c, "${var.project}-")}/api'"])} | fields @timestamp, @message | filter @message like /ERROR/ | sort @timestamp desc | limit 50"
           region = var.aws_region
           view   = "table"
         }

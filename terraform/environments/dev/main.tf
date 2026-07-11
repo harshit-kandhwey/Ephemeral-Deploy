@@ -279,12 +279,13 @@ module "monitoring" {
   aws_region       = var.aws_region
   public_subnet_id = module.vpc.public_subnet_ids[0]
   monitoring_sg_id = module.security_groups.monitoring_sg_id
-  ecs_cluster_name = module.ecs.cluster_name
-  state_bucket     = var.tf_state_bucket
-  common_tags      = local.common_tags
+  # Constructed name, not a module output — lets monitoring provision in
+  # parallel with ECS; the discovery cron picks tasks up once they exist.
+  ecs_cluster_names = ["${local.project}-${local.environment}"]
+  state_bucket      = var.tf_state_bucket
+  common_tags       = local.common_tags
 
   depends_on = [
-    module.ecs, # Need cluster name and for ECS to be ready before monitoring scrapes it
     module.vpc, # Monitoring EC2 placed in VPC public subnet
   ]
 }

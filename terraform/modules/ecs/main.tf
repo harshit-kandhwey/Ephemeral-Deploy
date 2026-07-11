@@ -13,13 +13,20 @@ terraform {
 # ECS Module - Fargate containers for API + Worker + Beat
 # ─────────────────────────────────────────────
 
+locals {
+  # var.environment carries the slot suffix in blue-green environments
+  # ("prod-slot1", "prod-slot2"), so an equality check against "prod" would
+  # silently put production on FARGATE_SPOT with container insights off.
+  is_production = startswith(var.environment, "prod")
+}
+
 # ── ECS Cluster ──────────────────────────────
 resource "aws_ecs_cluster" "main" {
   name = "${var.project}-${var.environment}"
 
   setting {
     name  = "containerInsights"
-    value = var.environment == "prod" ? "enabled" : "disabled" # Cost optimization
+    value = local.is_production ? "enabled" : "disabled" # Cost optimization
   }
 
   tags = var.common_tags
@@ -28,10 +35,10 @@ resource "aws_ecs_cluster" "main" {
 resource "aws_ecs_cluster_capacity_providers" "main" {
   cluster_name = aws_ecs_cluster.main.name
 
-  capacity_providers = var.environment == "prod" ? ["FARGATE"] : ["FARGATE", "FARGATE_SPOT"]
+  capacity_providers = local.is_production ? ["FARGATE"] : ["FARGATE", "FARGATE_SPOT"]
 
   default_capacity_provider_strategy {
-    capacity_provider = var.environment == "prod" ? "FARGATE" : "FARGATE_SPOT"
+    capacity_provider = local.is_production ? "FARGATE" : "FARGATE_SPOT"
     weight            = 1
     base              = 1
   }
@@ -231,7 +238,7 @@ resource "aws_ecs_service" "api" {
   health_check_grace_period_seconds = 60
 
   capacity_provider_strategy {
-    capacity_provider = var.environment == "prod" ? "FARGATE" : "FARGATE_SPOT"
+    capacity_provider = local.is_production ? "FARGATE" : "FARGATE_SPOT"
     weight            = 1
     base              = 1
   }
@@ -274,7 +281,7 @@ resource "aws_ecs_service" "worker" {
   desired_count   = var.worker_desired_count
 
   capacity_provider_strategy {
-    capacity_provider = var.environment == "prod" ? "FARGATE" : "FARGATE_SPOT"
+    capacity_provider = local.is_production ? "FARGATE" : "FARGATE_SPOT"
     weight            = 1
     base              = 0
   }
@@ -304,7 +311,7 @@ resource "aws_ecs_service" "beat" {
   desired_count   = 1 # Beat scheduler must be singleton
 
   capacity_provider_strategy {
-    capacity_provider = var.environment == "prod" ? "FARGATE" : "FARGATE_SPOT"
+    capacity_provider = local.is_production ? "FARGATE" : "FARGATE_SPOT"
     weight            = 1
   }
 

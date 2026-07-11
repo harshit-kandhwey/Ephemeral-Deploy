@@ -50,9 +50,16 @@ variable "worker_image" {
 }
 
 variable "deployment_slot" {
-  description = "Active deployment slot: blue or green"
+  description = "Active deployment slot: slot1 or slot2"
   type        = string
-  default     = "blue"
+  default     = "slot1"
+
+  # An invalid value (e.g. a leftover legacy "blue") would silently set BOTH
+  # slots to desired_count=0 and select previous_*_image — fail fast instead.
+  validation {
+    condition     = contains(["slot1", "slot2"], var.deployment_slot)
+    error_message = "deployment_slot must be either \"slot1\" or \"slot2\"."
+  }
 }
 
 variable "previous_api_image" {

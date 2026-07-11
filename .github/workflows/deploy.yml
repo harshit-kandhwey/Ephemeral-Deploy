@@ -710,7 +710,7 @@ jobs:
           REGION="${{ env.AWS_REGION }}"
           PROJECT="nexusdeploy"
 
-          for slot in blue green; do
+          for slot in slot1 slot2; do
             for svc in api worker beat; do
               lg="/ecs/$PROJECT/$ENV-$slot/$svc"
               if aws logs describe-log-groups \
@@ -788,12 +788,14 @@ jobs:
             --name "/nexusdeploy/staging/deployment/active_slot" \
             --region ${{ env.AWS_REGION }} \
             --query 'Parameter.Value' \
-            --output text 2>/dev/null || echo "blue")
+            --output text 2>/dev/null || echo "none")
 
-          if [[ "$CURRENT" == "blue" ]]; then
-            NEW_SLOT="green"
+          # Fresh environment (no SSM param yet) or an unexpected value →
+          # deploy to slot1; otherwise flip to the opposite slot.
+          if [[ "$CURRENT" == "slot1" ]]; then
+            NEW_SLOT="slot2"
           else
-            NEW_SLOT="blue"
+            NEW_SLOT="slot1"
           fi
 
           echo "current_slot=$CURRENT" >> $GITHUB_OUTPUT
@@ -1084,7 +1086,7 @@ jobs:
           PROJECT="nexusdeploy"
 
           # CloudWatch log groups (both slots)
-          for slot in blue green; do
+          for slot in slot1 slot2; do
             for svc in api worker beat; do
               lg="/ecs/$PROJECT/$ENV-$slot/$svc"
               if aws logs describe-log-groups \
@@ -1171,13 +1173,14 @@ jobs:
             --name "/nexusdeploy/prod/deployment/active_slot" \
             --region ${{ env.AWS_REGION }} \
             --query 'Parameter.Value' \
-            --output text 2>/dev/null || echo "blue")
+            --output text 2>/dev/null || echo "none")
 
-          # New deployment goes to the OPPOSITE slot
-          if [[ "$CURRENT" == "blue" ]]; then
-            NEW_SLOT="green"
+          # New deployment goes to the OPPOSITE slot. Fresh environment (no
+          # SSM param yet) or an unexpected value → deploy to slot1.
+          if [[ "$CURRENT" == "slot1" ]]; then
+            NEW_SLOT="slot2"
           else
-            NEW_SLOT="blue"
+            NEW_SLOT="slot1"
           fi
 
           echo "current_slot=$CURRENT" >> $GITHUB_OUTPUT

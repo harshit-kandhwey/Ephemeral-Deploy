@@ -40,7 +40,7 @@ locals {
   environment = "staging"
   project     = "nexusdeploy"
 
-  active_slot = var.deployment_slot # "blue" or "green"
+  active_slot = var.deployment_slot # "slot1" or "slot2"
 
   common_tags = {
     Project     = local.project
@@ -211,14 +211,14 @@ module "elasticache" {
 # BLUE-GREEN ECS DEPLOYMENT — same as prod
 # ══════════════════════════════════════════════
 
-module "ecs_blue" {
+module "ecs_slot1" {
   source = "../../modules/ecs"
 
   project                       = local.project
-  environment                   = "${local.environment}-blue"
+  environment                   = "${local.environment}-slot1"
   aws_region                    = var.aws_region
-  api_image                     = local.active_slot == "blue" ? var.api_image : var.previous_api_image
-  worker_image                  = local.active_slot == "blue" ? var.worker_image : var.previous_worker_image
+  api_image                     = local.active_slot == "slot1" ? var.api_image : var.previous_api_image
+  worker_image                  = local.active_slot == "slot1" ? var.worker_image : var.previous_worker_image
   git_commit                    = var.git_commit
   private_app_subnet_ids        = module.vpc.private_app_subnet_ids
   api_sg_id                     = module.security_groups.api_sg_id
@@ -230,14 +230,14 @@ module "ecs_blue" {
   init_secrets_arn              = aws_secretsmanager_secret.init.arn
   log_retention_days            = 14
 
-  api_desired_count    = local.active_slot == "blue" ? 1 : 0
-  worker_desired_count = local.active_slot == "blue" ? 1 : 0
+  api_desired_count    = local.active_slot == "slot1" ? 1 : 0
+  worker_desired_count = local.active_slot == "slot1" ? 1 : 0
   api_cpu              = 256
   api_memory           = 512
   worker_cpu           = 256
   worker_memory        = 512
 
-  common_tags = merge(local.common_tags, { Slot = "blue" })
+  common_tags = merge(local.common_tags, { Slot = "slot1" })
 
   depends_on = [
     aws_secretsmanager_secret_version.app,
@@ -247,14 +247,14 @@ module "ecs_blue" {
   ]
 }
 
-module "ecs_green" {
+module "ecs_slot2" {
   source = "../../modules/ecs"
 
   project                       = local.project
-  environment                   = "${local.environment}-green"
+  environment                   = "${local.environment}-slot2"
   aws_region                    = var.aws_region
-  api_image                     = local.active_slot == "green" ? var.api_image : var.previous_api_image
-  worker_image                  = local.active_slot == "green" ? var.worker_image : var.previous_worker_image
+  api_image                     = local.active_slot == "slot2" ? var.api_image : var.previous_api_image
+  worker_image                  = local.active_slot == "slot2" ? var.worker_image : var.previous_worker_image
   git_commit                    = var.git_commit
   private_app_subnet_ids        = module.vpc.private_app_subnet_ids
   api_sg_id                     = module.security_groups.api_sg_id
@@ -266,14 +266,14 @@ module "ecs_green" {
   init_secrets_arn              = aws_secretsmanager_secret.init.arn
   log_retention_days            = 14
 
-  api_desired_count    = local.active_slot == "green" ? 1 : 0
-  worker_desired_count = local.active_slot == "green" ? 1 : 0
+  api_desired_count    = local.active_slot == "slot2" ? 1 : 0
+  worker_desired_count = local.active_slot == "slot2" ? 1 : 0
   api_cpu              = 256
   api_memory           = 512
   worker_cpu           = 256
   worker_memory        = 512
 
-  common_tags = merge(local.common_tags, { Slot = "green" })
+  common_tags = merge(local.common_tags, { Slot = "slot2" })
 
   depends_on = [
     aws_secretsmanager_secret_version.app,
@@ -291,14 +291,15 @@ module "monitoring" {
   aws_region       = var.aws_region
   public_subnet_id = module.vpc.public_subnet_ids[0]
   monitoring_sg_id = module.security_groups.monitoring_sg_id
-  ecs_cluster_name = module.ecs_blue.cluster_name
-  state_bucket     = var.tf_state_bucket
-  common_tags      = local.common_tags
-
-  depends_on = [
-    module.ecs_blue,
-    module.ecs_green,
+  # Constructed names, not module outputs: monitoring watches BOTH slot
+  # clusters (the active one alternates) and provisions in parallel with ECS
+  # instead of waiting on it — the discovery cron tolerates missing clusters.
+  ecs_cluster_names = [
+    "${local.project}-${local.environment}-slot1",
+    "${local.project}-${local.environment}-slot2",
   ]
+  state_bucket = var.tf_state_bucket
+  common_tags  = local.common_tags
 }
 
 resource "aws_ssm_parameter" "active_slot" {
@@ -322,12 +323,12 @@ output "db_endpoint" {
   value = module.rds.db_endpoint
 }
 
-output "ecs_cluster_name_blue" {
-  value = module.ecs_blue.cluster_name
+output "ecs_cluster_name_slot1" {
+  value = module.ecs_slot1.cluster_name
 }
 
-output "ecs_cluster_name_green" {
-  value = module.ecs_green.cluster_name
+output "ecs_cluster_name_slot2" {
+  value = module.ecs_slot2.cluster_name
 }
 
 output "worker_sg_id" {
