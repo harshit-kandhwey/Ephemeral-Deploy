@@ -217,6 +217,20 @@ jobs:
           && echo "✅ Stale state digest removed from ${{ env.TF_LOCK_TABLE }}" \
           || echo "ℹ️ No state digest to remove"
 
+          # Drop the lock mutex row too. Terraform releases it after a clean
+          # destroy, but a killed/timed-out destroy leaves it stale and blocks
+          # the next init/apply with "Error acquiring the state lock". Once the
+          # env is torn down it is orphaned garbage, so removing it makes cleanup
+          # self-healing. Safe here: nothing legitimately operates on an env that
+          # is being destroyed.
+          LOCK_ID="${{ env.TF_STATE_BUCKET }}/$STATE_KEY"
+          aws dynamodb delete-item \
+            --table-name "${{ env.TF_LOCK_TABLE }}" \
+            --key "{\"LockID\":{\"S\":\"$LOCK_ID\"}}" \
+            --region "${{ env.AWS_REGION }}" 2>/dev/null \
+          && echo "✅ Stale state lock removed from ${{ env.TF_LOCK_TABLE }}" \
+          || echo "ℹ️ No state lock to remove"
+
       # ── Summary ──────────────────────────────────────────────────────────
       - name: Cleanup summary
         if: always()

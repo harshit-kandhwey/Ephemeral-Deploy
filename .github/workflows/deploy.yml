@@ -832,6 +832,29 @@ jobs:
           echo "new_slot=$NEW_SLOT"    >> $GITHUB_OUTPUT
           echo "🔵 Current active: $CURRENT → 🟢 Deploying to: $NEW_SLOT"
 
+      - name: Capture old slot capacity (for rollback)
+        id: oldcap
+        run: |
+          OLD_SLOT="${{ steps.slot.outputs.current_slot }}"
+          # Captured BEFORE apply scales the old slot to 0, so a rollback restores
+          # its REAL capacity (autoscaled, or a future api_desired_count > 1)
+          # instead of a hard-coded 1. Defaults to 1 for a first deploy or an
+          # unreadable service. Beat is a singleton — always restored to 1.
+          API=1; WORKER=1
+          if [[ "$OLD_SLOT" == "slot1" || "$OLD_SLOT" == "slot2" ]]; then
+            OLD_CLUSTER="nexusdeploy-staging-$OLD_SLOT"
+            for svc in api worker; do
+              DC=$(aws ecs describe-services --cluster "$OLD_CLUSTER" --services "$OLD_CLUSTER-$svc" \
+                --region ${{ env.AWS_REGION }} --query 'services[0].desiredCount' --output text 2>/dev/null || echo "")
+              if [[ "$DC" =~ ^[0-9]+$ && "$DC" -gt 0 ]]; then
+                [[ "$svc" == "api" ]] && API=$DC || WORKER=$DC
+              fi
+            done
+          fi
+          echo "api=$API"       >> $GITHUB_OUTPUT
+          echo "worker=$WORKER" >> $GITHUB_OUTPUT
+          echo "Captured old slot ($OLD_SLOT) desired counts: api=$API worker=$WORKER (beat singleton=1)"
+
       - name: Read previous images from SSM
         id: prev_images
         run: |
@@ -1049,18 +1072,20 @@ jobs:
           # zero-overlap redesign is tracked as a follow-up.)
           if [[ "$OLD_SLOT" == "slot1" || "$OLD_SLOT" == "slot2" ]]; then
             OLD_CLUSTER="nexusdeploy-staging-$OLD_SLOT"
-            for svc in api worker beat; do
-              aws ecs update-service \
-                --cluster "$OLD_CLUSTER" \
-                --service "nexusdeploy-staging-$OLD_SLOT-$svc" \
-                --desired-count 1 \
-                --region ${{ env.AWS_REGION }} 2>/dev/null || true
-            done
+            # Restore each service to the capacity captured BEFORE this apply
+            # (steps.oldcap); beat stays a singleton.
+            API_DC="${{ steps.oldcap.outputs.api }}"; WORKER_DC="${{ steps.oldcap.outputs.worker }}"
+            aws ecs update-service --cluster "$OLD_CLUSTER" --service "$OLD_CLUSTER-api" \
+              --desired-count "${API_DC:-1}" --region ${{ env.AWS_REGION }} 2>/dev/null || true
+            aws ecs update-service --cluster "$OLD_CLUSTER" --service "$OLD_CLUSTER-worker" \
+              --desired-count "${WORKER_DC:-1}" --region ${{ env.AWS_REGION }} 2>/dev/null || true
+            aws ecs update-service --cluster "$OLD_CLUSTER" --service "$OLD_CLUSTER-beat" \
+              --desired-count 1 --region ${{ env.AWS_REGION }} 2>/dev/null || true
             aws ssm put-parameter \
               --name "/nexusdeploy/staging/deployment/active_slot" \
               --value "$OLD_SLOT" --type String --overwrite \
               --region ${{ env.AWS_REGION }} 2>/dev/null || true
-            echo "✅ Rollback complete — restored $OLD_SLOT (api/worker/beat=1, active_slot reset)"
+            echo "✅ Rollback complete — restored $OLD_SLOT (api=${API_DC:-1} worker=${WORKER_DC:-1} beat=1, active_slot reset)"
           else
             echo "✅ Rollback complete — no prior slot to restore (first deploy)"
           fi
@@ -1273,6 +1298,30 @@ jobs:
           echo "new_slot=$NEW_SLOT"    >> $GITHUB_OUTPUT
           echo "🔵 Current active: $CURRENT → 🟢 Deploying to: $NEW_SLOT"
 
+      # ── Step 1b: Capture old slot capacity (for rollback) ──
+      - name: Capture old slot capacity (for rollback)
+        id: oldcap
+        run: |
+          OLD_SLOT="${{ steps.slot.outputs.current_slot }}"
+          # Captured BEFORE apply scales the old slot to 0, so a rollback restores
+          # its REAL capacity (autoscaled, or a future api_desired_count > 1)
+          # instead of a hard-coded 1. Defaults to 1 for a first deploy or an
+          # unreadable service. Beat is a singleton — always restored to 1.
+          API=1; WORKER=1
+          if [[ "$OLD_SLOT" == "slot1" || "$OLD_SLOT" == "slot2" ]]; then
+            OLD_CLUSTER="nexusdeploy-prod-$OLD_SLOT"
+            for svc in api worker; do
+              DC=$(aws ecs describe-services --cluster "$OLD_CLUSTER" --services "$OLD_CLUSTER-$svc" \
+                --region ${{ env.AWS_REGION }} --query 'services[0].desiredCount' --output text 2>/dev/null || echo "")
+              if [[ "$DC" =~ ^[0-9]+$ && "$DC" -gt 0 ]]; then
+                [[ "$svc" == "api" ]] && API=$DC || WORKER=$DC
+              fi
+            done
+          fi
+          echo "api=$API"       >> $GITHUB_OUTPUT
+          echo "worker=$WORKER" >> $GITHUB_OUTPUT
+          echo "Captured old slot ($OLD_SLOT) desired counts: api=$API worker=$WORKER (beat singleton=1)"
+
       # ── Step 1c: Read previous images from SSM ──
       - name: Read previous images from SSM
         id: prev_images
@@ -1455,18 +1504,20 @@ jobs:
           # zero-overlap redesign is tracked as a follow-up.)
           if [[ "$OLD_SLOT" == "slot1" || "$OLD_SLOT" == "slot2" ]]; then
             OLD_CLUSTER="nexusdeploy-prod-$OLD_SLOT"
-            for svc in api worker beat; do
-              aws ecs update-service \
-                --cluster "$OLD_CLUSTER" \
-                --service "nexusdeploy-prod-$OLD_SLOT-$svc" \
-                --desired-count 1 \
-                --region ${{ env.AWS_REGION }} 2>/dev/null || true
-            done
+            # Restore each service to the capacity captured BEFORE this apply
+            # (steps.oldcap); beat stays a singleton.
+            API_DC="${{ steps.oldcap.outputs.api }}"; WORKER_DC="${{ steps.oldcap.outputs.worker }}"
+            aws ecs update-service --cluster "$OLD_CLUSTER" --service "$OLD_CLUSTER-api" \
+              --desired-count "${API_DC:-1}" --region ${{ env.AWS_REGION }} 2>/dev/null || true
+            aws ecs update-service --cluster "$OLD_CLUSTER" --service "$OLD_CLUSTER-worker" \
+              --desired-count "${WORKER_DC:-1}" --region ${{ env.AWS_REGION }} 2>/dev/null || true
+            aws ecs update-service --cluster "$OLD_CLUSTER" --service "$OLD_CLUSTER-beat" \
+              --desired-count 1 --region ${{ env.AWS_REGION }} 2>/dev/null || true
             aws ssm put-parameter \
               --name "/nexusdeploy/prod/deployment/active_slot" \
               --value "$OLD_SLOT" --type String --overwrite \
               --region ${{ env.AWS_REGION }} 2>/dev/null || true
-            echo "✅ Rollback complete — restored $OLD_SLOT (api/worker/beat=1, active_slot reset)"
+            echo "✅ Rollback complete — restored $OLD_SLOT (api=${API_DC:-1} worker=${WORKER_DC:-1} beat=1, active_slot reset)"
           else
             echo "✅ Rollback complete — no prior slot to restore (first deploy)"
           fi
