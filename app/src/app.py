@@ -52,7 +52,12 @@ def create_app(config_name="default"):
     migrate.init_app(app, db)
     jwt.init_app(app)
     limiter.init_app(app)
-    cors.init_app(app)
+
+    # CORS is scoped to the configured origin allowlist (empty by default).
+    # The monitoring console is same-origin via the nginx reverse proxy, so it
+    # needs no grant; a bare CORS() would send Allow-Origin: * on an authed API.
+    cors.init_app(app, resources={r"/api/*": {"origins": app.config["CORS_ORIGINS"]}})
+
     init_redis(app)
     init_celery(app)
 
@@ -71,23 +76,26 @@ def create_app(config_name="default"):
             return True
 
     # ── Swagger / API docs ────────────────────
-    app.config["SWAGGER"] = {
-        "title": "NexusDeploy Project Management API",
-        "version": app.config["VERSION"],
-        "description": "Production-grade project management API",
-        "termsOfService": "",
-        "hide_top_bar": False,
-        "securityDefinitions": {
-            "Bearer": {
-                "type": "apiKey",
-                "name": "Authorization",
-                "in": "header",
-                "description": 'JWT Authorization header. Example: "Bearer {token}"',
-            }
-        },
-        "security": [{"Bearer": []}],
-    }
-    swagger.init_app(app)
+    # Off in production by default — /apidocs advertises every route and schema.
+    # Set ENABLE_SWAGGER=true to expose it deliberately (e.g. a staging demo).
+    if app.config["ENABLE_SWAGGER"]:
+        app.config["SWAGGER"] = {
+            "title": "NexusDeploy Project Management API",
+            "version": app.config["VERSION"],
+            "description": "Production-grade project management API",
+            "termsOfService": "",
+            "hide_top_bar": False,
+            "securityDefinitions": {
+                "Bearer": {
+                    "type": "apiKey",
+                    "name": "Authorization",
+                    "in": "header",
+                    "description": 'JWT Authorization header. Example: "Bearer {token}"',
+                }
+            },
+            "security": [{"Bearer": []}],
+        }
+        swagger.init_app(app)
 
     # ── Logging ───────────────────────────────
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -123,7 +131,12 @@ def create_app(config_name="default"):
     #   - ECS container health check (restarts unhealthy tasks)
     #   - Dockerfile HEALTHCHECK instruction
     #   - Blue-green deployment health polling in deploy.yml
+    # limiter.exempt: the default limits (200/day, 50/hour) would otherwise apply
+    # here. ECS polls /health every 30s (120/hour) and Prometheus scrapes /metrics
+    # every 15s (240/hour) — both blow past 50/hour, and a 429 to the container
+    # health check reads as an unhealthy task, so ECS kills and replaces it.
     @app.route("/health")
+    @limiter.exempt
     def health():
         from .extensions import redis_client
 
@@ -169,6 +182,7 @@ def create_app(config_name="default"):
     # Separate from /health — used by load balancers / orchestrators
     # to know when the container is ready to receive traffic.
     @app.route("/ready")
+    @limiter.exempt
     def ready():
         return jsonify({"ready": True}), 200
 
@@ -176,6 +190,7 @@ def create_app(config_name="default"):
     # Scraped by Prometheus running on the monitoring EC2.
     # Returns all counters and histograms registered at module level above.
     @app.route("/metrics")
+    @limiter.exempt
     def metrics():
         return generate_latest(), 200, {"Content-Type": CONTENT_TYPE_LATEST}
 

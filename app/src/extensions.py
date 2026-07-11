@@ -12,6 +12,12 @@ from redis import Redis
 db = SQLAlchemy()
 migrate = Migrate()
 jwt = JWTManager()
+
+# Default limits apply to every route that does not set its own, so the
+# operational endpoints (/health, /ready, /metrics) are marked @limiter.exempt
+# in app.py — ECS and Prometheus poll them far above these ceilings.
+# Storage is Redis (RATELIMIT_STORAGE_URI in config.py); without it the limiter
+# silently degrades to per-process memory and the limits stop being global.
 limiter = Limiter(key_func=get_remote_address, default_limits=["200 per day", "50 per hour"])
 cors = CORS()
 redis_client = None
