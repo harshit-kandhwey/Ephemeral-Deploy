@@ -21,6 +21,38 @@ graphify-out/
 .graphify_old.json
 .graphify_chunk_*.json
 
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+# Provider lock files: intentionally ignored because the three environments
+# pin different provider versions and CI runs `terraform init` fresh each time.
+.terraform.lock.hcl
+
+# Secrets / env
+.env
+.env.*
+!.env.example
+*.tfvars.local
+
+# Python
+.pytest_cache/
+.coverage
+htmlcov/
+*.pyc
+.mypy_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
 # Claude Code
 .claude/
 CLAUDE.md
