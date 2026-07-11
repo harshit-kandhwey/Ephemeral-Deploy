@@ -711,7 +711,14 @@ jobs:
           # from a wiped state after a cleanup. When state persists across a
           # normal deploy it already tracks every resource, so we skip it —
           # otherwise the delete step would churn live log groups every deploy.
-          if [[ -z "$(terraform state list 2>/dev/null)" ]]; then
+          # Fail CLOSED: a backend/lock/auth/network error must not read as an
+          # empty state and trigger destructive reconciliation of live resources.
+          if ! state_list=$(terraform state list 2>&1); then
+            echo "::error::'terraform state list' failed — aborting to avoid destructive reconciliation on an unknown state."
+            echo "$state_list"
+            exit 1
+          fi
+          if [[ -z "$state_list" ]]; then
             echo "🆕 State is empty (post-cleanup or first deploy) — orphan reconciliation will run."
             echo "fresh=true" >> "$GITHUB_OUTPUT"
           else
@@ -793,6 +800,7 @@ jobs:
             terraform state show "$addr" &>/dev/null && return 0
             terraform import -var-file=terraform.tfvars "$addr" "$id" || true
           }
+          adopt aws_secretsmanager_secret.app                   "nexusdeploy/staging/app-secrets"
           adopt aws_secretsmanager_secret.init                  "nexusdeploy/staging/init-secrets"
           adopt module.iam.aws_iam_role.ecs_execution           "nexusdeploy-staging-ecs-execution"
           adopt module.iam.aws_iam_role.ecs_execution_worker    "nexusdeploy-staging-ecs-execution-worker"
@@ -1020,16 +1028,42 @@ jobs:
       - name: Rollback - revert to old slot
         if: steps.tf_apply.outcome == 'failure' || steps.health.outputs.health_ok != 'true'
         run: |
-          echo "⚠️ Deployment failed - rolling back to ${{ steps.slot.outputs.current_slot }}"
-          FAILED_CLUSTER="nexusdeploy-staging-${{ steps.slot.outputs.new_slot }}"
+          NEW_SLOT="${{ steps.slot.outputs.new_slot }}"
+          OLD_SLOT="${{ steps.slot.outputs.current_slot }}"
+          echo "⚠️ Deployment failed - rolling back to $OLD_SLOT"
+
+          # Scale the failed new slot down.
+          FAILED_CLUSTER="nexusdeploy-staging-$NEW_SLOT"
           for svc in api worker beat; do
             aws ecs update-service \
-              --cluster $FAILED_CLUSTER \
-              --service "nexusdeploy-staging-${{ steps.slot.outputs.new_slot }}-$svc" \
+              --cluster "$FAILED_CLUSTER" \
+              --service "nexusdeploy-staging-$NEW_SLOT-$svc" \
               --desired-count 0 \
               --region ${{ env.AWS_REGION }} 2>/dev/null || true
           done
-          echo "✅ Rollback complete — ${{ steps.slot.outputs.current_slot }} remains active"
+
+          # terraform apply tied desired counts (and SSM active_slot) to the new
+          # slot, scaling the previously-serving slot to 0. Restore it so a failed
+          # deploy doesn't leave BOTH slots down. Skipped on a first deploy where
+          # there is no prior slot ("none"). (Pragmatic rollback — a proper
+          # zero-overlap redesign is tracked as a follow-up.)
+          if [[ "$OLD_SLOT" == "slot1" || "$OLD_SLOT" == "slot2" ]]; then
+            OLD_CLUSTER="nexusdeploy-staging-$OLD_SLOT"
+            for svc in api worker beat; do
+              aws ecs update-service \
+                --cluster "$OLD_CLUSTER" \
+                --service "nexusdeploy-staging-$OLD_SLOT-$svc" \
+                --desired-count 1 \
+                --region ${{ env.AWS_REGION }} 2>/dev/null || true
+            done
+            aws ssm put-parameter \
+              --name "/nexusdeploy/staging/deployment/active_slot" \
+              --value "$OLD_SLOT" --type String --overwrite \
+              --region ${{ env.AWS_REGION }} 2>/dev/null || true
+            echo "✅ Rollback complete — restored $OLD_SLOT (api/worker/beat=1, active_slot reset)"
+          else
+            echo "✅ Rollback complete — no prior slot to restore (first deploy)"
+          fi
 
       - name: Deployment summary
         if: always()
@@ -1108,7 +1142,14 @@ jobs:
           # from a wiped state after a cleanup. When state persists across a
           # normal deploy it already tracks every resource, so we skip it —
           # otherwise the delete step would churn live log groups every deploy.
-          if [[ -z "$(terraform state list 2>/dev/null)" ]]; then
+          # Fail CLOSED: a backend/lock/auth/network error must not read as an
+          # empty state and trigger destructive reconciliation of live resources.
+          if ! state_list=$(terraform state list 2>&1); then
+            echo "::error::'terraform state list' failed — aborting to avoid destructive reconciliation on an unknown state."
+            echo "$state_list"
+            exit 1
+          fi
+          if [[ -z "$state_list" ]]; then
             echo "🆕 State is empty (post-cleanup or first deploy) — orphan reconciliation will run."
             echo "fresh=true" >> "$GITHUB_OUTPUT"
           else
@@ -1199,6 +1240,7 @@ jobs:
             terraform state show "$addr" &>/dev/null && return 0
             terraform import -var-file=terraform.tfvars "$addr" "$id" || true
           }
+          adopt aws_secretsmanager_secret.app                   "nexusdeploy/prod/app-secrets"
           adopt aws_secretsmanager_secret.init                  "nexusdeploy/prod/init-secrets"
           adopt module.iam.aws_iam_role.ecs_execution           "nexusdeploy-prod-ecs-execution"
           adopt module.iam.aws_iam_role.ecs_execution_worker    "nexusdeploy-prod-ecs-execution-worker"
@@ -1392,20 +1434,42 @@ jobs:
       - name: Rollback - revert to old slot
         if: steps.tf_apply.outcome == 'failure' || steps.health.outputs.health_ok != 'true'
         run: |
-          echo "⚠️ Deployment failed - rolling back to ${{ steps.slot.outputs.current_slot }}"
+          NEW_SLOT="${{ steps.slot.outputs.new_slot }}"
+          OLD_SLOT="${{ steps.slot.outputs.current_slot }}"
+          echo "⚠️ Deployment failed - rolling back to $OLD_SLOT"
 
-          # Scale new (failed) slot back to 0
-          FAILED_CLUSTER="nexusdeploy-prod-${{ steps.slot.outputs.new_slot }}"
+          # Scale the failed new slot down.
+          FAILED_CLUSTER="nexusdeploy-prod-$NEW_SLOT"
           for svc in api worker beat; do
             aws ecs update-service \
-              --cluster $FAILED_CLUSTER \
-              --service "nexusdeploy-prod-${{ steps.slot.outputs.new_slot }}-$svc" \
+              --cluster "$FAILED_CLUSTER" \
+              --service "nexusdeploy-prod-$NEW_SLOT-$svc" \
               --desired-count 0 \
               --region ${{ env.AWS_REGION }} 2>/dev/null || true
           done
 
-          # SSM unchanged - old slot remains active
-          echo "✅ Rollback complete - ${{ steps.slot.outputs.current_slot }} remains active"
+          # terraform apply tied desired counts (and SSM active_slot) to the new
+          # slot, scaling the previously-serving slot to 0. Restore it so a failed
+          # deploy doesn't leave BOTH slots down. Skipped on a first deploy where
+          # there is no prior slot ("none"). (Pragmatic rollback — a proper
+          # zero-overlap redesign is tracked as a follow-up.)
+          if [[ "$OLD_SLOT" == "slot1" || "$OLD_SLOT" == "slot2" ]]; then
+            OLD_CLUSTER="nexusdeploy-prod-$OLD_SLOT"
+            for svc in api worker beat; do
+              aws ecs update-service \
+                --cluster "$OLD_CLUSTER" \
+                --service "nexusdeploy-prod-$OLD_SLOT-$svc" \
+                --desired-count 1 \
+                --region ${{ env.AWS_REGION }} 2>/dev/null || true
+            done
+            aws ssm put-parameter \
+              --name "/nexusdeploy/prod/deployment/active_slot" \
+              --value "$OLD_SLOT" --type String --overwrite \
+              --region ${{ env.AWS_REGION }} 2>/dev/null || true
+            echo "✅ Rollback complete — restored $OLD_SLOT (api/worker/beat=1, active_slot reset)"
+          else
+            echo "✅ Rollback complete — no prior slot to restore (first deploy)"
+          fi
 
       - name: Deployment summary
         if: always()

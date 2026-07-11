@@ -130,7 +130,7 @@
       { key: "users",    label: "Users",    path: "/api/v1/users" },
     ];
 
-    const state = { token: localStorage.getItem("ed_token") || null, user: null, active: "projects" };
+    const state = { token: localStorage.getItem("ed_token") || null, user: null, active: "projects", healthTimer: null };
 
     const $ = (id) => document.getElementById(id);
 
@@ -154,6 +154,7 @@
 
     function logout() {
       state.token = null; state.user = null;
+      if (state.healthTimer) { clearTimeout(state.healthTimer); state.healthTimer = null; }
       localStorage.removeItem("ed_token");
       showLogin();
     }
@@ -170,6 +171,7 @@
       $("app").classList.remove("hidden");
       renderWhoami();
       renderTabs();
+      if (state.healthTimer) clearTimeout(state.healthTimer); // avoid duplicate poll loops
       pollHealth();
       loadActive();
     }
@@ -184,9 +186,11 @@
     function renderTabs() {
       $("tabs").innerHTML = "";
       RESOURCES.forEach((r) => {
-        const el = document.createElement("div");
+        const el = document.createElement("button");
+        el.type = "button";
         el.className = "tab" + (r.key === state.active ? " active" : "");
         el.textContent = r.label;
+        el.setAttribute("aria-pressed", r.key === state.active ? "true" : "false");
         el.onclick = () => { state.active = r.key; renderTabs(); loadActive(); };
         $("tabs").appendChild(el);
       });
@@ -245,6 +249,7 @@
     }
 
     async function pollHealth() {
+      if (!state.token) return; // session ended — stop the recursive timer
       const badge = $("health"), text = $("health-text");
       try {
         const res = await fetch(API + "/health", { headers: authHeaders() });
@@ -253,7 +258,7 @@
       } catch {
         badge.className = "health bad"; text.textContent = "API unreachable";
       }
-      setTimeout(pollHealth, 15000);
+      state.healthTimer = setTimeout(pollHealth, 15000);
     }
 
     // ── Wire up ──
