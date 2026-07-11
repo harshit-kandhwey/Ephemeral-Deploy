@@ -19,6 +19,18 @@ echo "Project: $PROJECT | Environment: $ENVIRONMENT | Region: $AWS_REGION"
 # ── System packages (awscli needed before SSM fetch) ─────────────────────────
 echo "Installing system packages..."
 export DEBIAN_FRONTEND=noninteractive
+
+# EC2 first boot races: cloud-init's own apt and unattended-upgrades hold the
+# dpkg/apt lock. Under `set -e` a failed apt-get aborts the ENTIRE script,
+# leaving every service uninstalled. Wait for boot-time apt to finish, and make
+# every apt-get wait up to 5 min for the lock as a backstop.
+echo 'DPkg::Lock::Timeout "300";' > /etc/apt/apt.conf.d/99lock-timeout
+for i in $(seq 1 60); do
+  pgrep -x apt-get >/dev/null || pgrep -x apt >/dev/null || pgrep -x dpkg >/dev/null || break
+  echo "Waiting for boot-time apt/dpkg to finish... ($i)"
+  sleep 5
+done
+
 apt-get update -qq
 apt-get install -y -qq wget curl jq unzip
 # awscli not in Ubuntu 24.04 apt repos — install v2 via official installer
