@@ -189,9 +189,16 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
           "rds:CreateDBSubnetGroup", "rds:DeleteDBSubnetGroup",
           "rds:CreateDBParameterGroup", "rds:DeleteDBParameterGroup",
           "rds:ModifyDBParameterGroup", "rds:DescribeDBParameterGroups",
-          "rds:AddTagsToResource", "rds:RemoveTagsFromResource"
+          "rds:AddTagsToResource", "rds:RemoveTagsFromResource",
+          # Destroying prod takes a final snapshot (skip_final_snapshot = false).
+          # Without these the destroy fails on rds:CreateDBSnapshot.
+          "rds:CreateDBSnapshot", "rds:DeleteDBSnapshot",
+          "rds:DescribeDBSnapshots"
         ]
-        Resource = "arn:aws:rds:*:*:db:${var.project}-*"
+        Resource = [
+          "arn:aws:rds:*:*:db:${var.project}-*",
+          "arn:aws:rds:*:*:snapshot:${var.project}-*",
+        ]
       },
       # Infrastructure: ElastiCache (Terraform-managed clusters)
       {
