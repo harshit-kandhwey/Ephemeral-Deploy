@@ -703,7 +703,24 @@ jobs:
             -backend-config="encrypt=true" \
             -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
 
+      - name: Check state freshness
+        id: state_check
+        working-directory: terraform/environments/staging
+        run: |
+          # Orphan reconciliation (delete + adopt below) exists ONLY to recover
+          # from a wiped state after a cleanup. When state persists across a
+          # normal deploy it already tracks every resource, so we skip it —
+          # otherwise the delete step would churn live log groups every deploy.
+          if [[ -z "$(terraform state list 2>/dev/null)" ]]; then
+            echo "🆕 State is empty (post-cleanup or first deploy) — orphan reconciliation will run."
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "📦 State has resources — skipping orphan reconciliation (persistent state)."
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Delete orphaned resources
+        if: steps.state_check.outputs.fresh == 'true'
         continue-on-error: true
         run: |
           ENV="staging"
@@ -760,6 +777,7 @@ jobs:
           echo "✅ Orphaned resource cleanup complete"
 
       - name: Adopt orphaned Terraform resources
+        if: steps.state_check.outputs.fresh == 'true'
         working-directory: terraform/environments/staging
         env:
           TF_VAR_api_image: "placeholder"
@@ -777,6 +795,7 @@ jobs:
           adopt module.iam.aws_iam_role.ecs_execution_worker    "nexusdeploy-staging-ecs-execution-worker"
           adopt module.iam.aws_iam_role.ecs_task                "nexusdeploy-staging-ecs-task"
           adopt module.iam.aws_iam_role.vpc_flow_log            "nexusdeploy-staging-vpc-flow-log"
+          adopt module.vpc.aws_cloudwatch_log_group.vpc_flow_logs "/aws/vpc/flowlogs/nexusdeploy-staging"
           adopt aws_ssm_parameter.active_slot                   "/nexusdeploy/staging/deployment/active_slot"
           adopt module.ecr.aws_ecr_repository.api               "nexusdeploy-api-staging"
           adopt module.ecr.aws_ecr_repository.worker            "nexusdeploy-worker-staging"
@@ -1078,7 +1097,24 @@ jobs:
             -backend-config="encrypt=true" \
             -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
 
+      - name: Check state freshness
+        id: state_check
+        working-directory: terraform/environments/prod
+        run: |
+          # Orphan reconciliation (delete + adopt below) exists ONLY to recover
+          # from a wiped state after a cleanup. When state persists across a
+          # normal deploy it already tracks every resource, so we skip it —
+          # otherwise the delete step would churn live log groups every deploy.
+          if [[ -z "$(terraform state list 2>/dev/null)" ]]; then
+            echo "🆕 State is empty (post-cleanup or first deploy) — orphan reconciliation will run."
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "📦 State has resources — skipping orphan reconciliation (persistent state)."
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Delete orphaned resources
+        if: steps.state_check.outputs.fresh == 'true'
         continue-on-error: true
         run: |
           ENV="prod"
@@ -1144,6 +1180,7 @@ jobs:
           echo "✅ Orphaned resource cleanup complete"
 
       - name: Adopt orphaned Terraform resources
+        if: steps.state_check.outputs.fresh == 'true'
         working-directory: terraform/environments/prod
         env:
           TF_VAR_api_image: "placeholder"
@@ -1161,6 +1198,7 @@ jobs:
           adopt module.iam.aws_iam_role.ecs_execution_worker    "nexusdeploy-prod-ecs-execution-worker"
           adopt module.iam.aws_iam_role.ecs_task                "nexusdeploy-prod-ecs-task"
           adopt module.iam.aws_iam_role.vpc_flow_log            "nexusdeploy-prod-vpc-flow-log"
+          adopt module.vpc.aws_cloudwatch_log_group.vpc_flow_logs "/aws/vpc/flowlogs/nexusdeploy-prod"
           adopt aws_ssm_parameter.active_slot                   "/nexusdeploy/prod/deployment/active_slot"
           adopt module.ecr.aws_ecr_repository.api               "nexusdeploy-api-prod"
           adopt module.ecr.aws_ecr_repository.worker            "nexusdeploy-worker-prod"
