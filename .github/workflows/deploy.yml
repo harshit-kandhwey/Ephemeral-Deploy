@@ -777,7 +777,10 @@ jobs:
           echo "✅ Orphaned resource cleanup complete"
 
       - name: Adopt orphaned Terraform resources
-        if: steps.state_check.outputs.fresh == 'true'
+        # Runs on EVERY deploy: adopt() self-skips resources already in state, so
+        # it is a no-op on healthy persistent state, but on a partial state (e.g.
+        # a re-run after a mid-apply failure) it still imports surviving resources
+        # like ECR repos and the VPC flow-log group that outlive a cleanup.
         working-directory: terraform/environments/staging
         env:
           TF_VAR_api_image: "placeholder"
@@ -1180,7 +1183,10 @@ jobs:
           echo "✅ Orphaned resource cleanup complete"
 
       - name: Adopt orphaned Terraform resources
-        if: steps.state_check.outputs.fresh == 'true'
+        # Runs on EVERY deploy: adopt() self-skips resources already in state, so
+        # it is a no-op on healthy persistent state, but on a partial state (e.g.
+        # a re-run after a mid-apply failure) it still imports surviving resources
+        # like ECR repos and the VPC flow-log group that outlive a cleanup.
         working-directory: terraform/environments/prod
         env:
           TF_VAR_api_image: "placeholder"

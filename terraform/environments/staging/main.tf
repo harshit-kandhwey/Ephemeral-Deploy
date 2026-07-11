@@ -91,7 +91,7 @@ data "aws_ssm_parameter" "jwt_secret_key" {
 resource "aws_secretsmanager_secret" "app" {
   name                    = "${local.project}/${local.environment}/app-secrets"
   description             = "Runtime secrets injected by ECS at container launch"
-  recovery_window_in_days = 7
+  recovery_window_in_days = 0 # Instant deletion — staging is ephemeral (torn down like dev); a 7-day hold traps the name and blocks re-apply
   tags                    = local.common_tags
 }
 
@@ -115,7 +115,7 @@ resource "aws_secretsmanager_secret_version" "app" {
 resource "aws_secretsmanager_secret" "init" {
   name                    = "${local.project}/${local.environment}/init-secrets"
   description             = "DB master credentials for worker DB initialisation only"
-  recovery_window_in_days = 7
+  recovery_window_in_days = 0 # Instant deletion — staging is ephemeral (torn down like dev)
   tags                    = local.common_tags
 }
 
