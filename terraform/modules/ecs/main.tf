@@ -308,7 +308,10 @@ resource "aws_ecs_service" "beat" {
   name            = "${var.project}-${var.environment}-beat"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.beat.arn
-  desired_count   = 1 # Beat scheduler must be singleton
+  # Beat is a singleton: at most one instance ever. In blue-green only the
+  # active slot passes 1; the idle slot passes 0 so two schedulers can't both
+  # fire scheduled tasks. Dev (single slot) defaults to 1.
+  desired_count = var.beat_desired_count
 
   capacity_provider_strategy {
     capacity_provider = local.is_production ? "FARGATE" : "FARGATE_SPOT"

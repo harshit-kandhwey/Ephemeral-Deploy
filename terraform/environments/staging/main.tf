@@ -232,6 +232,7 @@ module "ecs_slot1" {
 
   api_desired_count    = local.active_slot == "slot1" ? 1 : 0
   worker_desired_count = local.active_slot == "slot1" ? 1 : 0
+  beat_desired_count   = local.active_slot == "slot1" ? 1 : 0
   api_cpu              = 256
   api_memory           = 512
   worker_cpu           = 256
@@ -268,6 +269,7 @@ module "ecs_slot2" {
 
   api_desired_count    = local.active_slot == "slot2" ? 1 : 0
   worker_desired_count = local.active_slot == "slot2" ? 1 : 0
+  beat_desired_count   = local.active_slot == "slot2" ? 1 : 0
   api_cpu              = 256
   api_memory           = 512
   worker_cpu           = 256
