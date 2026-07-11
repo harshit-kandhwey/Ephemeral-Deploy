@@ -165,22 +165,49 @@ log_info "Step 3/10: Deleting RDS instances..."
 DB_IDENTIFIER="${PROJECT}-${ENV}-postgres"
 if aws rds describe-db-instances \
   --db-instance-identifier "$DB_IDENTIFIER" \
-  --region "$REGION" 2>/dev/null; then
+  --region "$REGION" >/dev/null 2>&1; then
+
+  # Prod sets deletion_protection = true. RDS rejects the delete until it is
+  # cleared, and Terraform never clears it for us — it just fails the destroy.
+  if [[ "$(aws rds describe-db-instances \
+    --db-instance-identifier "$DB_IDENTIFIER" \
+    --region "$REGION" \
+    --query 'DBInstances[0].DeletionProtection' \
+    --output text 2>/dev/null)" == "True" ]]; then
+
+    log_warn "Deletion protection is enabled — disabling it before delete"
+    run aws rds modify-db-instance \
+      --db-instance-identifier "$DB_IDENTIFIER" \
+      --no-deletion-protection \
+      --apply-immediately \
+      --region "$REGION" \
+      --no-cli-pager
+  fi
 
   log_delete "Deleting RDS: $DB_IDENTIFIER (no final snapshot)"
-  run aws rds delete-db-instance \
+  if run aws rds delete-db-instance \
     --db-instance-identifier "$DB_IDENTIFIER" \
     --skip-final-snapshot \
+    --delete-automated-backups \
     --region "$REGION" \
-    --no-cli-pager
+    --no-cli-pager; then
 
-  log_info "Waiting for RDS deletion (this takes a few minutes)..."
-  [[ "$DRY_RUN" != "true" ]] && \
-    aws rds wait db-instance-deleted \
-      --db-instance-identifier "$DB_IDENTIFIER" \
-      --region "$REGION" || true
-
-  log_success "RDS instance deleted"
+    # Only wait on a delete AWS actually accepted. Waiting on a rejected
+    # delete burns the full 30-minute waiter and then leaves every VPC
+    # dependency (subnets, security groups) undeletable downstream.
+    if [[ "$DRY_RUN" != "true" ]]; then
+      log_info "Waiting for RDS deletion (this takes a few minutes)..."
+      if aws rds wait db-instance-deleted \
+        --db-instance-identifier "$DB_IDENTIFIER" \
+        --region "$REGION"; then
+        log_success "RDS instance deleted"
+      else
+        log_warn "RDS deletion did not complete in time — VPC teardown may fail"
+      fi
+    fi
+  else
+    log_warn "RDS delete was rejected — skipping wait. VPC teardown will likely fail."
+  fi
 else
   log_warn "RDS instance $DB_IDENTIFIER not found"
 fi

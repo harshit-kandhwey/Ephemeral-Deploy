@@ -524,7 +524,9 @@ Step 2: If terraform destroy fails for any reason, cleanup.sh runs
 
    1.  ECS services          scale to 0, wait, deregister
    2.  ECR images            delete all untagged + old images
-   3.  RDS instance          force-delete, no final snapshot
+   3.  RDS instance          disable deletion protection, then delete
+                             with no final snapshot (waits only if the
+                             delete was actually accepted)
    4.  ElastiCache cluster   delete
    5.  Secrets Manager       force-delete (no recovery window)
    6.  Security groups       delete
@@ -546,6 +548,30 @@ Step 3: Delete S3 state file
 ```bash
 make cleanup-dry ENV=dev   # shows what would be deleted without deleting anything
 ```
+
+### Destroying prod
+
+Prod is not ephemeral, and its RDS instance carries two protections that dev and staging don't (`terraform/modules/rds/main.tf`):
+
+| Setting                   | dev / staging | prod                       |
+| ------------------------- | ------------- | -------------------------- |
+| `deletion_protection`     | `false`       | `true`                     |
+| `skip_final_snapshot`     | `true`        | `false` (takes a snapshot) |
+| `recovery_window_in_days` | `0` (secrets) | `7` (secrets)              |
+
+These change how a teardown behaves:
+
+- **Deletion protection is not cleared by Terraform.** `terraform destroy` fails outright against a protected instance. `cleanup.sh` now detects this and disables protection before deleting.
+- **The final snapshot needs IAM permissions.** The deploy role is granted `rds:CreateDBSnapshot` / `DeleteDBSnapshot` / `DescribeDBSnapshots` (`bootstrap.sh` and `modules/iam`) — without them the destroy fails with `AccessDenied` on `rds:CreateDBSnapshot`. If you bootstrapped before these were added, re-run `ENV=prod ./scripts/bootstrap.sh` to refresh the policy.
+- **Secrets survive a destroy for 7 days.** With a recovery window, AWS keeps the secret _name_ reserved even after deletion, so a redeploy inside that window fails on both create and import. The deploy workflow calls `restore-secret` before importing, so a prod rebuild works without waiting out the window. To free the names immediately instead: `aws secretsmanager delete-secret --secret-id <name> --force-delete-without-recovery`.
+
+Prod destroy runs through the same workflow, but the job is bound to the `prod` GitHub environment, so it **blocks on manual approval**:
+
+```bash
+gh workflow run cleanup.yml --ref main -f environment=prod -f action=destroy -f delay_minutes=0
+```
+
+`make tf-destroy ENV=prod` is deliberately blocked — the approval gate is the intended control.
 
 ---
 

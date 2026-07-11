@@ -476,6 +476,21 @@ jobs:
             terraform state show "$addr" &>/dev/null && return 0
             terraform import -var-file=terraform.tfvars "$addr" "$id" || true
           }
+
+          # No-op while dev keeps recovery_window_in_days = 0, but keeps the
+          # three environments symmetrical if that window is ever raised.
+          restore_secret() {
+            local id=$1 deleted
+            deleted=$(aws secretsmanager describe-secret --secret-id "$id" \
+              --query 'DeletedDate' --output text 2>/dev/null) || return 0
+            [[ -z "$deleted" || "$deleted" == "None" ]] && return 0
+            echo "Restoring secret scheduled for deletion: $id"
+            aws secretsmanager restore-secret --secret-id "$id" >/dev/null || true
+          }
+          restore_secret "nexusdeploy/dev/app-secrets"
+          restore_secret "nexusdeploy/dev/init-secrets"
+
+          adopt aws_secretsmanager_secret.app                   "nexusdeploy/dev/app-secrets"
           adopt aws_secretsmanager_secret.init                  "nexusdeploy/dev/init-secrets"
           adopt module.iam.aws_iam_role.ecs_execution           "nexusdeploy-dev-ecs-execution"
           adopt module.iam.aws_iam_role.ecs_execution_worker    "nexusdeploy-dev-ecs-execution-worker"
@@ -800,6 +815,22 @@ jobs:
             terraform state show "$addr" &>/dev/null && return 0
             terraform import -var-file=terraform.tfvars "$addr" "$id" || true
           }
+
+          # A destroy leaves secrets "scheduled for deletion" whenever
+          # recovery_window_in_days > 0. AWS reserves the NAME for the whole
+          # window, so a redeploy inside it fails on both create and import.
+          # Restoring first is a no-op when the window is 0 (staging/dev).
+          restore_secret() {
+            local id=$1 deleted
+            deleted=$(aws secretsmanager describe-secret --secret-id "$id" \
+              --query 'DeletedDate' --output text 2>/dev/null) || return 0
+            [[ -z "$deleted" || "$deleted" == "None" ]] && return 0
+            echo "Restoring secret scheduled for deletion: $id"
+            aws secretsmanager restore-secret --secret-id "$id" >/dev/null || true
+          }
+          restore_secret "nexusdeploy/staging/app-secrets"
+          restore_secret "nexusdeploy/staging/init-secrets"
+
           adopt aws_secretsmanager_secret.app                   "nexusdeploy/staging/app-secrets"
           adopt aws_secretsmanager_secret.init                  "nexusdeploy/staging/init-secrets"
           adopt module.iam.aws_iam_role.ecs_execution           "nexusdeploy-staging-ecs-execution"
@@ -1265,6 +1296,22 @@ jobs:
             terraform state show "$addr" &>/dev/null && return 0
             terraform import -var-file=terraform.tfvars "$addr" "$id" || true
           }
+
+          # Prod keeps recovery_window_in_days = 7 as a safety net, so a destroy
+          # leaves these secrets "scheduled for deletion" and AWS reserves the
+          # NAME for the full window — a redeploy inside those 7 days fails on
+          # both create and import until the secret is restored.
+          restore_secret() {
+            local id=$1 deleted
+            deleted=$(aws secretsmanager describe-secret --secret-id "$id" \
+              --query 'DeletedDate' --output text 2>/dev/null) || return 0
+            [[ -z "$deleted" || "$deleted" == "None" ]] && return 0
+            echo "Restoring secret scheduled for deletion: $id"
+            aws secretsmanager restore-secret --secret-id "$id" >/dev/null || true
+          }
+          restore_secret "nexusdeploy/prod/app-secrets"
+          restore_secret "nexusdeploy/prod/init-secrets"
+
           adopt aws_secretsmanager_secret.app                   "nexusdeploy/prod/app-secrets"
           adopt aws_secretsmanager_secret.init                  "nexusdeploy/prod/init-secrets"
           adopt module.iam.aws_iam_role.ecs_execution           "nexusdeploy-prod-ecs-execution"
