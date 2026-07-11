@@ -203,6 +203,18 @@ jobs:
             echo "ℹ️ No state file found for ${{ env.TF_ENV }}"
           fi
 
+          # Remove the S3-backend state-checksum row from the lock table.
+          # Without this, a later `terraform init` fails with "checksum
+          # calculated for the state stored in S3 does not match the checksum
+          # stored in DynamoDB" because the digest outlives the deleted state.
+          DIGEST_ID="${{ env.TF_STATE_BUCKET }}/$STATE_KEY-md5"
+          aws dynamodb delete-item \
+            --table-name "${{ env.TF_LOCK_TABLE }}" \
+            --key "{\"LockID\":{\"S\":\"$DIGEST_ID\"}}" \
+            --region "${{ env.AWS_REGION }}" 2>/dev/null \
+          && echo "✅ Stale state digest removed from ${{ env.TF_LOCK_TABLE }}" \
+          || echo "ℹ️ No state digest to remove"
+
       # ── Summary ──────────────────────────────────────────────────────────
       - name: Cleanup summary
         if: always()
