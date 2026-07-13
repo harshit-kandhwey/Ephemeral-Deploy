@@ -11,7 +11,7 @@ psycopg2-binary==2.9.9
 alembic==1.13.1
 
 # Redis & Celery
-redis==5.0.1
+redis==8.0.1
 celery==5.6.3
 
 # AWS — keep boto3 and botocore on the same version: boto3 X.Y.Z requires
