@@ -8,7 +8,7 @@ flask-limiter==4.1.1
 
 # Database
 psycopg2-binary==2.9.9
-alembic==1.13.1
+alembic==1.18.5
 
 # Redis & Celery
 redis==8.0.1
