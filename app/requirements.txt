@@ -31,7 +31,7 @@ flasgger==0.9.7.1
 prometheus-client==0.25.0
 
 # Server
-gunicorn==23.0.0
+gunicorn==26.0.0
 
 # Utilities
 marshmallow==4.3.0
