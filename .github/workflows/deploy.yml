@@ -560,6 +560,37 @@ jobs:
             echo "⚠️  init_db exited with code: $EXIT_CODE — check logs"
           fi
 
+      - name: Verify API health (dev)
+        # Dev is single-slot, so there is no promotion to gate — this is a light
+        # post-deploy check that surfaces a broken deploy in the logs. Especially
+        # useful when validating infra changes here (e.g. Redis/ElastiCache): if
+        # the API cannot reach its dependencies, /health fails and the tasks
+        # never reach HEALTHY. Non-blocking — dev auto-destroys shortly anyway.
+        continue-on-error: true
+        run: |
+          CLUSTER="nexusdeploy-dev"
+          SERVICE="nexusdeploy-dev-api"
+          MAX_WAIT=240
+          INTERVAL=30
+          ELAPSED=0
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            ARNS=$(aws ecs list-tasks --cluster $CLUSTER --service-name $SERVICE --desired-status RUNNING \
+              --region ${{ env.AWS_REGION }} --query 'taskArns' --output text 2>/dev/null || echo "")
+            HEALTH="none"
+            if [[ -n "$ARNS" && "$ARNS" != "None" ]]; then
+              HEALTH=$(aws ecs describe-tasks --cluster $CLUSTER --tasks $ARNS \
+                --region ${{ env.AWS_REGION }} --query 'tasks[].healthStatus' --output text 2>/dev/null || echo "none")
+            fi
+            echo "  API task health: $HEALTH (${ELAPSED}s elapsed)"
+            if [[ "$HEALTH" != "none" && "$HEALTH" != *UNHEALTHY* && "$HEALTH" != *UNKNOWN* ]]; then
+              echo "✅ Dev API is HEALTHY"
+              exit 0
+            fi
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+          echo "⚠️  Dev API did not reach HEALTHY within ${MAX_WAIT}s — check CloudWatch logs"
+
       - name: Get outputs
         id: outputs
         continue-on-error: true # Non-blocking — URLs are informational only
@@ -936,35 +967,53 @@ jobs:
           NEW_SLOT="${{ steps.slot.outputs.new_slot }}"
           CLUSTER="nexusdeploy-staging-$NEW_SLOT"
           SERVICE="nexusdeploy-staging-$NEW_SLOT-api"
-          MAX_WAIT=300
+          MAX_WAIT=420   # widened: we now wait out the 60s startPeriod + first /health pass
           INTERVAL=30
           ELAPSED=0
 
           echo "health_ok=false" >> $GITHUB_OUTPUT
-          echo "⏳ Waiting for $SERVICE to reach RUNNING state..."
+          echo "⏳ Waiting for $SERVICE tasks to report HEALTHY..."
 
           while [ $ELAPSED -lt $MAX_WAIT ]; do
             RUNNING=$(aws ecs describe-services \
-              --cluster $CLUSTER \
-              --services $SERVICE \
+              --cluster $CLUSTER --services $SERVICE \
               --region ${{ env.AWS_REGION }} \
-              --query 'services[0].runningCount' \
-              --output text 2>/dev/null || echo "0")
+              --query 'services[0].runningCount' --output text 2>/dev/null || echo "0")
 
             DESIRED=$(aws ecs describe-services \
-              --cluster $CLUSTER \
-              --services $SERVICE \
+              --cluster $CLUSTER --services $SERVICE \
               --region ${{ env.AWS_REGION }} \
-              --query 'services[0].desiredCount' \
-              --output text 2>/dev/null || echo "1")
+              --query 'services[0].desiredCount' --output text 2>/dev/null || echo "1")
 
-            echo "  Running: $RUNNING / Desired: $DESIRED (${ELAPSED}s elapsed)"
-
-            # describe-services on a missing service exits 0 with "None" values —
-            # require numeric counts so that never passes as healthy
+            # Container-level health, not just "is the task RUNNING". A task
+            # counts as RUNNING throughout its 60s startPeriod — before /health
+            # has passed even once — so running==desired alone can promote a slot
+            # whose app is failing /health, flip traffic, and drain the old slot
+            # into a dead deployment. Gate on the API tasks' healthStatus.
+            HEALTH="none"
             if [[ "$RUNNING" =~ ^[0-9]+$ && "$RUNNING" == "$DESIRED" && "$RUNNING" != "0" ]]; then
+              ARNS=$(aws ecs list-tasks \
+                --cluster $CLUSTER --service-name $SERVICE --desired-status RUNNING \
+                --region ${{ env.AWS_REGION }} \
+                --query 'taskArns' --output text 2>/dev/null || echo "")
+              if [[ -n "$ARNS" && "$ARNS" != "None" ]]; then
+                HEALTH=$(aws ecs describe-tasks \
+                  --cluster $CLUSTER --tasks $ARNS \
+                  --region ${{ env.AWS_REGION }} \
+                  --query 'tasks[].healthStatus' --output text 2>/dev/null || echo "none")
+              fi
+            fi
+
+            echo "  Running: $RUNNING / Desired: $DESIRED | task health: $HEALTH (${ELAPSED}s elapsed)"
+
+            # Healthy only when counts match AND every API task is HEALTHY — no
+            # UNHEALTHY or still-starting UNKNOWN status left. Only the API tasks
+            # are checked; worker/beat define no container health check and would
+            # sit at UNKNOWN forever.
+            if [[ "$RUNNING" =~ ^[0-9]+$ && "$RUNNING" == "$DESIRED" && "$RUNNING" != "0" \
+                  && "$HEALTH" != "none" && "$HEALTH" != *UNHEALTHY* && "$HEALTH" != *UNKNOWN* ]]; then
               echo "health_ok=true" >> $GITHUB_OUTPUT
-              echo "✅ New slot is healthy!"
+              echo "✅ New slot is healthy (all API tasks HEALTHY)!"
               exit 0
             fi
 
@@ -1424,7 +1473,7 @@ jobs:
           NEW_SLOT="${{ steps.slot.outputs.new_slot }}"
           CLUSTER="nexusdeploy-prod-$NEW_SLOT"
           SERVICE="nexusdeploy-prod-$NEW_SLOT-api"
-          MAX_WAIT=300   # 5 min check here; prod monitors for 24h via scheduled check
+          MAX_WAIT=420   # widened for the 60s startPeriod; prod also monitors 24h via scheduled check
           INTERVAL=30
           ELAPSED=0
           HEALTH_OK=false
@@ -1432,31 +1481,49 @@ jobs:
           # Set default failure state
           echo "health_ok=false" >> $GITHUB_OUTPUT
 
-          echo "⏳ Waiting for $SERVICE to reach RUNNING state..."
+          echo "⏳ Waiting for $SERVICE tasks to report HEALTHY..."
 
           while [ $ELAPSED -lt $MAX_WAIT ]; do
             RUNNING=$(aws ecs describe-services \
-              --cluster $CLUSTER \
-              --services $SERVICE \
+              --cluster $CLUSTER --services $SERVICE \
               --region ${{ env.AWS_REGION }} \
-              --query 'services[0].runningCount' \
-              --output text 2>/dev/null || echo "0")
+              --query 'services[0].runningCount' --output text 2>/dev/null || echo "0")
 
             DESIRED=$(aws ecs describe-services \
-              --cluster $CLUSTER \
-              --services $SERVICE \
+              --cluster $CLUSTER --services $SERVICE \
               --region ${{ env.AWS_REGION }} \
-              --query 'services[0].desiredCount' \
-              --output text 2>/dev/null || echo "1")
+              --query 'services[0].desiredCount' --output text 2>/dev/null || echo "1")
 
-            echo "  Running: $RUNNING / Desired: $DESIRED (${ELAPSED}s elapsed)"
-
-            # describe-services on a missing service exits 0 with "None" values —
-            # require numeric counts so that never passes as healthy
+            # Container-level health, not just "is the task RUNNING". A task
+            # counts as RUNNING throughout its 60s startPeriod — before /health
+            # has passed even once — so running==desired alone can promote a slot
+            # whose app is failing /health, flip traffic, and drain the old slot
+            # into a dead deployment. Gate on the API tasks' healthStatus.
+            HEALTH="none"
             if [[ "$RUNNING" =~ ^[0-9]+$ && "$RUNNING" == "$DESIRED" && "$RUNNING" != "0" ]]; then
+              ARNS=$(aws ecs list-tasks \
+                --cluster $CLUSTER --service-name $SERVICE --desired-status RUNNING \
+                --region ${{ env.AWS_REGION }} \
+                --query 'taskArns' --output text 2>/dev/null || echo "")
+              if [[ -n "$ARNS" && "$ARNS" != "None" ]]; then
+                HEALTH=$(aws ecs describe-tasks \
+                  --cluster $CLUSTER --tasks $ARNS \
+                  --region ${{ env.AWS_REGION }} \
+                  --query 'tasks[].healthStatus' --output text 2>/dev/null || echo "none")
+              fi
+            fi
+
+            echo "  Running: $RUNNING / Desired: $DESIRED | task health: $HEALTH (${ELAPSED}s elapsed)"
+
+            # Healthy only when counts match AND every API task is HEALTHY — no
+            # UNHEALTHY or still-starting UNKNOWN status left. Only the API tasks
+            # are checked; worker/beat define no container health check and would
+            # sit at UNKNOWN forever.
+            if [[ "$RUNNING" =~ ^[0-9]+$ && "$RUNNING" == "$DESIRED" && "$RUNNING" != "0" \
+                  && "$HEALTH" != "none" && "$HEALTH" != *UNHEALTHY* && "$HEALTH" != *UNKNOWN* ]]; then
               HEALTH_OK=true
               echo "health_ok=true" >> $GITHUB_OUTPUT
-              echo "✅ New slot is healthy!"
+              echo "✅ New slot is healthy (all API tasks HEALTHY)!"
               exit 0
             fi
 
