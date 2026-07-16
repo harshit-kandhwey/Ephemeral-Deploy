@@ -81,6 +81,30 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
+      # Guardrail: the Allow statements below grant iam:PutRolePolicy (and other
+      # role-write actions) on role/${var.project}-*, which matches THIS role.
+      # Without this Deny, anyone able to trigger a deploy could have the role
+      # rewrite its own policy to full admin. Deny always wins over Allow, so
+      # this closes the self-escalation path while leaving reads (GetRole,
+      # GetRolePolicy — used by the import blocks on every apply) untouched, and
+      # leaving management of the per-environment roles (a different ARN) intact.
+      # Mirrors DenySelfModification in bootstrap.sh, which owns the live policy.
+      {
+        Sid    = "DenySelfModification"
+        Effect = "Deny"
+        Action = [
+          "iam:PutRolePolicy",
+          "iam:DeleteRolePolicy",
+          "iam:AttachRolePolicy",
+          "iam:DetachRolePolicy",
+          "iam:UpdateAssumeRolePolicy",
+          "iam:UpdateRole",
+          "iam:DeleteRole",
+          "iam:PutRolePermissionsBoundary",
+          "iam:DeleteRolePermissionsBoundary"
+        ]
+        Resource = "arn:aws:iam::*:role/${var.project}-github-actions-deploy"
+      },
       # ECR - authentication (account-level, requires Resource = "*")
       {
         Sid    = "ECRGetAuth"
