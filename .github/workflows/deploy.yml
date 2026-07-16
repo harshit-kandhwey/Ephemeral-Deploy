@@ -44,6 +44,7 @@ jobs:
   setup:
     name: Setup Context
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: ${{ github.event.inputs.environment || 'dev' }}
 
     permissions:
@@ -150,6 +151,7 @@ jobs:
   ecr-provision:
     name: Provision ECR (${{ needs.setup.outputs.environment }})
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     needs: setup
     # Always runs — ecr-check step inside skips terraform apply if repos already exist.
     # This ensures repos are created even on infra-only pushes where repos may be missing.
@@ -278,6 +280,7 @@ jobs:
   push-image:
     name: Push Images (${{ needs.setup.outputs.environment }})
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     needs: [setup, ecr-provision]
     concurrency:
       group: push-image-${{ github.ref_name }}
@@ -347,6 +350,7 @@ jobs:
   deploy-dev:
     name: Deploy → dev
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs: [setup, ecr-provision, push-image]
     concurrency:
       group: deploy-dev-${{ github.ref_name }}
@@ -620,6 +624,7 @@ jobs:
   cleanup-on-success:
     name: Schedule cleanup (45 min TTL)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [setup, deploy-dev]
     if: |
       always() &&
@@ -661,6 +666,7 @@ jobs:
   cleanup-on-failure:
     name: Cleanup on failure (immediate)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [setup, deploy-dev]
     if: |
       always() &&
@@ -710,6 +716,7 @@ jobs:
   deploy-staging:
     name: Deploy → staging (blue-green)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     needs: [setup, ecr-provision, push-image]
     if: |
       always() &&
@@ -952,6 +959,10 @@ jobs:
           # Set in GitHub → Settings → Environments → staging → Variables → MONITORING_ALLOWED_CIDR
           # Accepts plain CIDR (1.2.3.4/32) or JSON array (["1.2.3.4/32"]) — normalized below
           TF_VAR_monitoring_allowed_cidr: ${{ vars.MONITORING_ALLOWED_CIDR }}
+          # Optional: GitHub → Environments → staging → Variables → ALERT_EMAIL.
+          # Empty is fine (module default) — the SNS topic is still created and
+          # wired; a value adds an email subscription (one-time confirmation).
+          TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
         run: |
           if [[ -z "${TF_VAR_monitoring_allowed_cidr:-}" ]]; then
             echo "::error::MONITORING_ALLOWED_CIDR is not set. Add it in GitHub → Settings → Environments → staging → Variables."
@@ -1202,6 +1213,7 @@ jobs:
   deploy-prod:
     name: Deploy → prod (blue-green)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     needs: [setup, ecr-provision, push-image]
     if: |
       always() &&
@@ -1459,6 +1471,10 @@ jobs:
           # Set in GitHub → Settings → Environments → prod → Variables → MONITORING_ALLOWED_CIDR
           # Accepts plain CIDR (1.2.3.4/32) or JSON array (["1.2.3.4/32"]) — normalized below
           TF_VAR_monitoring_allowed_cidr: ${{ vars.MONITORING_ALLOWED_CIDR }}
+          # Optional: GitHub → Environments → prod → Variables → ALERT_EMAIL.
+          # Empty is fine (module default) — the SNS topic is still created and
+          # wired; a value adds an email subscription (one-time confirmation).
+          TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
         run: |
           if [[ -z "${TF_VAR_monitoring_allowed_cidr:-}" ]]; then
             echo "::error::MONITORING_ALLOWED_CIDR is not set. Add it in GitHub → Settings → Environments → prod → Variables."

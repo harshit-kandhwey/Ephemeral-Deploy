@@ -44,6 +44,9 @@ env:
 jobs:
   destroy:
     name: Destroy ${{ github.event.inputs.environment || 'dev' }}
+    # Generous: this job sleeps up to delay_minutes (45 for the dev TTL path)
+    # BEFORE running terraform destroy, so the cap must clear the sleep + destroy.
+    timeout-minutes: 90
     runs-on: ubuntu-latest
     # Scheduled runs are always dev destroy. Manual runs skip destroy for drain_old_slot.
     if: github.event_name == 'schedule' || github.event.inputs.action != 'drain_old_slot'

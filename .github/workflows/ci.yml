@@ -37,6 +37,7 @@ jobs:
   detect-changes:
     name: Detect Changed Files
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       app_changed: ${{ steps.filter.outputs.app }}
       infra_changed: ${{ steps.filter.outputs.infra }}
@@ -99,6 +100,7 @@ jobs:
   lint:
     name: Lint & Static Analysis
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: detect-changes
     if: needs.detect-changes.outputs.app_changed == 'true'
 
@@ -163,6 +165,7 @@ jobs:
   test:
     name: Run Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [detect-changes, lint]
     # Only run when app code changed AND lint passed
     if: |
@@ -242,6 +245,7 @@ jobs:
   docker-build:
     name: Docker Build & Security Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [detect-changes, lint]
     # Parallel with test — only needs lint to pass, not test
     if: |
@@ -307,6 +311,7 @@ jobs:
   terraform-lint:
     name: Terraform Validate & Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: detect-changes
     # Only run when terraform or workflow files changed
     if: needs.detect-changes.outputs.infra_changed == 'true'
@@ -408,6 +413,7 @@ jobs:
   ci-summary:
     name: CI Summary
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: [detect-changes, lint, test, docker-build, terraform-lint]
     # !cancelled(), NOT always(): with always() a run cancelled by
     # concurrency cancel-in-progress would still reach this job, count the
