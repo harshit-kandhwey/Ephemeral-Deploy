@@ -24,6 +24,12 @@ variable "enable_nat_gateway" {
   default     = false
 }
 
+variable "single_az_endpoints" {
+  description = "Place interface VPC endpoints in a single AZ instead of one ENI per AZ. Interface endpoints bill per-ENI-per-AZ (~$0.01/hr each), so this halves endpoint hours — appropriate for disposable dev where cross-AZ endpoint HA has no value. Keep false (one ENI per AZ) for staging/prod parity."
+  type        = bool
+  default     = false
+}
+
 variable "flow_log_role_arn" {
   description = "IAM role ARN for VPC Flow Logs to write to CloudWatch"
   type        = string

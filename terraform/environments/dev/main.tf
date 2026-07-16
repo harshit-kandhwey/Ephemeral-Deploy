@@ -218,6 +218,7 @@ module "vpc" {
   vpc_cidr              = var.vpc_cidr
   availability_zones    = var.availability_zones
   enable_nat_gateway    = false # VPC endpoints used instead — saves ~$1/day
+  single_az_endpoints   = true  # dev is disposable; skip per-AZ endpoint HA to halve endpoint ENI hours
   aws_region            = var.aws_region
   flow_log_role_arn     = module.iam.vpc_flow_log_role_arn
   flow_log_traffic_type = "REJECT" # Cost-optimised: capture security events only
