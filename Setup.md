@@ -12,7 +12,7 @@ Navigate to your repo → **Settings → Secrets and variables → Actions → N
 
 | Secret Name           | Description                     | How to Get                   |
 | --------------------- | ------------------------------- | ---------------------------- |
-| `AWS_DEPLOY_ROLE_ARN` | IAM role ARN for GitHub Actions | Output from `make bootstrap` |
+| `AWS_DEPLOY_ROLE_ARN` | IAM role ARN for GitHub Actions | Output from `./scripts/bootstrap.sh` |
 
 ### Terraform Variables (passed as `TF_VAR_*`)
 
@@ -50,7 +50,7 @@ aws configure
 ```bash
 export GITHUB_ORG=your-github-username
 export GITHUB_REPO=nexusdeploy
-make bootstrap
+./scripts/bootstrap.sh
 ```
 
 ### Step 3: Add GitHub Secrets
@@ -134,7 +134,7 @@ Production is not auto-destroyed. To destroy prod:
 
 ```bash
 # 1. Download state file
-make prod-state-download
+aws s3 cp s3://nexusdeploy-terraform-state/prod/terraform.tfstate ./prod-terraform.tfstate
 
 # 2. Verify what will be destroyed
 terraform plan -destroy -state=prod-terraform.tfstate

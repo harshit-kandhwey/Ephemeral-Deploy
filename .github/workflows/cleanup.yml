@@ -9,7 +9,7 @@ on:
         type: choice
         # prod IS destroyable here, but the destroy job runs under the `prod`
         # GitHub environment, so it blocks on manual approval. That gate — not
-        # this list — is the guardrail. (`make tf-destroy ENV=prod` stays blocked.)
+        # this list — is the guardrail. (There is no one-command local prod destroy.)
         options: [dev, staging, prod]
       action:
         description: "Action to perform"

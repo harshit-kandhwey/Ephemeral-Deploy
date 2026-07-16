@@ -21,8 +21,6 @@
 #   export GITHUB_ORG=your-github-username   # optional — derived from git remote if unset
 #   export GITHUB_REPO=Ephemeral-Deploy      # exact repo name on GitHub
 #   export ENV=staging                       # dev | staging | prod — prompted if unset
-#   make bootstrap
-#     OR
 #   AWS_REGION=us-east-1 bash scripts/bootstrap.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail

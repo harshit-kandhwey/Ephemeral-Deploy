@@ -23,7 +23,7 @@
 13. [Cost Engineering](#13-cost-engineering)
 14. [Commented-Out Features](#14-commented-out-features)
 15. [Getting Started — First Deployment](#15-getting-started--first-deployment)
-16. [Day-to-Day Operations (Makefile Reference)](#16-day-to-day-operations-makefile-reference)
+16. [Day-to-Day Operations](#16-day-to-day-operations)
 17. [Local Development](#17-local-development)
 
 ---
@@ -146,7 +146,6 @@ ephemeral-deploy/
 ├── docs/
 │   └── SETUP.md                      GitHub secrets guide · OIDC explanation · cost breakdown
 │
-├── Makefile                          Operational shortcuts (see §16)
 └── docker-compose.yml                Local dev only: postgres + redis + api + worker + beat + redis-commander
 ```
 
@@ -271,7 +270,7 @@ ECS tasks in private subnets need to reach AWS APIs to pull images from ECR and 
 - `ecr.api` — ECS authentication with ECR
 - `ecr.dkr` — Docker image layer pulls
 - `secretsmanager` — runtime secret injection
-- `ssm` + `ssmmessages` + `ec2messages` — SSM Session Manager (used by `make shell`)
+- `ssm` + `ssmmessages` + `ec2messages` — SSM Session Manager (e.g. `aws ssm start-session` into the monitoring EC2)
 - `s3` (Gateway endpoint, free) — S3 access for monitoring config download
 
 ### VPC Flow Logs
@@ -497,7 +496,8 @@ Terraform reads this at plan time to determine which slot gets the new image. Th
 To check the current active slot manually:
 
 ```bash
-make prod-active-slot
+aws ssm get-parameter --name /nexusdeploy/prod/deployment/active_slot \
+  --region us-east-1 --query Parameter.Value --output text
 ```
 
 ### Why Not CodeDeploy?
@@ -546,7 +546,7 @@ Step 3: Delete S3 state file
 ### Dry run
 
 ```bash
-make cleanup-dry ENV=dev   # shows what would be deleted without deleting anything
+./scripts/cleanup.sh --env dev --region us-east-1 --dry-run   # shows what would be deleted without deleting anything
 ```
 
 ### Destroying prod
@@ -571,7 +571,7 @@ Prod destroy runs through the same workflow, but the job is bound to the `prod` 
 gh workflow run cleanup.yml --ref main -f environment=prod -f action=destroy -f delay_minutes=0
 ```
 
-`make tf-destroy ENV=prod` is deliberately blocked — the approval gate is the intended control.
+There is no one-command local prod destroy — the manual, deliberate path (download the prod state, `terraform destroy` against it) plus this approval-gated workflow are the intended controls.
 
 ---
 
@@ -620,8 +620,16 @@ Everything is installed and configured at EC2 boot time via `monitoring-userdata
 After a deploy, `deploy.yml` prints the Grafana and Prometheus URLs to the Actions job summary. Or:
 
 ```bash
-make monitoring-url ENV=prod      # prints Grafana URL from Terraform output
-make monitoring-logs ENV=prod     # tails the EC2 setup log via SSM Session Manager
+# Grafana URL from Terraform output
+terraform -chdir=terraform/environments/prod output -raw grafana_url
+
+# Tail the monitoring EC2 setup log via SSM Session Manager
+INSTANCE_ID=$(aws ec2 describe-instances --region us-east-1 \
+  --filters "Name=tag:Project,Values=nexusdeploy" "Name=tag:Environment,Values=prod" "Name=tag:Role,Values=monitoring" \
+  --query 'Reservations[0].Instances[0].InstanceId' --output text)
+aws ssm start-session --target "$INSTANCE_ID" --region us-east-1 \
+  --document-name AWS-StartInteractiveCommand \
+  --parameters '{"command":["tail -f /var/log/monitoring-setup.log"]}'
 ```
 
 ---
@@ -685,7 +693,7 @@ Terraform state locking prevents two concurrent `terraform apply` runs from corr
 
 **To enable (3 steps):**
 
-1. Uncomment the `aws dynamodb create-table` block in `bootstrap.sh` and re-run `make bootstrap`
+1. Uncomment the `aws dynamodb create-table` block in `bootstrap.sh` and re-run `./scripts/bootstrap.sh`
 2. Add `dynamodb_table = "nexusdeploy-terraform-locks"` to the `backend "s3"` block in `dev/main.tf` and `prod/main.tf`
 3. Uncomment `TF_LOCK_TABLE: nexusdeploy-terraform-locks` in `deploy.yml`
 
@@ -702,7 +710,7 @@ Two blocks are commented out with `log_warn` annotations explaining why:
 - **Explicit AES256 SSE** via `aws s3api put-bucket-encryption` — S3 default encryption now covers this automatically, but an explicit configuration demonstrates intentional security posture
 - **Lifecycle policy** via `aws s3api put-bucket-lifecycle-configuration` — transitions non-current state versions to `STANDARD_IA` after 30 days, expires after 90 days. Keeps the state bucket lean as deployment history accumulates
 
-**To enable:** uncomment the two blocks in `bootstrap.sh` and re-run `make bootstrap`. Idempotent.
+**To enable:** uncomment the two blocks in `bootstrap.sh` and re-run `./scripts/bootstrap.sh`. Idempotent.
 
 ---
 
@@ -790,7 +798,7 @@ When ALB is enabled, the `X-Forwarded-For` header carries the real client IP. Th
 | 2   | `dev` GitHub Environment (no approval gate)                                                   | GitHub → Settings → **Environments** → New environment                       | ✅  |  —   |
 | 3   | `prod` GitHub Environment (Required reviewers enabled)                                        | GitHub → Settings → **Environments** → New environment                       |  —  |  ✅  |
 | 4   | `MONITORING_ALLOWED_CIDR` — CIDR(s) allowed inbound to Grafana (:3000) and Prometheus (:9090) | GitHub → Settings → Environments → **prod** → Variables → New variable       |  —  |  ✅  |
-| 5   | SSM Parameter Store secrets (DB passwords, JWT key, Grafana password)                         | Run `make bootstrap` once — prompts you interactively                        | ✅  |  ✅  |
+| 5   | SSM Parameter Store secrets (DB passwords, JWT key, Grafana password)                         | Run `./scripts/bootstrap.sh` once — prompts you interactively                | ✅  |  ✅  |
 | 6   | `github_org` + `github_repo` set in tfvars                                                    | `terraform/environments/dev/terraform.tfvars` and `prod/terraform.tfvars`    | ✅  |  ✅  |
 
 **Notes on `MONITORING_ALLOWED_CIDR`:**
@@ -807,7 +815,7 @@ When ALB is enabled, the `X-Forwarded-For` header carries the real client IP. Th
 ```bash
 export GITHUB_ORG=your-github-username
 export GITHUB_REPO=ephemeral-deploy
-make bootstrap
+./scripts/bootstrap.sh
 ```
 
 `bootstrap.sh` creates:
@@ -874,46 +882,58 @@ Same pipeline, but `deploy-prod` runs blue-green logic instead of a simple apply
 
 ---
 
-## 16. Day-to-Day Operations (Makefile Reference)
+## 16. Day-to-Day Operations
 
-Run `make help` to see all targets. Commonly used:
+Defaults: `PROJECT=nexusdeploy`, `REGION=us-east-1`. For **staging/prod** the
+cluster, services, and log group carry the active blue-green slot suffix
+(`-slot1`/`-slot2`) — resolve it first:
 
 ```bash
-# Local development
-make up                       # Start docker-compose (postgres + redis + api + worker + beat)
-make down                     # Stop and remove volumes
-make test                     # Run pytest with coverage report
-make lint                     # flake8 + black check + bandit
-
-# Docker
-make build                    # Build API and worker images locally
-make push                     # Tag + push to ECR (requires ecr-login)
-
-# Terraform
-make tf-init  ENV=dev         # Init backend with correct bucket/key
-make tf-plan  ENV=dev         # Plan changes
-make tf-apply ENV=dev         # Apply (full deploy: build + push + apply)
-make tf-destroy ENV=dev       # Destroy dev (blocked for prod)
-
-# Operations
-make status  ENV=dev          # Show ECS service running/desired counts
-make logs    ENV=dev          # Tail CloudWatch logs for API service
-make shell   ENV=dev          # ECS Exec into a running API container (no SSH needed)
-make cleanup ENV=dev          # Run tag-based cleanup script manually
-
-# Monitoring
-make monitoring-url ENV=prod  # Print Grafana URL from Terraform output
-make monitoring-logs ENV=dev  # Tail the monitoring EC2 setup log via SSM
-
-# Prod blue-green
-make prod-active-slot         # Print current active slot (slot1 or slot2)
-make prod-state-download      # Download prod state file for local destroy
-
-# Secrets
-make secrets ENV=dev          # Re-run SSM secret creation for an environment
+SLOT=$(aws ssm get-parameter --name /nexusdeploy/<env>/deployment/active_slot \
+  --region us-east-1 --query Parameter.Value --output text)   # e.g. slot1
 ```
 
-**Windows note:** `make` is not natively available in Command Prompt or PowerShell. Use Git Bash or WSL. Run Makefile targets as `bash -c "make <target>"` or `wsl make <target>` if needed.
+```bash
+# ── Local development ─────────────────────────────────
+docker-compose up -d          # Start postgres + redis + api + worker + beat + redis-commander
+docker-compose down -v        # Stop and remove volumes
+cd app && pytest tests/ -v --cov=src --cov-report=term-missing                        # Tests
+cd app && flake8 src/ --max-line-length=120 && black --check src/ && bandit -r src/ -ll -x src/tests/   # Lint
+
+# ── Docker (normally CI's job) ────────────────────────
+docker build -t nexusdeploy-api:local    -f app/Dockerfile app/
+docker build -t nexusdeploy-worker:local -f app/Dockerfile.worker app/
+aws ecr get-login-password --region us-east-1 \
+  | docker login --username AWS --password-stdin <account-id>.dkr.ecr.us-east-1.amazonaws.com
+
+# ── Terraform (swap dev → staging | prod) ─────────────
+cd terraform/environments/dev
+terraform init \
+  -backend-config="bucket=nexusdeploy-terraform-state" \
+  -backend-config="key=dev/terraform.tfstate" \
+  -backend-config="region=us-east-1" \
+  -backend-config="dynamodb_table=nexusdeploy-terraform-locks" \
+  -backend-config="encrypt=true"
+terraform plan    -var-file=terraform.tfvars
+terraform apply   -var-file=terraform.tfvars
+terraform destroy -var-file=terraform.tfvars    # dev/staging only — prod destroy is gated in cleanup.yml
+
+# ── Operations (dev names shown) ──────────────────────
+aws ecs describe-services --cluster nexusdeploy-dev \
+  --services nexusdeploy-dev-api nexusdeploy-dev-worker nexusdeploy-dev-beat \
+  --region us-east-1 \
+  --query 'services[].{Name:serviceName,Running:runningCount,Desired:desiredCount}'   # status
+aws logs tail /ecs/nexusdeploy/dev/api --follow --region us-east-1                     # logs
+./scripts/cleanup.sh --env dev --region us-east-1                                       # tag-based cleanup (add --dry-run to preview)
+
+# ── Monitoring ────────────────────────────────────────
+terraform -chdir=terraform/environments/dev output -raw grafana_url                    # Grafana URL
+
+# ── One-time setup / re-create SSM secrets ────────────
+./scripts/bootstrap.sh
+```
+
+**Windows note:** these are POSIX-shell commands — run them in Git Bash or WSL, not Command Prompt/PowerShell.
 
 ---
 
@@ -922,7 +942,7 @@ make secrets ENV=dev          # Re-run SSM secret creation for an environment
 The Docker Compose stack runs the full application locally — no AWS account needed for development.
 
 ```bash
-make up
+docker-compose up -d
 ```
 
 This starts:
@@ -985,8 +1005,6 @@ Or open `http://localhost:5000/apidocs` — Swagger UI with the Authorize button
 ### Running tests
 
 ```bash
-make test
-# or directly:
 cd app && pytest tests/ -v --cov=src --cov-report=term-missing
 ```
 
