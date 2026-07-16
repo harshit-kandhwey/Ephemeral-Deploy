@@ -53,10 +53,22 @@ echo "✅ Grafana password fetched"
 # ── Download binaries to /tmp ─────────────────────────────────────────────────
 cd /tmp
 
+# Supply-chain guard: every third-party binary below is pinned to an exact
+# version AND its sha256, captured out-of-band from the projects' official
+# release checksum files. A tampered or truncated download aborts the whole
+# setup (set -e) instead of silently running an unknown binary.
+verify_sha256() {
+  # $1 = file path, $2 = expected hex digest
+  echo "$2  $1" | sha256sum -c - \
+    || { echo "❌ checksum mismatch for $1 — aborting"; exit 1; }
+}
+
 # ── Install Node Exporter ─────────────────────────────────────────────────────
 echo "Installing Node Exporter..."
 NODEXP_VERSION="1.7.0"
+NODEXP_SHA256="a550cd5c05f760b7934a2d0afad66d2e92e681482f5f57a917465b1fba3b02a6"
 wget -q "https://github.com/prometheus/node_exporter/releases/download/v$${NODEXP_VERSION}/node_exporter-$${NODEXP_VERSION}.linux-amd64.tar.gz"
+verify_sha256 "node_exporter-$${NODEXP_VERSION}.linux-amd64.tar.gz" "$${NODEXP_SHA256}"
 tar xf "node_exporter-$${NODEXP_VERSION}.linux-amd64.tar.gz"
 mv "node_exporter-$${NODEXP_VERSION}.linux-amd64/node_exporter" /usr/local/bin/
 rm -rf "node_exporter-$${NODEXP_VERSION}"* 
@@ -78,7 +90,9 @@ echo "✅ Node Exporter installed"
 # ── Install Prometheus ────────────────────────────────────────────────────────
 echo "Installing Prometheus..."
 PROM_VERSION="2.49.1"
+PROM_SHA256="93460f66d17ee70df899e91db350d9705c20b1576800f96acbd78fa004e7dc07"
 wget -q "https://github.com/prometheus/prometheus/releases/download/v$${PROM_VERSION}/prometheus-$${PROM_VERSION}.linux-amd64.tar.gz"
+verify_sha256 "prometheus-$${PROM_VERSION}.linux-amd64.tar.gz" "$${PROM_SHA256}"
 tar xf "prometheus-$${PROM_VERSION}.linux-amd64.tar.gz"
 mv "prometheus-$${PROM_VERSION}.linux-amd64/prometheus" /usr/local/bin/
 mv "prometheus-$${PROM_VERSION}.linux-amd64/promtool"   /usr/local/bin/
@@ -96,8 +110,10 @@ ExecStart=/usr/local/bin/prometheus \
   --config.file=/etc/prometheus/prometheus.yml \
   --storage.tsdb.path=/var/lib/prometheus \
   --storage.tsdb.retention.time=3d \
-  --web.listen-address=0.0.0.0:9090 \
-  --web.enable-lifecycle
+  --web.listen-address=0.0.0.0:9090
+# --web.enable-lifecycle intentionally omitted: it exposes /-/reload and /-/quit
+# over HTTP on :9090, letting anyone who can reach the port reload or shut down
+# Prometheus. Config is baked at boot from S3, so hot-reload isn't needed.
 Restart=always
 RestartSec=5
 [Install]
@@ -108,7 +124,9 @@ echo "✅ Prometheus installed"
 # ── Install YACE ──────────────────────────────────────────────────────────────
 echo "Installing YACE..."
 YACE_VERSION="0.61.2"
+YACE_SHA256="6c725906bd11eefdcfa3d7fb51063d5427d7dc34b89909295105c55780c3d335"
 wget -q "https://github.com/nerdswords/yet-another-cloudwatch-exporter/releases/download/v$${YACE_VERSION}/yet-another-cloudwatch-exporter_$${YACE_VERSION}_Linux_x86_64.tar.gz"
+verify_sha256 "yet-another-cloudwatch-exporter_$${YACE_VERSION}_Linux_x86_64.tar.gz" "$${YACE_SHA256}"
 tar xf "yet-another-cloudwatch-exporter_$${YACE_VERSION}_Linux_x86_64.tar.gz"
 # Binary may be named 'yace' or 'yet-another-cloudwatch-exporter' depending on version
 mv yet-another-cloudwatch-exporter /usr/local/bin/yace 2>/dev/null || \
@@ -134,7 +152,9 @@ echo "✅ YACE installed"
 
 # ── Install Grafana via apt (resolves deps automatically) ─────────────────────
 echo "Installing Grafana..."
+GRAFANA_DEB_SHA256="4cff89724f4a06f53fc1187c6c2011206084baf13da6d443c2fb14b4ba272bb0"
 wget -q -O /tmp/grafana.deb "https://dl.grafana.com/oss/release/grafana_11.4.0_amd64.deb"
+verify_sha256 /tmp/grafana.deb "$${GRAFANA_DEB_SHA256}"
 apt-get install -y -qq /tmp/grafana.deb
 rm -f /tmp/grafana.deb
 echo "✅ Grafana installed"
@@ -196,8 +216,9 @@ systemctl enable --now prometheus
 systemctl enable --now grafana-server
 
 # ── Frontend console (nginx reverse proxy) ────────────────────────────────────
-# Serves a lightweight static console on 80 + 443 (self-signed TLS) and
-# reverse-proxies /api and /health to the ECS API tasks. The API stays private;
+# Serves a lightweight static console on 443 (self-signed TLS); port 80 only
+# 301-redirects to HTTPS. Reverse-proxies /api and /health to the ECS API tasks.
+# The API stays private;
 # only nginx on this box (already allowed to reach API:5000) talks to it, and
 # access is gated by the monitoring SG's allowlist. The upstream server list is
 # kept current by ecs-discovery.sh below, so it survives blue-green cutovers.
@@ -225,9 +246,15 @@ EOF
 
 rm -f /etc/nginx/sites-enabled/default
 cat > /etc/nginx/sites-available/nexusdeploy << 'EOF'
+# Port 80 exists only to redirect to HTTPS — no content is served in the clear.
 server {
   listen 80 default_server;
   listen [::]:80 default_server;
+  server_name _;
+  return 301 https://$host$request_uri;
+}
+
+server {
   listen 443 ssl default_server;
   listen [::]:443 ssl default_server;
   server_name _;
@@ -353,7 +380,7 @@ PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
 echo ""
 echo "════════════════════════════════════════════"
 echo " Monitoring Stack Ready!"
-echo " Console:    http://$PUBLIC_IP  (https:// self-signed)"
+echo " Console:    https://$PUBLIC_IP  (self-signed cert; http:// redirects here)"
 echo " Grafana:    http://$PUBLIC_IP:3000"
 echo " Prometheus: http://$PUBLIC_IP:9090"
 echo "════════════════════════════════════════════"
