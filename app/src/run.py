@@ -11,4 +11,7 @@ if __name__ == "__main__":
     # dev) rather than a hard-coded True. Hard-coding it enables the Werkzeug
     # debugger — an RCE console — anywhere this module happens to run, which is
     # what CodeQL's py/flask-debug flags.
-    app.run(host="0.0.0.0", port=5000, debug=app.config["DEBUG"])
+    # nosec B104: binding all interfaces is intentional here — this local dev
+    # runner must be reachable from the host / other docker-compose services.
+    # It is never the production entrypoint (gunicorn is; see Dockerfile).
+    app.run(host="0.0.0.0", port=5000, debug=app.config["DEBUG"])  # nosec B104

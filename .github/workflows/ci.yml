@@ -119,7 +119,7 @@ jobs:
           cache: "pip"
 
       - name: Install lint dependencies
-        run: pip install flake8 black isort bandit safety
+        run: pip install flake8 black isort bandit pip-audit
 
       - name: Auto-format with black and isort
         run: |
@@ -147,8 +147,12 @@ jobs:
         run: bandit -r app/src/ -ll -x app/src/tests/
         continue-on-error: true
 
-      - name: Run safety (dependency vulnerability scan)
-        run: safety scan --target app/
+      - name: Run pip-audit (dependency vulnerability scan)
+        # Replaces `safety`, which now requires an authenticated account and
+        # EOFs in non-interactive CI (scanning nothing). pip-audit is free, needs
+        # no login, and reads requirements.txt directly. Non-blocking, same intent
+        # as the bandit/grype scans: visibility, not a hard gate.
+        run: pip-audit --requirement app/requirements.txt --desc
         continue-on-error: true
 
   # ─────────────────────────────────────────────
@@ -220,10 +224,15 @@ jobs:
 
       - name: Upload coverage report
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
+        # Codecov dropped tokenless uploads — without CODECOV_TOKEN the upload is
+        # rejected ("not valid tokenless upload"). Add the repo secret to enable
+        # it; until then this is best-effort and must never fail the run.
+        continue-on-error: true
         with:
           file: app/coverage.xml
           flags: unittests
           fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   # ─────────────────────────────────────────────
   # JOB 3: Docker Build & Security Scan

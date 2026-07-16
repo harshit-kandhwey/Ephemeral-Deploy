@@ -57,8 +57,6 @@ locals {
   }
 }
 
-data "aws_caller_identity" "current" {}
-
 # ══════════════════════════════════════════════
 # SECRETS — Zero hardcoded values
 #
@@ -102,11 +100,6 @@ data "aws_ssm_parameter" "app_secret_key" {
 
 data "aws_ssm_parameter" "jwt_secret_key" {
   name            = "/${local.project}/${local.environment}/app/jwt_secret_key"
-  with_decryption = true
-}
-
-data "aws_ssm_parameter" "grafana_admin_password" {
-  name            = "/${local.project}/${local.environment}/monitoring/grafana_password"
   with_decryption = true
 }
 
