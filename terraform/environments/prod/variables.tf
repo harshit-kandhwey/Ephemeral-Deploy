@@ -78,3 +78,9 @@ variable "monitoring_allowed_cidr" {
   description = "CIDR blocks allowed inbound to Prometheus (9090) and Grafana (3000). Set to your IP or VPN range."
   type        = list(string)
 }
+
+variable "alert_email" {
+  description = "Email for CloudWatch alarm notifications via SNS. Blank creates the topic and wires the alarms but adds no subscription; set it (e.g. via TF_VAR_alert_email) to receive mail."
+  type        = string
+  default     = ""
+}

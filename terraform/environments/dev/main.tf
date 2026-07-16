@@ -325,6 +325,7 @@ module "monitoring" {
   ecs_cluster_names = ["${local.project}-${local.environment}"]
   state_bucket      = var.tf_state_bucket
   common_tags       = local.common_tags
+  alert_email       = var.alert_email
 
   depends_on = [
     module.vpc, # Monitoring EC2 placed in VPC public subnet

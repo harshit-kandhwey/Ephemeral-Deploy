@@ -388,6 +388,7 @@ module "monitoring" {
   ]
   state_bucket = var.tf_state_bucket
   common_tags  = local.common_tags
+  alert_email  = var.alert_email
 }
 
 # ── SSM: Store active slot for next deployment ─

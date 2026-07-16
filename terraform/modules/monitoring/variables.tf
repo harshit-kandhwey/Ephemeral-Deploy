@@ -37,3 +37,9 @@ variable "common_tags" {
   description = "Common tags for all resources"
   type        = map(string)
 }
+
+variable "alert_email" {
+  description = "Email address for CloudWatch alarm notifications. Blank (default) still creates the SNS topic and wires the alarms to it — set an address to also receive email (requires a one-time subscription confirmation click)."
+  type        = string
+  default     = ""
+}

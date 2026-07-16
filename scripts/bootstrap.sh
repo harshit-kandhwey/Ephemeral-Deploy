@@ -660,7 +660,16 @@ DEPLOY_POLICY2=$(cat <<ENDPOLICY2
         "logs:PutRetentionPolicy",
         "logs:StartQuery",
         "logs:TagLogGroup",
-        "logs:TagResource"
+        "logs:TagResource",
+        "sns:CreateTopic",
+        "sns:DeleteTopic",
+        "sns:Get*",
+        "sns:List*",
+        "sns:Set*",
+        "sns:Subscribe",
+        "sns:TagResource",
+        "sns:Unsubscribe",
+        "sns:UntagResource"
       ],
       "Resource": "*"
     },
