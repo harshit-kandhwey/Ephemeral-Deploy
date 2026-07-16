@@ -71,6 +71,11 @@ variable "init_secrets_arn" {
   type        = string
 }
 
+variable "seed_secrets_arn" {
+  description = "Secrets Manager secret ARN containing demo seed-user passwords (injected into worker only)"
+  type        = string
+}
+
 variable "log_retention_days" {
   description = "CloudWatch log group retention in days"
   type        = number

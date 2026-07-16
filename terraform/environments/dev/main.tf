@@ -11,6 +11,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
   }
 
   # ── Remote State Backend ──────────────────
@@ -151,6 +155,48 @@ resource "aws_secretsmanager_secret_version" "init" {
   })
 }
 
+# ── Seed user passwords ───────────────────────────────────────
+# Strong, unique-per-environment passwords for the demo seed users, injected
+# into the worker init task via a SEPARATE secret from the DB master credentials.
+# Kept apart on purpose: an operator can be granted read on seed-secrets to sign
+# in as a demo user without also being handed DB_MASTER_PASSWORD (GetSecretValue
+# cannot be scoped to a single JSON key). Held in Terraform state (S3, encrypted)
+# and stable across applies, so re-seeding is unnecessary.
+resource "random_password" "seed_admin" {
+  length           = 24
+  special          = true
+  override_special = "!#$%^&*()-_=+"
+}
+
+resource "random_password" "seed_manager" {
+  length           = 24
+  special          = true
+  override_special = "!#$%^&*()-_=+"
+}
+
+resource "random_password" "seed_dev" {
+  length           = 24
+  special          = true
+  override_special = "!#$%^&*()-_=+"
+}
+
+resource "aws_secretsmanager_secret" "seed" {
+  name                    = "${local.project}/${local.environment}/seed-secrets"
+  description             = "Demo seed-user login passwords (no DB master credential)"
+  recovery_window_in_days = 0 # Instant deletion in dev
+  tags                    = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "seed" {
+  secret_id = aws_secretsmanager_secret.seed.id
+
+  secret_string = jsonencode({
+    SEED_ADMIN_PASSWORD   = random_password.seed_admin.result
+    SEED_MANAGER_PASSWORD = random_password.seed_manager.result
+    SEED_DEV_PASSWORD     = random_password.seed_dev.result
+  })
+}
+
 # ══════════════════════════════════════════════
 # INFRASTRUCTURE MODULES
 # ══════════════════════════════════════════════
@@ -166,6 +212,7 @@ module "iam" {
   app_s3_bucket        = var.app_s3_bucket
   secrets_arn          = aws_secretsmanager_secret.app.arn
   init_secrets_arn     = aws_secretsmanager_secret.init.arn
+  seed_secrets_arn     = aws_secretsmanager_secret.seed.arn
   create_oidc_provider = true
   common_tags          = local.common_tags
 }
@@ -248,6 +295,7 @@ module "ecs" {
   ecs_task_role_arn             = module.iam.ecs_task_role_arn
   secrets_arn                   = aws_secretsmanager_secret.app.arn
   init_secrets_arn              = aws_secretsmanager_secret.init.arn
+  seed_secrets_arn              = aws_secretsmanager_secret.seed.arn
   log_retention_days            = 3
   api_cpu                       = 256
   api_memory                    = 512

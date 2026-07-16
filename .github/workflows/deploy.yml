@@ -415,7 +415,7 @@ jobs:
 
           # ── Secrets Manager ───────────────────────────────────────────────
           # Secrets may be in pending-deletion state from a previous failed cleanup.
-          for secret_id in "$PROJECT/$ENV/app-secrets" "$PROJECT/$ENV/init-secrets"; do
+          for secret_id in "$PROJECT/$ENV/app-secrets" "$PROJECT/$ENV/init-secrets" "$PROJECT/$ENV/seed-secrets"; do
             SECRET_STATE=$(aws secretsmanager describe-secret \
               --secret-id "$secret_id" --region "$REGION" \
               --query 'DeletedDate' --output text 2>/dev/null || echo "NOT_FOUND")
@@ -489,9 +489,11 @@ jobs:
           }
           restore_secret "nexusdeploy/dev/app-secrets"
           restore_secret "nexusdeploy/dev/init-secrets"
+          restore_secret "nexusdeploy/dev/seed-secrets"
 
           adopt aws_secretsmanager_secret.app                   "nexusdeploy/dev/app-secrets"
           adopt aws_secretsmanager_secret.init                  "nexusdeploy/dev/init-secrets"
+          adopt aws_secretsmanager_secret.seed                  "nexusdeploy/dev/seed-secrets"
           adopt module.iam.aws_iam_role.ecs_execution           "nexusdeploy-dev-ecs-execution"
           adopt module.iam.aws_iam_role.ecs_execution_worker    "nexusdeploy-dev-ecs-execution-worker"
           adopt module.iam.aws_iam_role.ecs_task                "nexusdeploy-dev-ecs-task"
@@ -792,7 +794,7 @@ jobs:
             done
           done
 
-          for secret_id in "$PROJECT/$ENV/app-secrets" "$PROJECT/$ENV/init-secrets"; do
+          for secret_id in "$PROJECT/$ENV/app-secrets" "$PROJECT/$ENV/init-secrets" "$PROJECT/$ENV/seed-secrets"; do
             SECRET_STATE=$(aws secretsmanager describe-secret \
               --secret-id "$secret_id" --region "$REGION" \
               --query 'DeletedDate' --output text 2>/dev/null || echo "NOT_FOUND")
@@ -861,9 +863,11 @@ jobs:
           }
           restore_secret "nexusdeploy/staging/app-secrets"
           restore_secret "nexusdeploy/staging/init-secrets"
+          restore_secret "nexusdeploy/staging/seed-secrets"
 
           adopt aws_secretsmanager_secret.app                   "nexusdeploy/staging/app-secrets"
           adopt aws_secretsmanager_secret.init                  "nexusdeploy/staging/init-secrets"
+          adopt aws_secretsmanager_secret.seed                  "nexusdeploy/staging/seed-secrets"
           adopt module.iam.aws_iam_role.ecs_execution           "nexusdeploy-staging-ecs-execution"
           adopt module.iam.aws_iam_role.ecs_execution_worker    "nexusdeploy-staging-ecs-execution-worker"
           adopt module.iam.aws_iam_role.ecs_task                "nexusdeploy-staging-ecs-task"
@@ -1284,7 +1288,7 @@ jobs:
           done
 
           # Secrets Manager pending-deletion secrets
-          for secret_id in "$PROJECT/$ENV/app-secrets" "$PROJECT/$ENV/init-secrets"; do
+          for secret_id in "$PROJECT/$ENV/app-secrets" "$PROJECT/$ENV/init-secrets" "$PROJECT/$ENV/seed-secrets"; do
             SECRET_STATE=$(aws secretsmanager describe-secret \
               --secret-id "$secret_id" --region "$REGION" \
               --query 'DeletedDate' --output text 2>/dev/null || echo "NOT_FOUND")
@@ -1360,9 +1364,11 @@ jobs:
           }
           restore_secret "nexusdeploy/prod/app-secrets"
           restore_secret "nexusdeploy/prod/init-secrets"
+          restore_secret "nexusdeploy/prod/seed-secrets"
 
           adopt aws_secretsmanager_secret.app                   "nexusdeploy/prod/app-secrets"
           adopt aws_secretsmanager_secret.init                  "nexusdeploy/prod/init-secrets"
+          adopt aws_secretsmanager_secret.seed                  "nexusdeploy/prod/seed-secrets"
           adopt module.iam.aws_iam_role.ecs_execution           "nexusdeploy-prod-ecs-execution"
           adopt module.iam.aws_iam_role.ecs_execution_worker    "nexusdeploy-prod-ecs-execution-worker"
           adopt module.iam.aws_iam_role.ecs_task                "nexusdeploy-prod-ecs-task"

@@ -144,6 +144,8 @@ jobs:
             -target=aws_secretsmanager_secret_version.app \
             -target=aws_secretsmanager_secret.init \
             -target=aws_secretsmanager_secret_version.init \
+            -target=aws_secretsmanager_secret.seed \
+            -target=aws_secretsmanager_secret_version.seed \
             2>&1 | tee destroy_output.txt
           echo "tf_destroy_exit=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
           # NOTE: module.iam (OIDC + deploy role) and module.ecr are excluded.

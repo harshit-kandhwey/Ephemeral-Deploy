@@ -203,8 +203,29 @@ def seed_sample_data(app):
 
         print("🌱 Seeding sample data...")
 
-        # Read demo passwords from env, fall back to obvious dev-only values
-        # In production these would come from Secrets Manager
+        # Seed passwords are injected from Secrets Manager (seed-secrets) by the
+        # worker task definition — generated per-environment by Terraform. The
+        # "ChangeMe-*" values below are obvious dev-only fallbacks for local
+        # docker-compose; they are visible in this public repo, so any deployed
+        # environment must never fall back to them.
+        #
+        # The guard keys off "not local development" rather than == "production":
+        # ENV is only ever "development" (local + deployed dev) or "production"
+        # (deployed staging + prod) — the ECS task defs map every non-dev
+        # environment to "production", and create_app() accepts no other value —
+        # but gating on != "development" is the robust expression of intent and
+        # cannot be bypassed if that mapping ever changes.
+        seed_env_keys = ("SEED_ADMIN_PASSWORD", "SEED_MANAGER_PASSWORD", "SEED_DEV_PASSWORD")
+        if env != "development":
+            missing = [k for k in seed_env_keys if not os.environ.get(k)]
+            if missing:
+                raise RuntimeError(
+                    "Refusing to seed a deployed database with default credentials. "
+                    f"Missing injected seed passwords: {', '.join(missing)}. "
+                    "They come from Secrets Manager (seed-secrets) via the worker "
+                    "task definition — check that wiring before retrying."
+                )
+
         admin_password = os.environ.get("SEED_ADMIN_PASSWORD", "ChangeMe-Admin-2024!")
         manager_password = os.environ.get("SEED_MANAGER_PASSWORD", "ChangeMe-Manager-2024!")
         dev_password = os.environ.get("SEED_DEV_PASSWORD", "ChangeMe-Dev-2024!")
@@ -293,16 +314,11 @@ def seed_sample_data(app):
         print("\n" + "=" * 60)
         print("✓ Sample data seeded successfully")
         print("=" * 60)
-        if env != "production":
-            print("\n  Demo credentials (dev only):")
-            print(f"    Admin:     admin      / {admin_password}")
-            print(f"    Manager:   manager    / {manager_password}")
-            print(f"    Dev 1:     developer1 / {dev_password}")
-            print(f"    Dev 2:     developer2 / {dev_password}")
-            print("\n  API: http://localhost:5000/api/v1/auth/login")
-        else:
-            print("\n  Users created: admin, manager, developer1, developer2")
-            print("  (credentials sourced from SEED_*_PASSWORD env vars)")
+        print("\n  Users created: admin, manager, developer1, developer2")
+        # Passwords are never logged. In deployed environments they come from
+        # Secrets Manager (init-secrets); for local docker-compose they are the
+        # SEED_*_PASSWORD env vars, or the documented dev defaults if unset.
+        print("  Login: POST /api/v1/auth/login")
         print("=" * 60 + "\n")
 
 

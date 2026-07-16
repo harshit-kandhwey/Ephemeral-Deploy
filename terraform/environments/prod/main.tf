@@ -17,6 +17,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.40.0" # Pinned for production stability
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
   }
 
   backend "s3" {
@@ -149,6 +153,48 @@ resource "aws_secretsmanager_secret_version" "init" {
   })
 }
 
+# ── Seed user passwords ───────────────────────────────────────
+# Strong, unique-per-environment passwords for the demo seed users, injected
+# into the worker init task via a SEPARATE secret from the DB master credentials
+# so a demo login can be delegated without exposing DB_MASTER_PASSWORD
+# (GetSecretValue cannot be scoped to a single JSON key). Replaces the hard-coded
+# "ChangeMe-*" fallbacks in init_db.py (visible in the public repo). Retrieve
+# them from Secrets Manager (seed-secrets) to sign in as a seed user.
+resource "random_password" "seed_admin" {
+  length           = 24
+  special          = true
+  override_special = "!#$%^&*()-_=+"
+}
+
+resource "random_password" "seed_manager" {
+  length           = 24
+  special          = true
+  override_special = "!#$%^&*()-_=+"
+}
+
+resource "random_password" "seed_dev" {
+  length           = 24
+  special          = true
+  override_special = "!#$%^&*()-_=+"
+}
+
+resource "aws_secretsmanager_secret" "seed" {
+  name                    = "${local.project}/${local.environment}/seed-secrets"
+  description             = "Demo seed-user login passwords (no DB master credential)"
+  recovery_window_in_days = 7
+  tags                    = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "seed" {
+  secret_id = aws_secretsmanager_secret.seed.id
+
+  secret_string = jsonencode({
+    SEED_ADMIN_PASSWORD   = random_password.seed_admin.result
+    SEED_MANAGER_PASSWORD = random_password.seed_manager.result
+    SEED_DEV_PASSWORD     = random_password.seed_dev.result
+  })
+}
+
 # ══════════════════════════════════════════════
 # INFRASTRUCTURE MODULES
 # ══════════════════════════════════════════════
@@ -164,6 +210,7 @@ module "iam" {
   app_s3_bucket        = var.app_s3_bucket
   secrets_arn          = aws_secretsmanager_secret.app.arn
   init_secrets_arn     = aws_secretsmanager_secret.init.arn
+  seed_secrets_arn     = aws_secretsmanager_secret.seed.arn
   create_oidc_provider = false # Already created by dev env - reuse it
   common_tags          = local.common_tags
 }
@@ -261,6 +308,7 @@ module "ecs_slot1" {
   ecs_task_role_arn             = module.iam.ecs_task_role_arn
   secrets_arn                   = aws_secretsmanager_secret.app.arn
   init_secrets_arn              = aws_secretsmanager_secret.init.arn
+  seed_secrets_arn              = aws_secretsmanager_secret.seed.arn
   log_retention_days            = 14
 
   # slot1 is active when deployment_slot = "slot1", else it's being drained
@@ -300,6 +348,7 @@ module "ecs_slot2" {
   ecs_task_role_arn             = module.iam.ecs_task_role_arn
   secrets_arn                   = aws_secretsmanager_secret.app.arn
   init_secrets_arn              = aws_secretsmanager_secret.init.arn
+  seed_secrets_arn              = aws_secretsmanager_secret.seed.arn
   log_retention_days            = 14
 
   # slot2 is active when deployment_slot = "slot2"
