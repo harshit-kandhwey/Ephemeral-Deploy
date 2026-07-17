@@ -19,7 +19,7 @@ Ephemeral Deploy is a production-grade AWS DevOps pipeline built around a Flask 
 
 ```bash
 # Start the full stack (postgres + redis + api + worker + beat + redis-commander)
-make up
+docker-compose up -d
 
 # API: http://localhost:5000
 # Swagger UI: http://localhost:5000/apidocs
@@ -29,11 +29,7 @@ make up
 ### Running Tests
 
 ```bash
-make test
-
-# Or with more control, from app/
-cd app
-pytest tests/ -v --cov=src --cov-report=term-missing
+cd app && pytest tests/ -v --cov=src --cov-report=term-missing
 ```
 
 Tests use in-memory SQLite and Redis DB 15 — no external services needed.
@@ -41,9 +37,9 @@ Tests use in-memory SQLite and Redis DB 15 — no external services needed.
 ### Linting
 
 ```bash
-make lint          # flake8 + black --check + bandit
-cd app && black .  # auto-format
-cd app && isort .  # sort imports
+(cd app && flake8 src/ --max-line-length=120 && black --check src/ && bandit -r src/ -ll -x src/tests/)
+(cd app && black .)   # auto-format
+(cd app && isort .)   # sort imports
 ```
 
 Line length is 120 (set in `pyproject.toml`).
@@ -58,7 +54,7 @@ Line length is 120 (set in `pyproject.toml`).
 
 1. Fork the repo and create a branch from `dev`: `git checkout -b feature/my-change`
 2. Make your changes with tests
-3. Run `make lint` and `make test` locally before pushing
+3. Run the lint and test commands above locally before pushing
 4. Open a PR targeting `dev`
 5. All CI checks must pass before merging
 

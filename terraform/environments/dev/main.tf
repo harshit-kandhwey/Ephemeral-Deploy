@@ -11,6 +11,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
   }
 
   # ── Remote State Backend ──────────────────
@@ -52,8 +56,6 @@ locals {
     TTL         = "30m"
   }
 }
-
-data "aws_caller_identity" "current" {}
 
 # ══════════════════════════════════════════════
 # SECRETS — Zero hardcoded values
@@ -98,11 +100,6 @@ data "aws_ssm_parameter" "app_secret_key" {
 
 data "aws_ssm_parameter" "jwt_secret_key" {
   name            = "/${local.project}/${local.environment}/app/jwt_secret_key"
-  with_decryption = true
-}
-
-data "aws_ssm_parameter" "grafana_admin_password" {
-  name            = "/${local.project}/${local.environment}/monitoring/grafana_password"
   with_decryption = true
 }
 
@@ -151,6 +148,48 @@ resource "aws_secretsmanager_secret_version" "init" {
   })
 }
 
+# ── Seed user passwords ───────────────────────────────────────
+# Strong, unique-per-environment passwords for the demo seed users, injected
+# into the worker init task via a SEPARATE secret from the DB master credentials.
+# Kept apart on purpose: an operator can be granted read on seed-secrets to sign
+# in as a demo user without also being handed DB_MASTER_PASSWORD (GetSecretValue
+# cannot be scoped to a single JSON key). Held in Terraform state (S3, encrypted)
+# and stable across applies, so re-seeding is unnecessary.
+resource "random_password" "seed_admin" {
+  length           = 24
+  special          = true
+  override_special = "!#$%^&*()-_=+"
+}
+
+resource "random_password" "seed_manager" {
+  length           = 24
+  special          = true
+  override_special = "!#$%^&*()-_=+"
+}
+
+resource "random_password" "seed_dev" {
+  length           = 24
+  special          = true
+  override_special = "!#$%^&*()-_=+"
+}
+
+resource "aws_secretsmanager_secret" "seed" {
+  name                    = "${local.project}/${local.environment}/seed-secrets"
+  description             = "Demo seed-user login passwords (no DB master credential)"
+  recovery_window_in_days = 0 # Instant deletion in dev
+  tags                    = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "seed" {
+  secret_id = aws_secretsmanager_secret.seed.id
+
+  secret_string = jsonencode({
+    SEED_ADMIN_PASSWORD   = random_password.seed_admin.result
+    SEED_MANAGER_PASSWORD = random_password.seed_manager.result
+    SEED_DEV_PASSWORD     = random_password.seed_dev.result
+  })
+}
+
 # ══════════════════════════════════════════════
 # INFRASTRUCTURE MODULES
 # ══════════════════════════════════════════════
@@ -166,6 +205,7 @@ module "iam" {
   app_s3_bucket        = var.app_s3_bucket
   secrets_arn          = aws_secretsmanager_secret.app.arn
   init_secrets_arn     = aws_secretsmanager_secret.init.arn
+  seed_secrets_arn     = aws_secretsmanager_secret.seed.arn
   create_oidc_provider = true
   common_tags          = local.common_tags
 }
@@ -178,6 +218,7 @@ module "vpc" {
   vpc_cidr              = var.vpc_cidr
   availability_zones    = var.availability_zones
   enable_nat_gateway    = false # VPC endpoints used instead — saves ~$1/day
+  single_az_endpoints   = true  # dev is disposable; skip per-AZ endpoint HA to halve endpoint ENI hours
   aws_region            = var.aws_region
   flow_log_role_arn     = module.iam.vpc_flow_log_role_arn
   flow_log_traffic_type = "REJECT" # Cost-optimised: capture security events only
@@ -248,6 +289,7 @@ module "ecs" {
   ecs_task_role_arn             = module.iam.ecs_task_role_arn
   secrets_arn                   = aws_secretsmanager_secret.app.arn
   init_secrets_arn              = aws_secretsmanager_secret.init.arn
+  seed_secrets_arn              = aws_secretsmanager_secret.seed.arn
   log_retention_days            = 3
   api_cpu                       = 256
   api_memory                    = 512
@@ -284,6 +326,7 @@ module "monitoring" {
   ecs_cluster_names = ["${local.project}-${local.environment}"]
   state_bucket      = var.tf_state_bucket
   common_tags       = local.common_tags
+  alert_email       = var.alert_email
 
   depends_on = [
     module.vpc, # Monitoring EC2 placed in VPC public subnet

@@ -21,8 +21,6 @@
 #   export GITHUB_ORG=your-github-username   # optional — derived from git remote if unset
 #   export GITHUB_REPO=Ephemeral-Deploy      # exact repo name on GitHub
 #   export ENV=staging                       # dev | staging | prod — prompted if unset
-#   make bootstrap
-#     OR
 #   AWS_REGION=us-east-1 bash scripts/bootstrap.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -555,10 +553,33 @@ DEPLOY_POLICY1=$(cat <<ENDPOLICY1
 ENDPOLICY1
 )
 
+# DEPLOY_POLICY2 opens with a DenySelfModification guardrail. The IAMRoles Sid
+# below grants iam:PutRolePolicy (and friends) on role/${PROJECT}-*, which
+# matches this deploy role itself — so without the Deny, anyone who can trigger
+# a deploy could rewrite the role's own policy to full admin. The Deny is scoped
+# to exactly role/${PROJECT}-github-actions-deploy and only to write actions, so
+# reads (used by Terraform's import blocks) and management of the per-env roles
+# are unaffected. Deny always beats Allow, so position in the array is cosmetic.
 DEPLOY_POLICY2=$(cat <<ENDPOLICY2
 {
   "Version": "2012-10-17",
   "Statement": [
+    {
+      "Sid": "DenySelfModification",
+      "Effect": "Deny",
+      "Action": [
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:UpdateRole",
+        "iam:DeleteRole",
+        "iam:PutRolePermissionsBoundary",
+        "iam:DeleteRolePermissionsBoundary"
+      ],
+      "Resource": "arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT}-github-actions-deploy"
+    },
     {
       "Sid": "RDS",
       "Effect": "Allow",
@@ -572,12 +593,7 @@ DEPLOY_POLICY2=$(cat <<ENDPOLICY2
         "rds:DeleteDBParameterGroup",
         "rds:DeleteDBSnapshot",
         "rds:DeleteDBSubnetGroup",
-        "rds:DescribeDBEngineVersions",
-        "rds:DescribeDBInstances",
-        "rds:DescribeDBParameterGroups",
-        "rds:DescribeDBParameters",
-        "rds:DescribeDBSnapshots",
-        "rds:DescribeDBSubnetGroups",
+        "rds:Describe*",
         "rds:ListTagsForResource",
         "rds:ModifyDBInstance",
         "rds:ModifyDBParameterGroup",
@@ -598,9 +614,7 @@ DEPLOY_POLICY2=$(cat <<ENDPOLICY2
         "elasticache:DeleteCacheCluster",
         "elasticache:DeleteCacheParameterGroup",
         "elasticache:DeleteCacheSubnetGroup",
-        "elasticache:DescribeCacheClusters",
-        "elasticache:DescribeCacheParameterGroups",
-        "elasticache:DescribeCacheSubnetGroups",
+        "elasticache:Describe*",
         "elasticache:ListTagsForResource",
         "elasticache:ModifyCacheCluster",
         "elasticache:ModifyCacheSubnetGroup",
@@ -644,7 +658,16 @@ DEPLOY_POLICY2=$(cat <<ENDPOLICY2
         "logs:PutRetentionPolicy",
         "logs:StartQuery",
         "logs:TagLogGroup",
-        "logs:TagResource"
+        "logs:TagResource",
+        "sns:CreateTopic",
+        "sns:DeleteTopic",
+        "sns:Get*",
+        "sns:List*",
+        "sns:Set*",
+        "sns:Subscribe",
+        "sns:TagResource",
+        "sns:Unsubscribe",
+        "sns:UntagResource"
       ],
       "Resource": "*"
     },
@@ -666,7 +689,6 @@ DEPLOY_POLICY2=$(cat <<ENDPOLICY2
         "iam:ListRoleTags",
         "iam:PutRolePolicy",
         "iam:RemoveRoleFromInstanceProfile",
-        "iam:TagOpenIDConnectProvider",
         "iam:TagRole",
         "iam:UntagRole",
         "iam:UpdateAssumeRolePolicy",
@@ -683,12 +705,9 @@ DEPLOY_POLICY2=$(cat <<ENDPOLICY2
         "iam:DeleteInstanceProfile",
         "iam:GetInstanceProfile",
         "iam:ListInstanceProfilesForRole",
-        "iam:ListRoleTags",
         "iam:RemoveRoleFromInstanceProfile",
         "iam:TagInstanceProfile",
-        "iam:TagOpenIDConnectProvider",
-        "iam:UntagInstanceProfile",
-        "iam:UntagRole"
+        "iam:UntagInstanceProfile"
       ],
       "Resource": "arn:aws:iam::${ACCOUNT_ID}:instance-profile/${PROJECT}-*"
     },
@@ -702,10 +721,7 @@ DEPLOY_POLICY2=$(cat <<ENDPOLICY2
         "iam:DeletePolicyVersion",
         "iam:GetPolicy",
         "iam:GetPolicyVersion",
-        "iam:ListPolicyVersions",
-        "iam:ListRoleTags",
-        "iam:TagOpenIDConnectProvider",
-        "iam:UntagRole"
+        "iam:ListPolicyVersions"
       ],
       "Resource": "arn:aws:iam::${ACCOUNT_ID}:policy/${PROJECT}-*"
     },
@@ -713,10 +729,7 @@ DEPLOY_POLICY2=$(cat <<ENDPOLICY2
       "Sid": "IAMPassRole",
       "Effect": "Allow",
       "Action": [
-        "iam:ListRoleTags",
-        "iam:PassRole",
-        "iam:TagOpenIDConnectProvider",
-        "iam:UntagRole"
+        "iam:PassRole"
       ],
       "Resource": "arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT}-*",
       "Condition": {
@@ -737,9 +750,7 @@ DEPLOY_POLICY2=$(cat <<ENDPOLICY2
         "iam:DeleteOpenIDConnectProvider",
         "iam:GetOpenIDConnectProvider",
         "iam:ListOpenIDConnectProviders",
-        "iam:ListRoleTags",
         "iam:TagOpenIDConnectProvider",
-        "iam:UntagRole",
         "iam:UpdateOpenIDConnectProviderThumbprint"
       ],
       "Resource": "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/*"
@@ -750,17 +761,13 @@ DEPLOY_POLICY2=$(cat <<ENDPOLICY2
       "Action": [
         "application-autoscaling:DeleteScalingPolicy",
         "application-autoscaling:DeregisterScalableTarget",
-        "application-autoscaling:DescribeScalableTargets",
-        "application-autoscaling:DescribeScalingPolicies",
+        "application-autoscaling:Describe*",
         "application-autoscaling:ListTagsForResource",
         "application-autoscaling:PutScalingPolicy",
         "application-autoscaling:RegisterScalableTarget",
         "application-autoscaling:TagResource",
         "application-autoscaling:UntagResource",
-        "iam:CreateServiceLinkedRole",
-        "iam:ListRoleTags",
-        "iam:TagOpenIDConnectProvider",
-        "iam:UntagRole"
+        "iam:CreateServiceLinkedRole"
       ],
       "Resource": "*"
     },

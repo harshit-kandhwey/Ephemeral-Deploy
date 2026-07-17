@@ -1,30 +1,49 @@
+# ── Stage 1: builder ─────────────────────────────────────────────────────────
+# Compilers live here and nowhere else. Dependencies are installed into a venv
+# that the runtime stage copies wholesale, so gcc and the build headers never
+# reach the shipped image.
+FROM python:3.11-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# A venv is the cleanest unit to hand to the runtime stage: one directory that
+# carries the interpreter's view of every installed package.
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
+
+
+# ── Stage 2: runtime ─────────────────────────────────────────────────────────
 FROM python:3.11-slim
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    postgresql-client \
+# curl is required: the HEALTHCHECK below and the ECS container health check
+# both shell out to it. gcc, libpq-dev and postgresql-client are deliberately
+# absent — nothing at runtime compiles anything, and no code path shells out to
+# psql (entrypoint-worker.sh uses python only).
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
 RUN useradd -m -u 1000 appuser
+
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install Python dependencies first (layer cache — only invalidated when requirements.txt changes)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy application source
-COPY . /app/
-
-# Fix permissions
-RUN chown -R appuser:appuser /app
+# .dockerignore keeps tests, caches and local env files out of the image.
+COPY --chown=appuser:appuser . /app/
 
 USER appuser
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:5000/health || exit 1
 

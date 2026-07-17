@@ -243,10 +243,16 @@ locals {
 resource "aws_vpc_endpoint" "interface" {
   for_each = local.interface_endpoints
 
-  vpc_id              = aws_vpc.main.id
-  service_name        = each.value
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = aws_subnet.private_app[*].id
+  vpc_id            = aws_vpc.main.id
+  service_name      = each.value
+  vpc_endpoint_type = "Interface"
+  # One ENI per AZ by default; single AZ when single_az_endpoints is set (dev),
+  # which halves per-ENI-per-AZ endpoint charges on a disposable environment.
+  # Non-HA contract: with a single AZ, workloads in the other AZ reach these
+  # endpoints across a single ENI and share its failure domain — deliberate for
+  # dev only. staging/prod leave this false for one ENI per AZ (AWS recommends
+  # >=2 AZs for endpoint HA).
+  subnet_ids          = var.single_az_endpoints ? [aws_subnet.private_app[0].id] : aws_subnet.private_app[*].id
   security_group_ids  = [aws_security_group.vpc_endpoints.id]
   private_dns_enabled = true
 

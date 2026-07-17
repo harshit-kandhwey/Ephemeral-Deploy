@@ -5,6 +5,7 @@ from ...extensions import db
 from ...models.comment import Comment
 from ...models.task import Task
 from ...utils.decorators import get_current_user_or_401
+from ...utils.validation import ValidationError, get_json_body, require_fields
 from . import api_v1
 
 
@@ -70,10 +71,12 @@ def create_comment(task_id):
 
     if user.role != "admin" and (not user.team or task.project.team_id != user.team.id):
         return jsonify({"error": "Access denied"}), 403
-    data = request.get_json()
 
-    if not data or "content" not in data:
-        return jsonify({"error": "Content is required"}), 400
+    try:
+        data = get_json_body(request, required=True)
+        require_fields(data, "content")
+    except ValidationError as e:
+        return jsonify({"error": e.message}), 400
 
     comment = Comment(content=data["content"], task_id=task_id, author_id=user_id)
 

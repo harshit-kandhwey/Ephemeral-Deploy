@@ -59,3 +59,9 @@ variable "worker_image" {
   type        = string
   default     = "placeholder"
 }
+
+variable "alert_email" {
+  description = "Email for CloudWatch alarm notifications via SNS. Blank creates the topic and wires the alarms but adds no subscription; set it (e.g. via TF_VAR_alert_email) to receive mail."
+  type        = string
+  default     = ""
+}

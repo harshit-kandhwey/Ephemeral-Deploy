@@ -232,6 +232,30 @@ resource "aws_instance" "monitoring" {
   })
 }
 
+# ── SNS: alarm notifications ──────────────────────────────────────────────────
+# The alarms below route both ALARM and OK transitions here. The topic itself is
+# free; email delivery is free; the alarms already bill (~$0.10 each) whether or
+# not anything is subscribed — so wiring this adds no recurring cost and just
+# makes the alarms actually notify. A blank alert_email still creates and wires
+# the topic (alarms show up in the SNS console); set alert_email to also get mail.
+#
+# Left on the AWS-managed SSE default (unencrypted). Encrypting with the built-in
+# alias/aws/sns key would BLOCK CloudWatch from publishing (its key policy omits
+# cloudwatch.amazonaws.com), and a customer-managed key is ~$1/mo — deliberately
+# not worth it for alarm fan-out on a demo stack.
+#checkov:skip=CKV_AWS_26:CloudWatch cannot publish to an aws/sns-encrypted topic; CMK not justified here
+resource "aws_sns_topic" "alerts" {
+  name = "${var.project}-${var.environment}-alerts"
+  tags = var.common_tags
+}
+
+resource "aws_sns_topic_subscription" "alerts_email" {
+  count     = var.alert_email == "" ? 0 : 1
+  topic_arn = aws_sns_topic.alerts.arn
+  protocol  = "email"
+  endpoint  = var.alert_email
+}
+
 # ── CloudWatch Alarms ─────────────────────────────────────────────────────────
 # One API CPU alarm per cluster: blue-green environments run two clusters
 # (one per slot) and the active one alternates, so both must be watched.
@@ -253,7 +277,9 @@ resource "aws_cloudwatch_metric_alarm" "ecs_api_cpu_high" {
     ClusterName = each.value
     ServiceName = "${each.value}-api"
   }
-  tags = var.common_tags
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+  tags          = var.common_tags
 }
 
 resource "aws_cloudwatch_metric_alarm" "rds_cpu_high" {
@@ -270,7 +296,9 @@ resource "aws_cloudwatch_metric_alarm" "rds_cpu_high" {
   dimensions = {
     DBInstanceIdentifier = "${var.project}-${var.environment}-postgres"
   }
-  tags = var.common_tags
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+  tags          = var.common_tags
 }
 
 resource "aws_cloudwatch_metric_alarm" "redis_memory_high" {
@@ -287,7 +315,9 @@ resource "aws_cloudwatch_metric_alarm" "redis_memory_high" {
   dimensions = {
     CacheClusterId = "${var.project}-${var.environment}-redis"
   }
-  tags = var.common_tags
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+  tags          = var.common_tags
 }
 
 # ── CloudWatch Dashboard ──────────────────────────────────────────────────────

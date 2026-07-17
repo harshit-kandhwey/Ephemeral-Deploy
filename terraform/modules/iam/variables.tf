@@ -62,6 +62,12 @@ variable "init_secrets_arn" {
   default     = ""
 }
 
+variable "seed_secrets_arn" {
+  description = "ARN of Secrets Manager secret containing demo seed-user passwords (worker init only)"
+  type        = string
+  default     = ""
+}
+
 variable "app_s3_bucket" {
   description = "S3 bucket for application file attachments"
   type        = string

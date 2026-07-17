@@ -2,7 +2,28 @@ import pytest
 
 from src.extensions import db
 from src.models.project import Project
+from src.models.team import Team
 from src.models.user import User
+
+
+def _manager_in_other_team(client):
+    """Create a second team with its own manager and return that manager's auth headers."""
+    with client.application.app_context():
+        other_team = Team(name="Other Team")
+        db.session.add(other_team)
+        db.session.commit()
+        mgr = User(
+            email="othermgr@test.com",
+            username="othermgr",
+            full_name="Other Manager",
+            role="manager",
+            team_id=other_team.id,
+        )
+        mgr.set_password("manager123")
+        db.session.add(mgr)
+        db.session.commit()
+    login = client.post("/api/v1/auth/login", json={"username": "othermgr", "password": "manager123"})
+    return {"Authorization": f'Bearer {login.json["access_token"]}'}
 
 
 @pytest.fixture
@@ -161,3 +182,21 @@ def test_delete_task_as_admin(client, admin_headers, auth_headers, task_id):
 
     get = client.get(f"/api/v1/tasks/{task_id}", headers=admin_headers)
     assert get.status_code == 404
+
+
+def test_delete_task_cross_team_manager_forbidden(client, auth_headers, task_id):
+    # A manager of a different team must not be able to delete this team's task,
+    # even though the manager role passes the role gate.
+    other_headers = _manager_in_other_team(client)
+    response = client.delete(f"/api/v1/tasks/{task_id}", headers=other_headers)
+    assert response.status_code == 403
+
+    # The task still exists for its own team.
+    get = client.get(f"/api/v1/tasks/{task_id}", headers=auth_headers)
+    assert get.status_code == 200
+
+
+def test_delete_task_same_team_manager_allowed(client, manager_headers, task_id):
+    # A manager of the task's own team can delete it.
+    response = client.delete(f"/api/v1/tasks/{task_id}", headers=manager_headers)
+    assert response.status_code == 200

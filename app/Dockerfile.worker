@@ -1,31 +1,45 @@
+# ── Stage 1: builder ─────────────────────────────────────────────────────────
+# Identical to the API builder — same requirements.txt, so the layer cache is
+# shared between the two images when they are built in the same run.
+FROM python:3.11-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
+
+
+# ── Stage 2: runtime ─────────────────────────────────────────────────────────
 FROM python:3.11-slim
 
-# Install system dependencies
-# curl added: useful for health checks and debugging in ECS Exec sessions
-RUN apt-get update && apt-get install -y \
-    gcc \
-    postgresql-client \
+# curl is kept for debugging inside an ECS Exec session. The build toolchain and
+# postgresql-client are gone: entrypoint-worker.sh runs `python -m src.init_db`,
+# never psql, so nothing here needs a database CLI.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
 RUN useradd -m -u 1000 celeryuser
+
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install Python dependencies first (layer cache)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY --chown=celeryuser:celeryuser . /app/
 
-# Copy application source
-COPY . /app/
-
-# Copy and configure entrypoint
+# Entrypoint lives outside /app so it is not shadowed by the source copy.
 COPY entrypoint-worker.sh /entrypoint-worker.sh
 RUN chmod +x /entrypoint-worker.sh
-
-# Fix permissions
-RUN chown -R celeryuser:celeryuser /app
 
 USER celeryuser
 

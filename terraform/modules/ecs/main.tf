@@ -18,6 +18,23 @@ locals {
   # ("prod-slot1", "prod-slot2"), so an equality check against "prod" would
   # silently put production on FARGATE_SPOT with container insights off.
   is_production = startswith(var.environment, "prod")
+
+  # Environment variables shared by the api, worker and beat containers.
+  #
+  # ENV selects the app config in config.py, which only defines
+  # development/production/testing — blue-green slot names like "staging-slot1"
+  # must never leak into it (KeyError at startup).
+  #
+  # The deployed dev environment loads DevelopmentConfig, where DEBUG and
+  # SQLALCHEMY_ECHO default on. SQLALCHEMY_ECHO logs every statement together
+  # with its bind parameters — bcrypt hashes, emails — and on ECS that goes
+  # straight to CloudWatch. Both are forced off here: local docker-compose keeps
+  # them on, the deployed environment does not.
+  app_environment = [
+    { name = "ENV", value = var.environment == "dev" ? "development" : "production" },
+    { name = "FLASK_DEBUG", value = "false" },
+    { name = "SQLALCHEMY_ECHO", value = "false" },
+  ]
 }
 
 # ── ECS Cluster ──────────────────────────────
@@ -86,13 +103,9 @@ resource "aws_ecs_task_definition" "api" {
         }
       ]
 
-      environment = [
-        # ENV selects the app config in config.py, which only defines
-        # development/production/testing — blue-green slot names like
-        # "staging-green" must never leak into it (KeyError at startup).
-        { name = "ENV", value = var.environment == "dev" ? "development" : "production" },
+      environment = concat(local.app_environment, [
         { name = "VERSION", value = var.git_commit }
-      ]
+      ])
 
       secrets = [
         { name = "DATABASE_URL", valueFrom = "${var.secrets_arn}:DATABASE_URL::" },
@@ -143,13 +156,9 @@ resource "aws_ecs_task_definition" "worker" {
       image     = var.worker_image
       essential = true
 
-      environment = [
-        # ENV selects the app config in config.py, which only defines
-        # development/production/testing — blue-green slot names like
-        # "staging-green" must never leak into it (KeyError at startup).
-        { name = "ENV", value = var.environment == "dev" ? "development" : "production" },
+      environment = concat(local.app_environment, [
         { name = "VERSION", value = var.git_commit }
-      ]
+      ])
 
       secrets = [
         { name = "DATABASE_URL", valueFrom = "${var.secrets_arn}:DATABASE_URL::" },
@@ -162,6 +171,13 @@ resource "aws_ecs_task_definition" "worker" {
         { name = "CELERY_RESULT_BACKEND", valueFrom = "${var.secrets_arn}:CELERY_RESULT_BACKEND::" },
         { name = "DB_MASTER_USER", valueFrom = "${var.init_secrets_arn}:DB_MASTER_USER::" },
         { name = "DB_MASTER_PASSWORD", valueFrom = "${var.init_secrets_arn}:DB_MASTER_PASSWORD::" },
+        # Seed passwords for init_db's demo data — generated per-env by Terraform
+        # and kept in a SEPARATE secret from the DB master credentials, so demo
+        # logins can be delegated without exposing DB_MASTER_PASSWORD. Only the
+        # worker/init task gets these; the API task definition does not.
+        { name = "SEED_ADMIN_PASSWORD", valueFrom = "${var.seed_secrets_arn}:SEED_ADMIN_PASSWORD::" },
+        { name = "SEED_MANAGER_PASSWORD", valueFrom = "${var.seed_secrets_arn}:SEED_MANAGER_PASSWORD::" },
+        { name = "SEED_DEV_PASSWORD", valueFrom = "${var.seed_secrets_arn}:SEED_DEV_PASSWORD::" },
         { name = "DB_APP_USER", valueFrom = "${var.secrets_arn}:DB_APP_USER::" },
         { name = "DB_APP_PASSWORD", valueFrom = "${var.secrets_arn}:DB_APP_PASSWORD::" }
       ]
@@ -197,10 +213,7 @@ resource "aws_ecs_task_definition" "beat" {
       essential = true
       command   = ["celery", "-A", "src.celery_worker:celery", "beat", "--loglevel=info"]
 
-      environment = [
-        # Same rule as api/worker: only development/production are valid here.
-        { name = "ENV", value = var.environment == "dev" ? "development" : "production" }
-      ]
+      environment = local.app_environment
 
       # Beat boots the same Flask app as the worker (create_app validates
       # SECRET_KEY/JWT in production and wires Redis/Celery), so it needs the

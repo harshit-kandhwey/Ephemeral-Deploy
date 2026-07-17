@@ -1,0 +1,42 @@
+# Build context exclusions.
+#
+# Without this file `COPY . /app/` bakes the entire directory into the image:
+# the test suite, caches, and any local scratch files. Everything listed here is
+# either useless at runtime or actively unwanted in a shipped image.
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Tests and coverage — not needed at runtime, and they enlarge the attack surface
+tests/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Local environments and secrets
+.env
+.env.*
+venv/
+.venv/
+
+# Local database files
+*.db
+*.sqlite
+*.sqlite3
+instance/
+
+# Tooling / VCS metadata
+.git/
+.gitignore
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# Docker files themselves
+Dockerfile
+Dockerfile.*
+.dockerignore

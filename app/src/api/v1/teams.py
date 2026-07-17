@@ -5,6 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from ...extensions import db
 from ...models.team import Team
 from ...utils.decorators import role_required
+from ...utils.validation import ValidationError, get_json_body, require_fields
 from . import api_v1
 
 
@@ -76,9 +77,11 @@ def create_team():
       400:
         description: Validation error
     """
-    data = request.get_json()
-    if not data or "name" not in data:
-        return jsonify({"error": "Name is required"}), 400
+    try:
+        data = get_json_body(request, required=True)
+        require_fields(data, "name")
+    except ValidationError as e:
+        return jsonify({"error": e.message}), 400
 
     team = Team(name=data["name"], description=data.get("description", ""))
     db.session.add(team)
@@ -96,10 +99,11 @@ def create_team():
 def update_team(team_id):
     """Update team (admin only)"""
     team = Team.query.get_or_404(team_id)
-    data = request.get_json(silent=True)
 
-    if not data:
-        return jsonify({"error": "No data provided"}), 400
+    try:
+        data = get_json_body(request, required=True)
+    except ValidationError as e:
+        return jsonify({"error": e.message}), 400
 
     # Validate name uniqueness if name is being updated
     if "name" in data:

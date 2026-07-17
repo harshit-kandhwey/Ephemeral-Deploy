@@ -23,14 +23,14 @@
 
 <!-- How did you verify this works? Check all that apply. -->
 
-- [ ] Unit / integration tests added or updated (`make test` passes)
-- [ ] Manually tested against local stack (`make up`)
+- [ ] Unit / integration tests added or updated (`cd app && pytest tests/ -v --cov=src --cov-report=term-missing` passes)
+- [ ] Manually tested against local stack (`docker-compose up -d`)
 - [ ] Tested against dev environment (pushed to `dev` branch)
 - [ ] No test needed — reason: \_\_\_
 
 ## Checklist
 
-- [ ] `make lint` passes locally
+- [ ] Lint passes locally (`cd app && flake8 src/ --max-line-length=120 && black --check src/ && bandit -r src/ -ll -x src/tests/`)
 - [ ] No hardcoded secrets, credentials, or environment-specific values in code
 - [ ] Terraform changes: `terraform fmt` applied, `terraform plan` reviewed
 - [ ] New API endpoints have Swagger docstrings
