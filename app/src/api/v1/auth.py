@@ -255,27 +255,40 @@ def logout():
         current_app.logger.error("Redis unavailable; cannot revoke JWT")
         return jsonify({"error": "Logout temporarily unavailable"}), 503
 
-    # Revoke the refresh token first (if supplied and valid) so a Redis failure
-    # can't leave the access token revoked but the refresh token still live.
+    # get_json returns the parsed value as-is for valid non-object JSON (e.g.
+    # [] or "token"), so guard the type before calling .get() to avoid a 500.
     body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"error": "Request body must be a JSON object"}), 400
     refresh_token = body.get("refresh_token")
 
-    try:
-        if refresh_token:
-            try:
-                refresh_payload = decode_token(refresh_token)
-            except Exception:
-                return jsonify({"error": "Invalid refresh token"}), 400
-            # Only let a caller revoke their own refresh token, and reject an
-            # access token passed here by mistake.
-            if refresh_payload.get("type") != "refresh" or refresh_payload.get("sub") != get_jwt_identity():
-                return jsonify({"error": "Invalid refresh token"}), 400
-            _revoke_token(refresh_payload)
+    # Validate the optional refresh token up front, but a bad one must NOT stop
+    # us from revoking the caller's own access token — logout always ends the
+    # presented session. A refresh token is only revoked when it decodes AND
+    # belongs to the caller (an access token or another user's token is
+    # rejected without being revoked).
+    refresh_payload = None
+    refresh_invalid = False
+    if refresh_token:
+        try:
+            decoded = decode_token(refresh_token)
+        except Exception:
+            decoded = None
+        if decoded and decoded.get("type") == "refresh" and decoded.get("sub") == get_jwt_identity():
+            refresh_payload = decoded
+        else:
+            refresh_invalid = True
 
+    try:
         _revoke_token(get_jwt())
+        if refresh_payload:
+            _revoke_token(refresh_payload)
     except Exception:
         current_app.logger.exception("Failed to revoke JWT")
         return jsonify({"error": "Logout temporarily unavailable"}), 503
+
+    if refresh_invalid:
+        return jsonify({"error": "Invalid refresh token"}), 400
 
     return jsonify({"message": "Logged out successfully"}), 200
 

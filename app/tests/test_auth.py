@@ -135,6 +135,30 @@ def test_logout_revokes_refresh_token(client):
     post = client.post("/api/v1/auth/refresh", headers={"Authorization": f"Bearer {refresh}"})
     assert post.status_code == 401
 
+    # The access token presented on logout is revoked too.
+    me = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {access}"})
+    assert me.status_code == 401
+
+
+def test_logout_rejects_non_object_body(client):
+    with client.application.app_context():
+        user = User(email="nob@test.com", username="nobodyuser", full_name="Nobody")
+        user.set_password("password123")
+        db.session.add(user)
+        db.session.commit()
+
+    login = client.post("/api/v1/auth/login", json={"username": "nobodyuser", "password": "password123"})
+    access = login.json["access_token"]
+
+    # A valid-JSON but non-object body must be a clean 400, not a 500.
+    resp = client.post(
+        "/api/v1/auth/logout",
+        headers={"Authorization": f"Bearer {access}"},
+        data='"just-a-string"',
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+
 
 def test_logout_rejects_foreign_refresh_token(client, auth_headers):
     # A caller cannot revoke someone else's refresh token by passing it to logout.
