@@ -163,8 +163,9 @@ echo "✅ YACE installed"
 
 # ── Install Grafana via apt (resolves deps automatically) ─────────────────────
 echo "Installing Grafana..."
-GRAFANA_DEB_SHA256="4cff89724f4a06f53fc1187c6c2011206084baf13da6d443c2fb14b4ba272bb0"
-wget -q -O /tmp/grafana.deb "https://dl.grafana.com/oss/release/grafana_11.4.0_amd64.deb"
+# 11.4.4 patches CVE-2025-4123 (open-redirect / XSS); do not drop below it.
+GRAFANA_DEB_SHA256="8c38b82c3a40ebcb5e996024fe56e8584105556a8883648bad76c456f47d9647"
+wget -q -O /tmp/grafana.deb "https://dl.grafana.com/oss/release/grafana_11.4.4_amd64.deb"
 verify_sha256 /tmp/grafana.deb "$${GRAFANA_DEB_SHA256}"
 apt-get install -y -qq /tmp/grafana.deb
 rm -f /tmp/grafana.deb

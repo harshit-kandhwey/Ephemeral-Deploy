@@ -130,23 +130,49 @@ The 30-minute auto-cleanup ensures dev environments never accumulate cost.
 
 ## Prod Manual Destroy
 
-Production is not auto-destroyed. To destroy prod:
+Production is not auto-destroyed. Destroy it deliberately, against the **real
+S3 backend** so DynamoDB locking blocks any concurrent deploy — never against a
+downloaded copy of the state (that bypasses the lock and can go stale). Run from
+the prod environment directory so Terraform can find the config and variables.
 
-Terraform state contains secrets in plaintext, so keep the downloaded copy in a
-private, self-cleaning directory rather than the working tree:
+> ⚠️ Prod RDS sets `deletion_protection = true` and `skip_final_snapshot = false`,
+> and prod secrets keep a 7-day recovery window. The step below clears deletion
+> protection (the same thing `scripts/cleanup.sh` does) — Terraform never clears
+> it and will otherwise fail the destroy partway. Run this only in a window with
+> no other prod deploy in flight. The approval-gated `cleanup.yml` workflow is
+> the hands-off alternative to this manual procedure.
 
 ```bash
-# 0. Private scratch dir (owner-only perms) that is wiped on exit
-umask 077
-WORKDIR="$(mktemp -d)"
-trap 'rm -rf "$WORKDIR"' EXIT
+set -euo pipefail
+cd terraform/environments/prod
 
-# 1. Download state file into it
-aws s3 cp s3://nexusdeploy-terraform-state/prod/terraform.tfstate "$WORKDIR/prod-terraform.tfstate"
+terraform init \
+  -backend-config="bucket=nexusdeploy-terraform-state" \
+  -backend-config="key=prod/terraform.tfstate" \
+  -backend-config="region=us-east-1" \
+  -backend-config="encrypt=true" \
+  -backend-config="dynamodb_table=nexusdeploy-terraform-locks"
 
-# 2. Verify what will be destroyed
-terraform plan -destroy -state="$WORKDIR/prod-terraform.tfstate"
+# 1. Clear RDS deletion protection and WAIT for it to apply, or the destroy
+#    fails on the protected instance.
+DB_ID=nexusdeploy-prod-postgres
+if [[ "$(aws rds describe-db-instances --db-instance-identifier "$DB_ID" \
+      --region us-east-1 --query 'DBInstances[0].DeletionProtection' \
+      --output text 2>/dev/null)" == "True" ]]; then
+  aws rds modify-db-instance --db-instance-identifier "$DB_ID" \
+    --no-deletion-protection --apply-immediately --region us-east-1 --no-cli-pager
+  aws rds wait db-instance-available --db-instance-identifier "$DB_ID" --region us-east-1
+fi
 
-# 3. Destroy (the trap removes the local state copy when the shell exits)
-terraform destroy -state="$WORKDIR/prod-terraform.tfstate"
+# Placeholder image/commit vars have no defaults in prod; monitoring_allowed_cidr
+# is required too. They don't affect what a destroy removes.
+DESTROY_VARS=(-var-file=terraform.tfvars \
+  -var 'api_image=placeholder' -var 'worker_image=placeholder' \
+  -var 'git_commit=destroy'    -var 'monitoring_allowed_cidr=["0.0.0.0/32"]')
+
+# 2. Review exactly what will be destroyed
+terraform plan -destroy "${DESTROY_VARS[@]}"
+
+# 3. Destroy (holds the DynamoDB lock for the duration)
+terraform destroy "${DESTROY_VARS[@]}"
 ```

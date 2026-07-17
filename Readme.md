@@ -687,17 +687,11 @@ The complete ALB stack is written and commented:
 
 ### DynamoDB State Locking
 
-**Files:** `scripts/bootstrap.sh` · `terraform/environments/*/main.tf` · `.github/workflows/deploy.yml`
+**Files:** `scripts/bootstrap.sh` · `.github/workflows/deploy.yml` · every `terraform init`
 
-Terraform state locking prevents two concurrent `terraform apply` runs from corrupting the state file. It's disabled because this is a single-developer project — concurrent state writes cannot happen.
+Terraform state locking prevents two concurrent `terraform apply` runs from corrupting the state file. It is **enabled**: `bootstrap.sh` (STEP 2) creates the `nexusdeploy-terraform-locks` table, every `terraform init` passes `-backend-config="dynamodb_table=nexusdeploy-terraform-locks"`, and the deploy role holds scoped `dynamodb:{GetItem,PutItem,DeleteItem,DescribeTable}` on that table's ARN. The table is shared by all environments (the state `key` differs per env).
 
-**To enable (3 steps):**
-
-1. Uncomment the `aws dynamodb create-table` block in `bootstrap.sh` and re-run `./scripts/bootstrap.sh`
-2. Add `dynamodb_table = "nexusdeploy-terraform-locks"` to the `backend "s3"` block in `dev/main.tf` and `prod/main.tf`
-3. Uncomment `TF_LOCK_TABLE: nexusdeploy-terraform-locks` in `deploy.yml`
-
-**Cost when enabled:** $0 — DynamoDB PAY_PER_REQUEST at this scale is negligible.
+**Cost:** $0 — DynamoDB PAY_PER_REQUEST at this scale is negligible.
 
 ---
 
@@ -889,7 +883,8 @@ cluster, services, and log group carry the active blue-green slot suffix
 (`-slot1`/`-slot2`) — resolve it first:
 
 ```bash
-SLOT=$(aws ssm get-parameter --name /nexusdeploy/<env>/deployment/active_slot \
+ENV=staging   # or prod
+SLOT=$(aws ssm get-parameter --name "/nexusdeploy/$ENV/deployment/active_slot" \
   --region us-east-1 --query Parameter.Value --output text)   # e.g. slot1
 ```
 

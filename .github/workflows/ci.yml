@@ -232,7 +232,7 @@ jobs:
         # it; until then this is best-effort and must never fail the run.
         continue-on-error: true
         with:
-          file: app/coverage.xml
+          files: app/coverage.xml
           flags: unittests
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
