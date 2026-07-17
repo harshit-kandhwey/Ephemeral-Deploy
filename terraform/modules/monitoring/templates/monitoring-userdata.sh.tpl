@@ -33,8 +33,25 @@ done
 
 apt-get update -qq
 apt-get install -y -qq wget curl jq unzip
-# awscli not in Ubuntu 24.04 apt repos — install v2 via official installer
-curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+
+# Supply-chain guard: verify every third-party binary against a sha256 captured
+# out-of-band from the project's official artifact. A tampered or truncated
+# download aborts the whole setup (set -e) instead of silently running an
+# unknown binary. Defined here because the AWS CLI (below) is the first thing
+# it guards.
+verify_sha256() {
+  # $1 = file path, $2 = expected hex digest
+  echo "$2  $1" | sha256sum -c - \
+    || { echo "❌ checksum mismatch for $1 — aborting"; exit 1; }
+}
+
+# awscli not in Ubuntu 24.04 apt repos — install v2 via official installer.
+# Pinned to an exact version + sha256 rather than the rolling "latest" URL so a
+# compromised/republished artifact can't be installed as root.
+AWSCLI_VERSION="2.24.0"
+AWSCLI_SHA256="4e3c39d9881cb6f893ea93219d971390864b1f7e3756197413a7de38ce059609"
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-$${AWSCLI_VERSION}.zip" -o /tmp/awscliv2.zip
+verify_sha256 /tmp/awscliv2.zip "$${AWSCLI_SHA256}"
 unzip -q /tmp/awscliv2.zip -d /tmp
 /tmp/aws/install
 rm -rf /tmp/awscliv2.zip /tmp/aws
@@ -53,21 +70,15 @@ echo "✅ Grafana password fetched"
 # ── Download binaries to /tmp ─────────────────────────────────────────────────
 cd /tmp
 
-# Supply-chain guard: every third-party binary below is pinned to an exact
-# version AND its sha256, captured out-of-band from the projects' official
-# release checksum files. A tampered or truncated download aborts the whole
-# setup (set -e) instead of silently running an unknown binary.
-verify_sha256() {
-  # $1 = file path, $2 = expected hex digest
-  echo "$2  $1" | sha256sum -c - \
-    || { echo "❌ checksum mismatch for $1 — aborting"; exit 1; }
-}
+# Every third-party binary below is pinned to an exact version AND its sha256,
+# captured out-of-band from the projects' official release checksum files, and
+# verified via verify_sha256 (defined near the top of this script).
 
 # ── Install Node Exporter ─────────────────────────────────────────────────────
 echo "Installing Node Exporter..."
 NODEXP_VERSION="1.7.0"
 NODEXP_SHA256="a550cd5c05f760b7934a2d0afad66d2e92e681482f5f57a917465b1fba3b02a6"
-wget -q "https://github.com/prometheus/node_exporter/releases/download/v$${NODEXP_VERSION}/node_exporter-$${NODEXP_VERSION}.linux-amd64.tar.gz"
+wget -q -O "node_exporter-$${NODEXP_VERSION}.linux-amd64.tar.gz" "https://github.com/prometheus/node_exporter/releases/download/v$${NODEXP_VERSION}/node_exporter-$${NODEXP_VERSION}.linux-amd64.tar.gz"
 verify_sha256 "node_exporter-$${NODEXP_VERSION}.linux-amd64.tar.gz" "$${NODEXP_SHA256}"
 tar xf "node_exporter-$${NODEXP_VERSION}.linux-amd64.tar.gz"
 mv "node_exporter-$${NODEXP_VERSION}.linux-amd64/node_exporter" /usr/local/bin/
@@ -91,7 +102,7 @@ echo "✅ Node Exporter installed"
 echo "Installing Prometheus..."
 PROM_VERSION="2.49.1"
 PROM_SHA256="93460f66d17ee70df899e91db350d9705c20b1576800f96acbd78fa004e7dc07"
-wget -q "https://github.com/prometheus/prometheus/releases/download/v$${PROM_VERSION}/prometheus-$${PROM_VERSION}.linux-amd64.tar.gz"
+wget -q -O "prometheus-$${PROM_VERSION}.linux-amd64.tar.gz" "https://github.com/prometheus/prometheus/releases/download/v$${PROM_VERSION}/prometheus-$${PROM_VERSION}.linux-amd64.tar.gz"
 verify_sha256 "prometheus-$${PROM_VERSION}.linux-amd64.tar.gz" "$${PROM_SHA256}"
 tar xf "prometheus-$${PROM_VERSION}.linux-amd64.tar.gz"
 mv "prometheus-$${PROM_VERSION}.linux-amd64/prometheus" /usr/local/bin/
@@ -125,7 +136,7 @@ echo "✅ Prometheus installed"
 echo "Installing YACE..."
 YACE_VERSION="0.61.2"
 YACE_SHA256="6c725906bd11eefdcfa3d7fb51063d5427d7dc34b89909295105c55780c3d335"
-wget -q "https://github.com/nerdswords/yet-another-cloudwatch-exporter/releases/download/v$${YACE_VERSION}/yet-another-cloudwatch-exporter_$${YACE_VERSION}_Linux_x86_64.tar.gz"
+wget -q -O "yet-another-cloudwatch-exporter_$${YACE_VERSION}_Linux_x86_64.tar.gz" "https://github.com/nerdswords/yet-another-cloudwatch-exporter/releases/download/v$${YACE_VERSION}/yet-another-cloudwatch-exporter_$${YACE_VERSION}_Linux_x86_64.tar.gz"
 verify_sha256 "yet-another-cloudwatch-exporter_$${YACE_VERSION}_Linux_x86_64.tar.gz" "$${YACE_SHA256}"
 tar xf "yet-another-cloudwatch-exporter_$${YACE_VERSION}_Linux_x86_64.tar.gz"
 # Binary may be named 'yace' or 'yet-another-cloudwatch-exporter' depending on version

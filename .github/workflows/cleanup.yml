@@ -73,6 +73,14 @@ jobs:
             echo "❌ Invalid delay_minutes: must be a non-negative integer, got: $DELAY"
             exit 1
           fi
+          # This job's timeout-minutes is 90 and it must still run terraform
+          # destroy + fallback cleanup + state backup after the sleep. Cap the
+          # delay at the documented 45-min dev-TTL path so a large manual value
+          # can't cancel the job mid-run before anything is destroyed.
+          if (( DELAY > 45 )); then
+            echo "❌ Invalid delay_minutes: exceeds the maximum destroy delay (45)"
+            exit 1
+          fi
           echo "⏳ Waiting ${DELAY} minutes before cleanup..."
           echo "Reason: ${{ github.event.inputs.reason }}"
           sleep $((DELAY * 60))

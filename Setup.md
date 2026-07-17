@@ -132,13 +132,21 @@ The 30-minute auto-cleanup ensures dev environments never accumulate cost.
 
 Production is not auto-destroyed. To destroy prod:
 
+Terraform state contains secrets in plaintext, so keep the downloaded copy in a
+private, self-cleaning directory rather than the working tree:
+
 ```bash
-# 1. Download state file
-aws s3 cp s3://nexusdeploy-terraform-state/prod/terraform.tfstate ./prod-terraform.tfstate
+# 0. Private scratch dir (owner-only perms) that is wiped on exit
+umask 077
+WORKDIR="$(mktemp -d)"
+trap 'rm -rf "$WORKDIR"' EXIT
+
+# 1. Download state file into it
+aws s3 cp s3://nexusdeploy-terraform-state/prod/terraform.tfstate "$WORKDIR/prod-terraform.tfstate"
 
 # 2. Verify what will be destroyed
-terraform plan -destroy -state=prod-terraform.tfstate
+terraform plan -destroy -state="$WORKDIR/prod-terraform.tfstate"
 
-# 3. Destroy
-terraform destroy -state=prod-terraform.tfstate
+# 3. Destroy (the trap removes the local state copy when the shell exits)
+terraform destroy -state="$WORKDIR/prod-terraform.tfstate"
 ```

@@ -897,8 +897,8 @@ SLOT=$(aws ssm get-parameter --name /nexusdeploy/<env>/deployment/active_slot \
 # ── Local development ─────────────────────────────────
 docker-compose up -d          # Start postgres + redis + api + worker + beat + redis-commander
 docker-compose down -v        # Stop and remove volumes
-cd app && pytest tests/ -v --cov=src --cov-report=term-missing                        # Tests
-cd app && flake8 src/ --max-line-length=120 && black --check src/ && bandit -r src/ -ll -x src/tests/   # Lint
+(cd app && pytest tests/ -v --cov=src --cov-report=term-missing)                        # Tests
+(cd app && flake8 src/ --max-line-length=120 && black --check src/ && bandit -r src/ -ll -x src/tests/)   # Lint
 
 # ── Docker (normally CI's job) ────────────────────────
 docker build -t nexusdeploy-api:local    -f app/Dockerfile app/
@@ -906,11 +906,12 @@ docker build -t nexusdeploy-worker:local -f app/Dockerfile.worker app/
 aws ecr get-login-password --region us-east-1 \
   | docker login --username AWS --password-stdin <account-id>.dkr.ecr.us-east-1.amazonaws.com
 
-# ── Terraform (swap dev → staging | prod) ─────────────
-cd terraform/environments/dev
+# ── Terraform (set ENV to dev | staging | prod) ───────
+ENV=dev
+cd "terraform/environments/$ENV"
 terraform init \
   -backend-config="bucket=nexusdeploy-terraform-state" \
-  -backend-config="key=dev/terraform.tfstate" \
+  -backend-config="key=$ENV/terraform.tfstate" \
   -backend-config="region=us-east-1" \
   -backend-config="dynamodb_table=nexusdeploy-terraform-locks" \
   -backend-config="encrypt=true"

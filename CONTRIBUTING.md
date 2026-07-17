@@ -37,9 +37,9 @@ Tests use in-memory SQLite and Redis DB 15 — no external services needed.
 ### Linting
 
 ```bash
-cd app && flake8 src/ --max-line-length=120 && black --check src/ && bandit -r src/ -ll -x src/tests/
-cd app && black .  # auto-format
-cd app && isort .  # sort imports
+(cd app && flake8 src/ --max-line-length=120 && black --check src/ && bandit -r src/ -ll -x src/tests/)
+(cd app && black .)   # auto-format
+(cd app && isort .)   # sort imports
 ```
 
 Line length is 120 (set in `pyproject.toml`).
