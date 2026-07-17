@@ -140,6 +140,12 @@ def create_project():
     except ValidationError as e:
         return jsonify({"error": e.message}), 400
 
+    # role_required gate-kept admin/manager, but a manager may only create
+    # projects for their own team — otherwise a manager of one team can seed
+    # projects into another team.
+    if user.role != "admin" and (not user.team or team.id != user.team.id):
+        return jsonify({"error": "Access denied"}), 403
+
     project = Project(
         name=data["name"],
         description=data.get("description", ""),

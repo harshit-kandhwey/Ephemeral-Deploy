@@ -2,13 +2,32 @@ import math
 import time
 
 from flask import current_app, jsonify, request
-from flask_jwt_extended import create_access_token, create_refresh_token, get_jwt, get_jwt_identity, jwt_required
+from flask_jwt_extended import (
+    create_access_token,
+    create_refresh_token,
+    decode_token,
+    get_jwt,
+    get_jwt_identity,
+    jwt_required,
+)
 
 from ...extensions import db, limiter, redis_client
 from ...models.audit_log import AuditLog
 from ...models.user import User
+from ...utils.decorators import get_current_user_or_401
 from ...utils.validation import ValidationError, get_json_body, require_fields, validate_password
 from . import api_v1
+
+
+def _revoke_token(payload):
+    """Blocklist a decoded JWT until its own expiry.
+
+    Keyed by jti with a TTL matching the token's remaining lifetime, so the
+    entry evicts itself once the token would have expired anyway.
+    """
+    jti = payload["jti"]
+    ttl = max(math.ceil(payload["exp"] - time.time()), 1)
+    redis_client.setex(f"jti_blocklist:{jti}", ttl, "revoked")
 
 
 @api_v1.route("/auth/register", methods=["POST"])
@@ -206,25 +225,54 @@ def refresh():
 @jwt_required()
 def logout():
     """
-    Revoke the current access token
+    Revoke the current session's tokens
+
+    Always revokes the access token presented on this request. If the client
+    also sends its refresh token in the body as ``refresh_token``, that token is
+    revoked too — otherwise the long-lived refresh token would survive logout
+    and could mint fresh access tokens after the user "logged out".
     ---
     tags:
       - Authentication
     security:
       - Bearer: []
+    parameters:
+      - name: body
+        in: body
+        required: false
+        schema:
+          type: object
+          properties:
+            refresh_token:
+              type: string
     responses:
       200:
         description: Logged out successfully
+      400:
+        description: Malformed refresh token
     """
     if redis_client is None:
         current_app.logger.error("Redis unavailable; cannot revoke JWT")
         return jsonify({"error": "Logout temporarily unavailable"}), 503
 
-    payload = get_jwt()
-    jti = payload["jti"]
-    ttl = max(math.ceil(payload["exp"] - time.time()), 1)
+    # Revoke the refresh token first (if supplied and valid) so a Redis failure
+    # can't leave the access token revoked but the refresh token still live.
+    body = request.get_json(silent=True) or {}
+    refresh_token = body.get("refresh_token")
+
     try:
-        redis_client.setex(f"jti_blocklist:{jti}", ttl, "revoked")
+        if refresh_token:
+            try:
+                refresh_payload = decode_token(refresh_token)
+            except Exception:
+                return jsonify({"error": "Invalid refresh token"}), 400
+            # Only let a caller revoke their own refresh token, and reject an
+            # access token passed here by mistake.
+            if refresh_payload.get("type") != "refresh" or refresh_payload.get("sub") != get_jwt_identity():
+                return jsonify({"error": "Invalid refresh token"}), 400
+            _revoke_token(refresh_payload)
+
+        _revoke_token(get_jwt())
     except Exception:
         current_app.logger.exception("Failed to revoke JWT")
         return jsonify({"error": "Logout temporarily unavailable"}), 503
@@ -245,7 +293,12 @@ def get_current_user():
     responses:
       200:
         description: Current user details
+      403:
+        description: Account disabled
     """
-    user_id = int(get_jwt_identity())
-    user = User.query.get_or_404(user_id)
+    # get_current_user_or_401 rejects disabled accounts (403) — a token minted
+    # before the account was deactivated must not keep working.
+    user, error_response = get_current_user_or_401()
+    if error_response:
+        return error_response
     return jsonify(user.to_dict(include_email=True)), 200

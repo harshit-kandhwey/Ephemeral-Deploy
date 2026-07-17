@@ -1,5 +1,6 @@
 import pytest
 
+from src.extensions import db
 from src.models.team import Team
 
 
@@ -50,6 +51,38 @@ def test_create_project_as_developer_forbidden(client, auth_headers, team_id):
 def test_create_project_missing_fields(client, manager_headers):
     response = client.post("/api/v1/projects", headers=manager_headers, json={"name": "No Team"})
     assert response.status_code == 400
+
+
+def test_create_project_cross_team_manager_forbidden(client, manager_headers):
+    # A manager may only create projects for their own team.
+    with client.application.app_context():
+        other = Team(name="Other Team")
+        db.session.add(other)
+        db.session.commit()
+        other_id = other.id
+
+    response = client.post(
+        "/api/v1/projects",
+        headers=manager_headers,
+        json={"name": "Cross Team Project", "team_id": other_id},
+    )
+    assert response.status_code == 403
+
+
+def test_create_project_other_team_as_admin_allowed(client, admin_headers):
+    # Admins are not team-scoped and can create a project for any team.
+    with client.application.app_context():
+        other = Team(name="Admin Other Team")
+        db.session.add(other)
+        db.session.commit()
+        other_id = other.id
+
+    response = client.post(
+        "/api/v1/projects",
+        headers=admin_headers,
+        json={"name": "Admin Cross Team", "team_id": other_id},
+    )
+    assert response.status_code == 201
 
 
 # --- READ ---

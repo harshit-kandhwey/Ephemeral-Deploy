@@ -386,6 +386,12 @@ def delete_task(task_id):
     user_id = user.id
     task = Task.query.get_or_404(task_id)
 
+    # role_required already gate-kept admin/manager, but a manager may only act
+    # within their own team — otherwise a manager of one team can delete another
+    # team's tasks. Mirror the scoping used by get_task/update_task.
+    if user.role != "admin" and (not user.team or task.project.team_id != user.team.id):
+        return jsonify({"error": "Access denied"}), 403
+
     # Audit log before deletion
     audit = AuditLog(
         user_id=user_id,
