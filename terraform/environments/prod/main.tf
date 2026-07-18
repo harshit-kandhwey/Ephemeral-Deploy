@@ -48,6 +48,18 @@ locals {
   # deploy.yml sets this based on what's currently running
   active_slot = var.deployment_slot # "slot1" or "slot2"
 
+  # Capacity for the NON-active slot. Blue-green needs the previous slot to keep
+  # serving until the new slot is verified healthy, otherwise a single apply
+  # scales the old slot to 0 while the new one is still inside its startPeriod —
+  # an outage window with no slot serving. The deploy apply passes true (overlap);
+  # the reclaim apply (cleanup.yml, after the drain delay) passes false to
+  # actually scale the drained slot down.
+  #
+  # API and worker only. Beat is a SINGLETON — two Beat containers fire every
+  # scheduled task twice, and the overlap window is 2h (staging) / 24h (prod),
+  # so beat_desired_count stays tied to the active slot alone.
+  inactive_slot_count = var.keep_previous_slot_running ? 1 : 0
+
   common_tags = {
     Project     = local.project
     Environment = local.environment
@@ -286,8 +298,10 @@ module "elasticache" {
 #      - deploy.yml polls slot2 health for 24h, then drains slot1
 #   3. If slot2 fails health checks → deploy.yml reverts slot to "slot1"
 #
-# Terraform manages both slots. The inactive one has desired_count=0
-# so it costs nothing while standing by.
+# Terraform manages both slots. Once drained, the inactive one has
+# desired_count=0 so it costs nothing while standing by. During a deploy
+# it is held at capacity (keep_previous_slot_running) so it keeps serving
+# until the new slot is verified healthy.
 # ══════════════════════════════════════════════
 
 # ── Blue slot ─────────────────────────────────
@@ -312,8 +326,8 @@ module "ecs_slot1" {
   log_retention_days            = 14
 
   # slot1 is active when deployment_slot = "slot1", else it's being drained
-  api_desired_count    = local.active_slot == "slot1" ? 1 : 0
-  worker_desired_count = local.active_slot == "slot1" ? 1 : 0
+  api_desired_count    = local.active_slot == "slot1" ? 1 : local.inactive_slot_count
+  worker_desired_count = local.active_slot == "slot1" ? 1 : local.inactive_slot_count
   beat_desired_count   = local.active_slot == "slot1" ? 1 : 0
   api_cpu              = 256
   api_memory           = 512
@@ -352,8 +366,8 @@ module "ecs_slot2" {
   log_retention_days            = 14
 
   # slot2 is active when deployment_slot = "slot2"
-  api_desired_count    = local.active_slot == "slot2" ? 1 : 0
-  worker_desired_count = local.active_slot == "slot2" ? 1 : 0
+  api_desired_count    = local.active_slot == "slot2" ? 1 : local.inactive_slot_count
+  worker_desired_count = local.active_slot == "slot2" ? 1 : local.inactive_slot_count
   beat_desired_count   = local.active_slot == "slot2" ? 1 : 0
   api_cpu              = 256
   api_memory           = 512

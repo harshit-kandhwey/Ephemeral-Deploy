@@ -21,6 +21,10 @@ on:
         description: "Old blue-green slot to drain (slot1 or slot2) — drain_old_slot only"
         required: false
         default: ""
+      expected_active_slot:
+        description: "Generation guard: slot that must STILL be active for the drain to proceed — drain_old_slot only"
+        required: false
+        default: ""
       delay_minutes:
         description: "Delay before action (minutes)"
         required: false
@@ -324,6 +328,7 @@ jobs:
                 environment: '${{ github.event.inputs.environment }}',
                 action: 'drain_old_slot',
                 old_slot: '${{ github.event.inputs.old_slot }}',
+                expected_active_slot: '${{ github.event.inputs.expected_active_slot }}',
                 delay_minutes: '${{ steps.wait.outputs.remaining }}',
                 reason: '${{ github.event.inputs.reason }}'
               }
@@ -338,40 +343,154 @@ jobs:
           role-session-name: DrainSlot-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Scale down old slot
+      - name: Generation guard — is this drain still current?
+        id: guard
         if: steps.wait.outputs.drain_now != 'false'
         run: |
           OLD_SLOT="${{ github.event.inputs.old_slot }}"
+          EXPECTED="${{ github.event.inputs.expected_active_slot }}"
           ENV="${{ env.TF_ENV }}"
 
           if [[ -z "$OLD_SLOT" ]]; then
-            echo "❌ old_slot input is required for drain_old_slot action"
+            echo "::error::old_slot input is required for drain_old_slot action"
             exit 1
           fi
 
-          CLUSTER="nexusdeploy-${ENV}-${OLD_SLOT}"
-          echo "🔻 Draining old slot: $OLD_SLOT (cluster: $CLUSTER)"
+          # This job was scheduled 2h (staging) or 24h (prod) ago, and it may
+          # have been re-dispatched across several 300-min chunks since. Deploys
+          # kept happening in that window, and because slots alternate, a newer
+          # deploy can have promoted the very slot we were told to drain. Acting
+          # on the stale instruction would scale down the LIVE environment.
+          # So: re-read the truth NOW and only proceed if nothing has moved.
+          set +e
+          ACTIVE=$(aws ssm get-parameter \
+            --name "/nexusdeploy/${ENV}/deployment/active_slot" \
+            --region "${{ env.AWS_REGION }}" \
+            --query 'Parameter.Value' --output text 2>&1)
+          RC=$?
+          set -e
 
-          for svc in api worker beat; do
-            SVC_NAME="nexusdeploy-${ENV}-${OLD_SLOT}-${svc}"
-            aws ecs update-service \
-              --cluster "$CLUSTER" \
-              --service "$SVC_NAME" \
-              --desired-count 0 \
-              --region "${{ env.AWS_REGION }}" 2>/dev/null \
-            && echo "  ✅ Scaled down $SVC_NAME" \
-            || echo "  ⚠️  $SVC_NAME not found or already stopped"
-          done
+          if [[ $RC -ne 0 ]]; then
+            echo "::error::Could not read active_slot from SSM (exit $RC). Refusing to drain on an unknown active slot."
+            echo "$ACTIVE"
+            exit 1
+          fi
 
-          echo "✅ Old slot $OLD_SLOT drained"
+          if [[ "$ACTIVE" == "$OLD_SLOT" ]]; then
+            echo "::warning::ABORTING drain — $OLD_SLOT is the ACTIVE slot now. A later deploy promoted it after this drain was scheduled."
+            echo "proceed=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Stronger check when the scheduler told us which slot it promoted:
+          # if active_slot has since moved off it, a newer deploy owns the
+          # rotation and is scheduling its own drain. Stand down.
+          if [[ -n "$EXPECTED" && "$ACTIVE" != "$EXPECTED" ]]; then
+            echo "::warning::ABORTING drain — expected active slot '$EXPECTED' but SSM says '$ACTIVE'. A newer deploy superseded this drain."
+            echo "proceed=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          if [[ -z "$EXPECTED" ]]; then
+            echo "⚠️  No expected_active_slot supplied (manual dispatch) — proceeding on the active!=old check alone."
+          fi
+
+          echo "✅ Guard passed: active=$ACTIVE, draining $OLD_SLOT."
+          echo "active_slot=$ACTIVE" >> $GITHUB_OUTPUT
+          echo "proceed=true" >> $GITHUB_OUTPUT
+
+      # The drain used to be pure AWS CLI and needed no working tree; now that it
+      # reclaims capacity through Terraform, it needs the config checked out.
+      - name: Checkout
+        if: steps.guard.outputs.proceed == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Setup Terraform
+        if: steps.guard.outputs.proceed == 'true'
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        if: steps.guard.outputs.proceed == 'true'
+        working-directory: terraform/environments/${{ env.TF_ENV }}
+        run: |
+          terraform init \
+            -input=false \
+            -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ env.TF_ENV }}/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
+
+      - name: Reclaim old slot capacity (terraform apply)
+        id: reclaim
+        if: steps.guard.outputs.proceed == 'true'
+        working-directory: terraform/environments/${{ env.TF_ENV }}
+        env:
+          TF_VAR_deployment_slot: ${{ steps.guard.outputs.active_slot }}
+          # The whole point of the drain: drop the overlap the deploy put in
+          # place, so the inactive slot finally goes to desired_count 0.
+          TF_VAR_keep_previous_slot_running: "false"
+          TF_VAR_git_commit: ${{ github.sha }}
+          TF_VAR_monitoring_allowed_cidr: ${{ vars.MONITORING_ALLOWED_CIDR }}
+          TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+        run: |
+          ENV="${{ env.TF_ENV }}"
+
+          # desired_count is NOT in the ECS module's ignore_changes, so Terraform
+          # is authoritative over capacity. The old `aws ecs update-service
+          # --desired-count 0` drain was therefore drift: it worked for minutes,
+          # then the next deploy's apply put the drained slot straight back to 1.
+          # Reclaiming through an apply is the only durable form of this step.
+          #
+          # SSM prev_*_image holds the images running on the ACTIVE slot (the
+          # deploy writes them there after promotion), so feeding them back keeps
+          # this apply a capacity-only change and never re-images a live slot.
+          API_IMAGE=$(aws ssm get-parameter \
+            --name "/nexusdeploy/${ENV}/deployment/prev_api_image" \
+            --query 'Parameter.Value' --output text \
+            --region "${{ env.AWS_REGION }}" 2>/dev/null || echo "")
+          WORKER_IMAGE=$(aws ssm get-parameter \
+            --name "/nexusdeploy/${ENV}/deployment/prev_worker_image" \
+            --query 'Parameter.Value' --output text \
+            --region "${{ env.AWS_REGION }}" 2>/dev/null || echo "")
+
+          if [[ -z "$API_IMAGE" || -z "$WORKER_IMAGE" ]]; then
+            echo "::error::Could not resolve the active slot's images from SSM — refusing to apply, as Terraform would fall back to the 'placeholder' default and re-image the live slot."
+            exit 1
+          fi
+
+          export TF_VAR_api_image="$API_IMAGE"
+          export TF_VAR_worker_image="$WORKER_IMAGE"
+          export TF_VAR_previous_api_image="$API_IMAGE"
+          export TF_VAR_previous_worker_image="$WORKER_IMAGE"
+
+          if [[ -z "${TF_VAR_monitoring_allowed_cidr:-}" ]]; then
+            echo "::error::MONITORING_ALLOWED_CIDR is not set for ${ENV}. Add it in GitHub → Settings → Environments → ${ENV} → Variables."
+            exit 1
+          fi
+          if [[ "${TF_VAR_monitoring_allowed_cidr}" != \[* ]]; then
+            export TF_VAR_monitoring_allowed_cidr='["'"${TF_VAR_monitoring_allowed_cidr}"'"]'
+          fi
+
+          echo "🔻 Reclaiming ${{ github.event.inputs.old_slot }} (active stays ${{ steps.guard.outputs.active_slot }})"
+          terraform apply -input=false -var-file=terraform.tfvars -auto-approve
+          echo "✅ Old slot ${{ github.event.inputs.old_slot }} drained to desired_count 0"
 
       - name: Drain summary
         if: always() && steps.wait.outputs.drain_now != 'false'
         run: |
-          echo "## 🔻 Blue-Green Old Slot Drained" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ steps.guard.outputs.proceed }}" == "true" ]]; then
+            echo "## 🔻 Blue-Green Old Slot Drained" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## 🛑 Blue-Green Drain Aborted (superseded)" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Environment | \`${{ env.TF_ENV }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Drained slot | \`${{ github.event.inputs.old_slot }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Target slot | \`${{ github.event.inputs.old_slot }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Expected active | \`${{ github.event.inputs.expected_active_slot }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Actual active | \`${{ steps.guard.outputs.active_slot }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Triggered By | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Reason | ${{ github.event.inputs.reason }} |" >> $GITHUB_STEP_SUMMARY
