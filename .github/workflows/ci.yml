@@ -520,4 +520,7 @@ jobs:
           )
         run: |
           echo "⏭️  CI passed but deploy was NOT dispatched — dependency bump, [skip deploy] marker, or a manual run with deploy unchecked." | tee -a $GITHUB_STEP_SUMMARY
-          echo "Re-run with the 'deploy' box checked, or run deploy.yml manually (Actions → Deploy → Run workflow), to ship this change." | tee -a $GITHUB_STEP_SUMMARY
+          # NOT "re-run": a GitHub re-run replays the original run's context, so
+          # the deploy input stays false however the box is ticked. It has to be
+          # a fresh dispatch.
+          echo "Start a NEW manual run with the 'deploy' box checked (re-running this one keeps deploy=false), or run deploy.yml manually (Actions → Deploy → Run workflow), to ship this change." | tee -a $GITHUB_STEP_SUMMARY

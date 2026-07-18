@@ -321,6 +321,20 @@ jobs:
           # wired; a value adds an email subscription (one-time confirmation).
           TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
         run: |
+          # Fail closed on unresolved previous images. The prev_images step turns
+          # every SSM error into "placeholder", and on a non-first deploy the
+          # overlap holds the old slot AT CAPACITY while Terraform assigns it
+          # exactly these images — so a transient SSM failure would replace the
+          # serving tasks with an unpullable task definition. That is the outage
+          # the overlap exists to prevent.
+          if [[ "${{ steps.slot.outputs.current_slot }}" != "none" ]]; then
+            if [[ -z "${TF_VAR_previous_api_image:-}" || "${TF_VAR_previous_api_image}" == "placeholder" || \
+                  -z "${TF_VAR_previous_worker_image:-}" || "${TF_VAR_previous_worker_image}" == "placeholder" ]]; then
+              echo "::error::Previous images did not resolve (api='${TF_VAR_previous_api_image:-}', worker='${TF_VAR_previous_worker_image:-}') but slot ${{ steps.slot.outputs.current_slot }} is live. Refusing to apply — this would re-image the serving slot with a placeholder."
+              exit 1
+            fi
+          fi
+
           if [[ -z "${TF_VAR_monitoring_allowed_cidr:-}" ]]; then
             echo "::error::MONITORING_ALLOWED_CIDR is not set. Add it in GitHub → Settings → Environments → ${{ inputs.environment }} → Variables."
             exit 1
@@ -497,7 +511,18 @@ jobs:
             --type String \
             --overwrite \
             --region ${{ env.AWS_REGION }}
-          echo "✅ SSM active_slot updated to ${{ steps.slot.outputs.new_slot }}"
+
+          # Monotonic, non-repeating deploy identity. active_slot alone only ever
+          # alternates, so a drain scheduled two promotions ago sees the value it
+          # expected and wrongly concludes nothing moved. cleanup.yml compares
+          # this instead.
+          aws ssm put-parameter \
+            --name "/nexusdeploy/${{ inputs.environment }}/deployment/generation" \
+            --value "${{ github.run_id }}" \
+            --type String \
+            --overwrite \
+            --region ${{ env.AWS_REGION }}
+          echo "✅ SSM active_slot updated to ${{ steps.slot.outputs.new_slot }} (generation ${{ github.run_id }})"
 
       - name: Store current images as 'previous' for next deploy
         if: steps.gate.outputs.promote == 'true'
@@ -536,6 +561,15 @@ jobs:
                   // aborts unless active_slot still equals this value, so a
                   // stale drain can never scale down the LIVE slot.
                   expected_active_slot: '${{ steps.slot.outputs.new_slot }}',
+                  // Closes the ABA hole in expected_active_slot: slots only
+                  // alternate, so two further promotions restore the expected
+                  // value while the drain target has become the newest deploy's
+                  // rollback slot. The generation never repeats.
+                  expected_generation: '${{ github.run_id }}',
+                  // The drain fires hours from now; pin it to the code this
+                  // deploy applied so its "capacity-only" apply cannot pick up
+                  // unrelated infrastructure commits landed in the meantime.
+                  terraform_ref: '${{ github.sha }}',
                   delay_minutes: '${{ inputs.drain_minutes }}',
                   reason: 'Blue-green: draining old ${{ inputs.environment }} slot after ${{ inputs.drain_label }}'
                 }
@@ -550,6 +584,7 @@ jobs:
             }
 
       - name: Rollback - revert to old slot
+        id: rollback
         if: steps.gate.outputs.promote != 'true' && steps.slot.outputs.current_slot != 'none'
         continue-on-error: true
         working-directory: terraform/environments/${{ inputs.environment }}
@@ -590,8 +625,12 @@ jobs:
             --value "$OLD_SLOT" --type String --overwrite \
             --region ${{ env.AWS_REGION }} || true
 
+          # reclaimed=false is the honest default: every early exit below leaves
+          # the failed slot AT CAPACITY. Only the completed apply flips it true.
+          echo "reclaimed=false" >> $GITHUB_OUTPUT
+
           if [[ "${TF_VAR_api_image}" == "placeholder" ]]; then
-            echo "::warning::No previous image recorded — skipping the rollback apply to avoid deploying a placeholder image onto the live slot. $NEW_SLOT is left up for debugging; active_slot points at $OLD_SLOT."
+            echo "::warning::No previous image recorded — skipping the rollback apply to avoid deploying a placeholder image onto the live slot. $NEW_SLOT is left UP for debugging; active_slot points at $OLD_SLOT."
             exit 0
           fi
 
@@ -608,6 +647,7 @@ jobs:
           # apply. An `aws ecs update-service` here would be drift that the very
           # next deploy silently reverts.
           terraform apply -input=false -var-file=terraform.tfvars -auto-approve
+          echo "reclaimed=true" >> $GITHUB_OUTPUT
           echo "✅ Rollback complete — $OLD_SLOT serving on previous images, $NEW_SLOT scaled to 0"
 
       - name: Mark deployment as failed
@@ -616,7 +656,17 @@ jobs:
         # report the job as green. Fail the job explicitly after rollback.
         if: always() && steps.gate.outputs.promote != 'true'
         run: |
-          echo "::error::Deployment to ${{ inputs.environment }} failed the promotion gate (health=${{ steps.health.outputs.health_ok }}, init_db=${{ steps.init_db.outcome }}) and was rolled back"
+          echo "::error::Deployment to ${{ inputs.environment }} failed the promotion gate (health=${{ steps.health.outputs.health_ok }}, init_db=${{ steps.init_db.outcome }})"
+          # Do not claim a rollback that did not happen. The rollback step is
+          # continue-on-error and has guarded early exits, so "we failed" and
+          # "we cleaned up" are independent facts and must be reported as such.
+          if [[ "${{ steps.slot.outputs.current_slot }}" == "none" ]]; then
+            echo "::warning::First deploy — no previous slot to revert to. ${{ steps.slot.outputs.new_slot }} is left UP for debugging; tear it down manually when finished."
+          elif [[ "${{ steps.rollback.outputs.reclaimed }}" == "true" ]]; then
+            echo "Rollback succeeded: ${{ steps.slot.outputs.current_slot }} is serving and ${{ steps.slot.outputs.new_slot }} was scaled to 0."
+          else
+            echo "::error::ROLLBACK DID NOT COMPLETE (outcome=${{ steps.rollback.outcome }}). ${{ steps.slot.outputs.current_slot }} should still be serving — it was never scaled down — but the failed slot ${{ steps.slot.outputs.new_slot }} is STILL AT CAPACITY and still billing. Intervene manually."
+          fi
           exit 1
 
       - name: Deployment summary
@@ -635,7 +685,11 @@ jobs:
             echo "| | |" >> $GITHUB_STEP_SUMMARY
             echo "|---|---|" >> $GITHUB_STEP_SUMMARY
             echo "| Active slot remains | ${{ steps.slot.outputs.current_slot }} (never stopped serving) |" >> $GITHUB_STEP_SUMMARY
-            echo "| Failed slot         | ${{ steps.slot.outputs.new_slot }} (scaled to 0) |" >> $GITHUB_STEP_SUMMARY
+            if [[ "${{ steps.rollback.outputs.reclaimed }}" == "true" ]]; then
+              echo "| Failed slot         | ${{ steps.slot.outputs.new_slot }} (scaled to 0) |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| Failed slot         | ${{ steps.slot.outputs.new_slot }} ⚠️ **STILL AT CAPACITY** (rollback outcome: ${{ steps.rollback.outcome }}) |" >> $GITHUB_STEP_SUMMARY
+            fi
             echo "| Health gate         | ${{ steps.health.outputs.health_ok }} |" >> $GITHUB_STEP_SUMMARY
             echo "| init_db             | ${{ steps.init_db.outcome }} |" >> $GITHUB_STEP_SUMMARY
           fi
