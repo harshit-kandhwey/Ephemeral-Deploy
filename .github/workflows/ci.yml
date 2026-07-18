@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main, dev, staging]
   workflow_dispatch: # allow manual trigger
+    inputs:
+      deploy:
+        description: "Also dispatch a deploy after CI passes (manual runs only; off = CI without deploy)"
+        type: boolean
+        default: false
 
 # One CI run per branch — a newer push cancels the in-progress run for the
 # same ref, so a burst of merges (e.g. several dependabot PRs) doesn't queue
@@ -468,13 +473,20 @@ jobs:
         # dependabot pushes. The 'chore(deps' prefix (no closing paren) matches
         # both the deps and deps-dev groups.
         # An explicit [skip deploy] in the head commit message also skips it.
+        # A manual run (workflow_dispatch) never deploys UNLESS the 'deploy'
+        # input is checked in the Run-workflow UI — so the default manual run
+        # is "CI without deploy".
         if: |
-          github.event_name == 'push' &&
           (github.ref_name == 'dev' || github.ref_name == 'staging' || github.ref_name == 'main') &&
-          github.actor != 'dependabot[bot]' &&
-          !startsWith(github.event.head_commit.message, 'chore(deps') &&
-          !contains(github.event.head_commit.message, 'dependabot/') &&
-          !contains(github.event.head_commit.message, '[skip deploy]')
+          (
+            (github.event_name == 'push' &&
+             github.actor != 'dependabot[bot]' &&
+             !startsWith(github.event.head_commit.message, 'chore(deps') &&
+             !contains(github.event.head_commit.message, 'dependabot/') &&
+             !contains(github.event.head_commit.message, '[skip deploy]'))
+            ||
+            (github.event_name == 'workflow_dispatch' && inputs.deploy)
+          )
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
@@ -494,14 +506,18 @@ jobs:
             });
             console.log(`🚀 Deploy triggered for ${branch} → ${environment}`);
 
-      - name: Deploy dispatch skipped (dependency bump or [skip deploy])
+      - name: Deploy dispatch skipped (dependency bump, [skip deploy], or manual run)
         if: |
-          github.event_name == 'push' &&
           (github.ref_name == 'dev' || github.ref_name == 'staging' || github.ref_name == 'main') &&
-          (github.actor == 'dependabot[bot]' ||
-           startsWith(github.event.head_commit.message, 'chore(deps') ||
-           contains(github.event.head_commit.message, 'dependabot/') ||
-           contains(github.event.head_commit.message, '[skip deploy]'))
+          (
+            (github.event_name == 'push' &&
+             (github.actor == 'dependabot[bot]' ||
+              startsWith(github.event.head_commit.message, 'chore(deps') ||
+              contains(github.event.head_commit.message, 'dependabot/') ||
+              contains(github.event.head_commit.message, '[skip deploy]')))
+            ||
+            (github.event_name == 'workflow_dispatch' && !inputs.deploy)
+          )
         run: |
-          echo "⏭️  CI passed but deploy was NOT dispatched — dependency bump or [skip deploy] marker." | tee -a $GITHUB_STEP_SUMMARY
-          echo "Run deploy.yml manually (Actions → Deploy → Run workflow) if this change should ship." | tee -a $GITHUB_STEP_SUMMARY
+          echo "⏭️  CI passed but deploy was NOT dispatched — dependency bump, [skip deploy] marker, or a manual run with deploy unchecked." | tee -a $GITHUB_STEP_SUMMARY
+          echo "Re-run with the 'deploy' box checked, or run deploy.yml manually (Actions → Deploy → Run workflow), to ship this change." | tee -a $GITHUB_STEP_SUMMARY
