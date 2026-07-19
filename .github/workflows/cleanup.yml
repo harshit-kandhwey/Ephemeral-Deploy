@@ -356,15 +356,61 @@ jobs:
             });
             console.log('🔁 Drain re-dispatched with ${{ steps.wait.outputs.remaining }} min remaining');
 
+  # The approval gate is a job of its own, and it deliberately does NOT join the
+  # blue-green concurrency group.
+  #
+  # A job pending environment approval HOLDS its concurrency group — GitHub marks
+  # it as occupying the lock while it waits for a reviewer, and a second run in
+  # the same group cannot even be approved until the first clears
+  # (github.com/orgs/community/discussions/17401). prod requires a reviewer, so
+  # carrying `environment:` and the group on one job meant an unattended prod
+  # drain would block every prod DEPLOY for as long as nobody clicked approve —
+  # up to the 24h drain window and beyond.
+  #
+  # Splitting the approval out keeps the prod protection rule intact (it still
+  # gates the reclaim, since drain-reclaim needs this job) while the lock is only
+  # taken for the seconds the guard-and-apply actually runs. A prod deploy is now
+  # free to proceed while a drain sits unapproved; when the reviewer finally
+  # approves, the guard re-reads SSM, sees the newer generation, and aborts. That
+  # is exactly what the guard is for.
+  drain-approve:
+    name: Approve drain (${{ github.event.inputs.environment }})
+    needs: drain-wait
+    if: needs.drain-wait.outputs.drain_now != 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: ${{ github.event.inputs.environment }}
+
+    permissions:
+      contents: read
+
+    # drain-reclaim no longer declares `environment:`, so environment-scoped
+    # `vars` do not resolve there. Carry them across as job outputs. Both are
+    # non-secret configuration (a CIDR and an email); no secret crosses here —
+    # AWS_DEPLOY_ROLE_ARN is a repository-level secret and resolves in either job.
+    outputs:
+      monitoring_allowed_cidr: ${{ steps.envvars.outputs.monitoring_allowed_cidr }}
+      alert_email: ${{ steps.envvars.outputs.alert_email }}
+
+    steps:
+      - name: Carry environment configuration to the reclaim job
+        id: envvars
+        run: |
+          echo "monitoring_allowed_cidr=${{ vars.MONITORING_ALLOWED_CIDR }}" >> $GITHUB_OUTPUT
+          echo "alert_email=${{ vars.ALERT_EMAIL }}" >> $GITHUB_OUTPUT
+          echo "✅ Drain approved for ${{ github.event.inputs.environment }} — handing off to the reclaim job."
+
   drain-reclaim:
     name: Reclaim old slot (${{ github.event.inputs.old_slot }})
-    needs: drain-wait
+    needs: [drain-wait, drain-approve]
     # drain_now is empty when the wait step was skipped (delay_minutes == 0),
     # which means "drain immediately" — so test for the explicit 'false'.
     if: needs.drain-wait.outputs.drain_now != 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: ${{ github.event.inputs.environment }}
+    # No `environment:` here on purpose — the approval already happened in
+    # drain-approve, and re-declaring it would put an approval wait back inside
+    # the concurrency group. See the comment on drain-approve.
 
     # Shared with deploy-blue-green.yml's deploy job: the guard-then-apply pair
     # must not interleave with a deploy that promotes a slot.
@@ -542,8 +588,10 @@ jobs:
           # Match the checked-out revision, not this run's SHA, so the tag
           # reflects the code actually being applied.
           TF_VAR_git_commit: ${{ github.event.inputs.terraform_ref || github.sha }}
-          TF_VAR_monitoring_allowed_cidr: ${{ vars.MONITORING_ALLOWED_CIDR }}
-          TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+          # Carried from drain-approve — this job has no `environment:`, so
+          # environment-scoped vars do not resolve here directly.
+          TF_VAR_monitoring_allowed_cidr: ${{ needs.drain-approve.outputs.monitoring_allowed_cidr }}
+          TF_VAR_alert_email: ${{ needs.drain-approve.outputs.alert_email }}
         run: |
           ENV="${{ env.TF_ENV }}"
 

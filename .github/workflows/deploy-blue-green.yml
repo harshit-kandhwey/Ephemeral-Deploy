@@ -678,8 +678,16 @@ jobs:
           # the failed slot AT CAPACITY. Only the completed apply flips it true.
           echo "reclaimed=false" >> $GITHUB_OUTPUT
 
-          if [[ "${TF_VAR_api_image}" == "placeholder" ]]; then
-            echo "::warning::No previous image recorded — skipping the rollback apply to avoid deploying a placeholder image onto the live slot. $NEW_SLOT is left UP for debugging; active_slot points at $OLD_SLOT."
+          # BOTH images, not just the API one. prev_api_image and
+          # prev_worker_image come from two independent SSM reads that each fall
+          # back to "placeholder" on their own transient error, so a real API
+          # image alongside a placeholder worker is a reachable state — and with
+          # deployment_slot pointing at the OLD slot, that apply would re-image
+          # the still-serving worker with a task definition ECS cannot pull.
+          # The deploy apply and the reclaim apply both already check the pair.
+          if [[ -z "${TF_VAR_api_image:-}" || "${TF_VAR_api_image}" == "placeholder" || \
+                -z "${TF_VAR_worker_image:-}" || "${TF_VAR_worker_image}" == "placeholder" ]]; then
+            echo "::warning::Previous images did not fully resolve (api='${TF_VAR_api_image:-}', worker='${TF_VAR_worker_image:-}') — skipping the rollback apply to avoid re-imaging the live slot with a placeholder. $NEW_SLOT is left UP for debugging; active_slot points at $OLD_SLOT."
             exit 0
           fi
 
