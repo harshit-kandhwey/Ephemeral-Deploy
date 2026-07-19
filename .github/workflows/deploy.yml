@@ -594,8 +594,19 @@ jobs:
           INTERVAL=30
           ELAPSED=0
           API_OK=false
+          SIDECARS_OK=false
+          STATUS_ROWS=""
+          FAILED_DETAIL=""
 
-          while [ $ELAPSED -lt $MAX_WAIT ]; do
+          # ONE loop covering all three services, so they share the same time
+          # budget. Polling the API to MAX_WAIT and then sampling worker/beat a
+          # single time would report a false "degraded" in the common case where
+          # the API goes healthy early and the sidecars are a few seconds behind
+          # it — the check would fire during their startup and never look again.
+          # This is the same shape as the blue-green health gate.
+          while :; do
+            # API: container health, not merely RUNNING. A task counts as RUNNING
+            # for its whole startPeriod, before /health has passed even once.
             ARNS=$(aws ecs list-tasks --cluster $CLUSTER --service-name $SERVICE --desired-status RUNNING \
               --region ${{ env.AWS_REGION }} --query 'taskArns' --output text 2>/dev/null || echo "")
             HEALTH="none"
@@ -603,10 +614,42 @@ jobs:
               HEALTH=$(aws ecs describe-tasks --cluster $CLUSTER --tasks $ARNS \
                 --region ${{ env.AWS_REGION }} --query 'tasks[].healthStatus' --output text 2>/dev/null || echo "none")
             fi
-            echo "  API task health: $HEALTH (${ELAPSED}s elapsed)"
+            API_OK=false
             if [[ "$HEALTH" != "none" && "$HEALTH" != *UNHEALTHY* && "$HEALTH" != *UNKNOWN* ]]; then
-              echo "✅ Dev API is HEALTHY"
               API_OK=true
+            fi
+
+            # Sidecars: runningCount vs desiredCount, plus the rollout state,
+            # which is what actually names the failure ("circuit breaker: tasks
+            # failed to start") when a container exits on boot. Recomputed every
+            # pass so the reported rows describe the final observation.
+            SIDECARS_OK=true
+            STATUS_ROWS=""
+            FAILED_DETAIL=""
+            SIDECAR_LOG=""
+            for svc in worker beat; do
+              read -r S_RUN S_DES S_ROLL < <(aws ecs describe-services \
+                --cluster "$CLUSTER" --services "nexusdeploy-dev-$svc" \
+                --region ${{ env.AWS_REGION }} \
+                --query 'services[0].[runningCount,desiredCount,deployments[0].rolloutState]' \
+                --output text 2>/dev/null || echo "0 1 UNKNOWN")
+              SIDECAR_LOG="$SIDECAR_LOG $svc=${S_RUN:-0}/${S_DES:-1}"
+              if [[ "$S_RUN" =~ ^[0-9]+$ && "$S_RUN" == "$S_DES" && "$S_RUN" != "0" ]]; then
+                STATUS_ROWS="$STATUS_ROWS|$svc|✅ ${S_RUN}/${S_DES}|"$'\n'
+              else
+                SIDECARS_OK=false
+                STATUS_ROWS="$STATUS_ROWS|$svc|❌ ${S_RUN:-0}/${S_DES:-1} (rollout: ${S_ROLL:-UNKNOWN})|"$'\n'
+                FAILED_DETAIL="$FAILED_DETAIL${svc}|${S_RUN:-0}/${S_DES:-1}|${S_ROLL:-UNKNOWN}"$'\n'
+              fi
+            done
+
+            echo "  api health=$HEALTH |$SIDECAR_LOG (${ELAPSED}s elapsed)"
+
+            if [[ "$API_OK" == "true" && "$SIDECARS_OK" == "true" ]]; then
+              echo "✅ Dev API HEALTHY, worker and beat at desired count"
+              break
+            fi
+            if (( ELAPSED >= MAX_WAIT )); then
               break
             fi
             sleep $INTERVAL
@@ -615,26 +658,12 @@ jobs:
 
           [[ "$API_OK" == "true" ]] || echo "⚠️  Dev API did not reach HEALTHY within ${MAX_WAIT}s — check CloudWatch logs"
 
-          # Sidecars: runningCount vs desiredCount, plus the rollout state, which
-          # is what actually names the failure ("circuit breaker: tasks failed to
-          # start") when a container exits on boot.
-          SIDECARS_OK=true
-          STATUS_ROWS=""
-          for svc in worker beat; do
-            read -r S_RUN S_DES S_ROLL < <(aws ecs describe-services \
-              --cluster "$CLUSTER" --services "nexusdeploy-dev-$svc" \
-              --region ${{ env.AWS_REGION }} \
-              --query 'services[0].[runningCount,desiredCount,deployments[0].rolloutState]' \
-              --output text 2>/dev/null || echo "0 1 UNKNOWN")
-            echo "  $svc: ${S_RUN:-0}/${S_DES:-1} rollout=${S_ROLL:-UNKNOWN}"
-            if [[ "$S_RUN" =~ ^[0-9]+$ && "$S_RUN" == "$S_DES" && "$S_RUN" != "0" ]]; then
-              STATUS_ROWS="$STATUS_ROWS|$svc|✅ ${S_RUN}/${S_DES}|"$'\n'
-            else
-              SIDECARS_OK=false
-              STATUS_ROWS="$STATUS_ROWS|$svc|❌ ${S_RUN:-0}/${S_DES:-1} (rollout: ${S_ROLL:-UNKNOWN})|"$'\n'
-              echo "::warning::dev $svc is not running (${S_RUN:-0}/${S_DES:-1}, rollout ${S_ROLL:-UNKNOWN}) — check /ecs/nexusdeploy/dev/$svc logs"
-            fi
-          done
+          # Warnings emitted once, after the loop settles — annotating on every
+          # poll would stack duplicates for a service that is merely slow.
+          while IFS='|' read -r f_svc f_counts f_roll; do
+            [[ -z "$f_svc" ]] && continue
+            echo "::warning::dev $f_svc is not running ($f_counts, rollout $f_roll) — check /ecs/nexusdeploy/dev/$f_svc logs"
+          done <<< "$FAILED_DETAIL"
 
           {
             echo "api_ok=$API_OK"
