@@ -393,10 +393,39 @@ jobs:
           OLD_SLOT="${{ github.event.inputs.old_slot }}"
           EXPECTED="${{ github.event.inputs.expected_active_slot }}"
           EXPECTED_GEN="${{ github.event.inputs.expected_generation }}"
+          TF_REF="${{ github.event.inputs.terraform_ref }}"
           ENV="${{ env.TF_ENV }}"
 
-          if [[ -z "$OLD_SLOT" ]]; then
-            echo "::error::old_slot input is required for drain_old_slot action"
+          # FAIL CLOSED on the safety inputs. Every one of them is supplied
+          # automatically by deploy-blue-green.yml; a dispatch missing any of
+          # them is either a hand-typed run or a drain scheduled by an older
+          # version of the workflow. Treating those as "proceed on whatever
+          # checks we can manage" is how a drain ends up bypassing the ABA guard
+          # and applying Terraform from an unrelated revision. There is no safe
+          # partial mode here — refuse, and let a human re-dispatch completely.
+          MISSING=""
+          [[ -z "$OLD_SLOT" ]]     && MISSING="$MISSING old_slot"
+          [[ -z "$EXPECTED" ]]     && MISSING="$MISSING expected_active_slot"
+          [[ -z "$EXPECTED_GEN" ]] && MISSING="$MISSING expected_generation"
+          [[ -z "$TF_REF" ]]       && MISSING="$MISSING terraform_ref"
+          if [[ -n "$MISSING" ]]; then
+            echo "::error::Refusing to drain — missing required safety input(s):$MISSING. These are set automatically when deploy-blue-green.yml schedules a drain; supply all of them if dispatching by hand."
+            exit 1
+          fi
+
+          # The slot names are interpolated into resource names and drive which
+          # slot Terraform scales down. Anything outside the known set is a typo
+          # or a stale convention, never something to act on.
+          for pair in "old_slot:$OLD_SLOT" "expected_active_slot:$EXPECTED"; do
+            name="${pair%%:*}"; val="${pair#*:}"
+            if [[ "$val" != "slot1" && "$val" != "slot2" ]]; then
+              echo "::error::$name must be slot1 or slot2, got: '$val'"
+              exit 1
+            fi
+          done
+
+          if [[ "$OLD_SLOT" == "$EXPECTED" ]]; then
+            echo "::error::old_slot and expected_active_slot are both '$OLD_SLOT' — this drain would scale down the slot it expects to be live. Refusing."
             exit 1
           fi
 
@@ -426,7 +455,7 @@ jobs:
             exit 0
           fi
 
-          if [[ -n "$EXPECTED" && "$ACTIVE" != "$EXPECTED" ]]; then
+          if [[ "$ACTIVE" != "$EXPECTED" ]]; then
             echo "::warning::ABORTING drain — expected active slot '$EXPECTED' but SSM says '$ACTIVE'. A newer deploy superseded this drain."
             echo "proceed=false" >> $GITHUB_OUTPUT
             exit 0
@@ -437,25 +466,32 @@ jobs:
           # checks above pass again — while the slot we were told to drain is now
           # the latest deploy's rollback target, still inside ITS 2h/24h window.
           # Draining it there would silently delete that deploy's safety net.
-          # The generation is a monotonic, non-repeating deploy identity (the
-          # promoting run's id), so comparing it closes the hole outright.
+          #
+          # The generation is the deploy-attempt epoch (the run id of the last
+          # deploy that reached its terraform apply — see deploy-blue-green.yml).
+          # It never repeats, so comparing it closes the ABA hole. It also
+          # advances on FAILED deploys, which matters here: a failed deploy still
+          # applied its own Terraform revision, so this drain's pinned revision is
+          # no longer the newest one applied and reapplying it would revert that
+          # deploy's infrastructure changes.
+          set +e
           GEN=$(aws ssm get-parameter \
             --name "/nexusdeploy/${ENV}/deployment/generation" \
             --region "${{ env.AWS_REGION }}" \
-            --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+            --query 'Parameter.Value' --output text 2>&1)
+          GEN_RC=$?
+          set -e
 
-          if [[ -n "$EXPECTED_GEN" ]]; then
-            if [[ -z "$GEN" ]]; then
-              echo "::error::expected_generation '$EXPECTED_GEN' was supplied but no generation parameter exists. Refusing to drain on an unverifiable generation."
-              exit 1
-            fi
-            if [[ "$GEN" != "$EXPECTED_GEN" ]]; then
-              echo "::warning::ABORTING drain — deployment generation is '$GEN', this drain was scheduled by generation '$EXPECTED_GEN'. A newer deploy superseded it."
-              echo "proceed=false" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-          else
-            echo "⚠️  No expected_generation supplied (manual dispatch, or a drain scheduled before generations existed) — proceeding on the slot checks alone, which cannot detect an even number of intervening promotions."
+          if [[ $GEN_RC -ne 0 ]]; then
+            echo "::error::Could not read the deployment generation from SSM (exit $GEN_RC). Refusing to drain on an unverifiable generation."
+            echo "$GEN"
+            exit 1
+          fi
+
+          if [[ "$GEN" != "$EXPECTED_GEN" ]]; then
+            echo "::warning::ABORTING drain — deployment generation is '$GEN', this drain was scheduled by generation '$EXPECTED_GEN'. A newer deploy (successful or failed) superseded it."
+            echo "proceed=false" >> $GITHUB_OUTPUT
+            exit 0
           fi
 
           echo "✅ Guard passed: active=$ACTIVE, generation=${GEN:-n/a}, draining $OLD_SLOT."
@@ -529,10 +565,20 @@ jobs:
             --query 'Parameter.Value' --output text \
             --region "${{ env.AWS_REGION }}" 2>/dev/null || echo "")
 
-          if [[ -z "$API_IMAGE" || -z "$WORKER_IMAGE" ]]; then
-            echo "::error::Could not resolve the active slot's images from SSM — refusing to apply, as Terraform would fall back to the 'placeholder' default and re-image the live slot."
-            exit 1
-          fi
+          # Empty AND the literal "placeholder" are both disqualifying. Checking
+          # only for empty misses the case that matters more: "placeholder" is
+          # the variables.tf default and an unpullable image reference, so a
+          # parameter holding it would sail through a non-empty check and this
+          # supposed capacity-only apply would replace the LIVE slot's task
+          # definitions with images ECS can never pull. Mirrors the same guard in
+          # deploy-blue-green.yml's apply.
+          for pair in "prev_api_image:$API_IMAGE" "prev_worker_image:$WORKER_IMAGE"; do
+            name="${pair%%:*}"; val="${pair#*:}"
+            if [[ -z "$val" || "$val" == "placeholder" ]]; then
+              echo "::error::$name resolved to '${val:-<empty>}' — refusing to apply. This apply is meant to change capacity only, and an unresolved image would re-image the live slot ${{ steps.guard.outputs.active_slot }} with something unpullable."
+              exit 1
+            fi
+          done
 
           export TF_VAR_api_image="$API_IMAGE"
           export TF_VAR_worker_image="$WORKER_IMAGE"
@@ -554,10 +600,16 @@ jobs:
       - name: Drain summary
         if: always()
         run: |
-          # Three distinct outcomes. Reporting "Drained" whenever the guard
-          # passed would call a failed init or apply a success, and the old slot
-          # would still be at capacity with nobody told.
-          if [[ "${{ steps.guard.outputs.proceed }}" != "true" ]]; then
+          # Four distinct outcomes, and the guard's two failure modes must not be
+          # conflated. `proceed` is empty BOTH when the guard deliberately
+          # aborted and when it exited non-zero (bad input, unreadable SSM), so
+          # testing `proceed != true` alone would report a crashed guard as a
+          # safe supersede — "left at capacity on purpose" — when in fact nothing
+          # was verified at all. Check the step outcome first.
+          if [[ "${{ steps.guard.outcome }}" == "failure" ]]; then
+            echo "## ❌ Blue-Green Drain FAILED (guard error)" >> $GITHUB_STEP_SUMMARY
+            echo "The generation guard could not establish whether this drain is still current, so nothing was touched. \`${{ github.event.inputs.old_slot }}\` is still at capacity. Check the guard step's log — a missing safety input or an unreadable SSM parameter are the usual causes." >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ steps.guard.outputs.proceed }}" != "true" ]]; then
             echo "## 🛑 Blue-Green Drain Aborted (superseded)" >> $GITHUB_STEP_SUMMARY
             echo "The slot was left at capacity on purpose — a newer deploy owns the rotation." >> $GITHUB_STEP_SUMMARY
           elif [[ "${{ steps.reclaim.outcome }}" == "success" ]]; then

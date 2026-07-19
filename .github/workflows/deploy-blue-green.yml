@@ -289,6 +289,31 @@ jobs:
             --region ${{ env.AWS_REGION }} 2>/dev/null || echo "placeholder")
           echo "worker=${PREV_WORKER:-placeholder}" >> $GITHUB_OUTPUT
 
+      # Written BEFORE the apply, not after promotion, and deliberately so.
+      #
+      # A generation that only advances on success cannot invalidate the drains
+      # that a FAILED deploy endangers. The failing case: deploy B applies a
+      # newer Terraform revision, fails its gate, and rolls back — but the
+      # rollback apply keeps every infrastructure change B's revision carried.
+      # Deploy A's drain is still pending, still sees A's generation as current,
+      # and its "capacity-only" apply runs against A's older pinned revision —
+      # quietly reverting B's infrastructure hours later.
+      #
+      # Advancing on every apply ATTEMPT closes that: any deploy that could have
+      # touched infrastructure invalidates the pending drains. The cost is that a
+      # failed deploy also aborts a healthy pending drain, leaving the old slot at
+      # capacity until someone re-runs it. That is the safe direction to fail, and
+      # cleanup.yml's summary reports it as an abort rather than a drain.
+      - name: Record deployment attempt epoch
+        run: |
+          aws ssm put-parameter \
+            --name "/nexusdeploy/${{ inputs.environment }}/deployment/generation" \
+            --value "${{ github.run_id }}" \
+            --type String \
+            --overwrite \
+            --region ${{ env.AWS_REGION }}
+          echo "🔖 Deployment attempt epoch: ${{ github.run_id }}"
+
       - name: Terraform Apply → new slot
         id: tf_apply
         timeout-minutes: 30
@@ -502,29 +527,19 @@ jobs:
             echo "❌ Promotion gate failed (health_ok=${{ steps.health.outputs.health_ok }}, init_db=${{ steps.init_db.outcome }})."
           fi
 
-      - name: Promote new slot (update SSM active_slot)
-        if: steps.gate.outputs.promote == 'true'
-        run: |
-          aws ssm put-parameter \
-            --name "/nexusdeploy/${{ inputs.environment }}/deployment/active_slot" \
-            --value "${{ steps.slot.outputs.new_slot }}" \
-            --type String \
-            --overwrite \
-            --region ${{ env.AWS_REGION }}
-
-          # Monotonic, non-repeating deploy identity. active_slot alone only ever
-          # alternates, so a drain scheduled two promotions ago sees the value it
-          # expected and wrongly concludes nothing moved. cleanup.yml compares
-          # this instead.
-          aws ssm put-parameter \
-            --name "/nexusdeploy/${{ inputs.environment }}/deployment/generation" \
-            --value "${{ github.run_id }}" \
-            --type String \
-            --overwrite \
-            --region ${{ env.AWS_REGION }}
-          echo "✅ SSM active_slot updated to ${{ steps.slot.outputs.new_slot }} (generation ${{ github.run_id }})"
-
-      - name: Store current images as 'previous' for next deploy
+      # ORDERING IS THE POINT. active_slot is the flag every other actor keys off
+      # — the next deploy picks its target from it, and cleanup.yml's reclaim
+      # reads prev_*_image to decide which images the surviving slot keeps. SSM
+      # has no multi-parameter transaction, so the writes are ordered instead:
+      # every dependency of active_slot is committed BEFORE active_slot itself.
+      #
+      # If this step fails, the job fails with active_slot still naming the old
+      # slot — which is true, because the old slot never stopped serving. The
+      # next deploy then re-targets the same slot this run was using. Had the
+      # order been reversed, a failure here would leave active_slot naming the
+      # new slot with stale prev images, and the next deploy would resolve the
+      # wrong rollback target.
+      - name: Record deployed images as 'previous' for next deploy
         if: steps.gate.outputs.promote == 'true'
         run: |
           # The images just deployed become "previous" for the next rotation.
@@ -539,6 +554,19 @@ jobs:
             --name "/nexusdeploy/${{ inputs.environment }}/deployment/prev_worker_image" \
             --value "${{ inputs.worker_image }}" \
             --type String --overwrite --region ${{ env.AWS_REGION }}
+
+      - name: Promote new slot (update SSM active_slot)
+        if: steps.gate.outputs.promote == 'true'
+        run: |
+          # LAST write of the promotion. Everything it depends on is already
+          # committed above, so this single put is the atomic cutover point.
+          aws ssm put-parameter \
+            --name "/nexusdeploy/${{ inputs.environment }}/deployment/active_slot" \
+            --value "${{ steps.slot.outputs.new_slot }}" \
+            --type String \
+            --overwrite \
+            --region ${{ env.AWS_REGION }}
+          echo "✅ SSM active_slot updated to ${{ steps.slot.outputs.new_slot }} (generation ${{ github.run_id }})"
 
       - name: Schedule old slot drain
         if: steps.gate.outputs.promote == 'true' && steps.slot.outputs.current_slot != 'none'
@@ -615,15 +643,36 @@ jobs:
           # point the active_slot back. That is why the pre-apply capacity
           # capture is gone: there is nothing to restore.
 
-          # Reset SSM first and directly: the deploy's terraform apply already
-          # wrote active_slot=$NEW_SLOT (the parameter is a Terraform resource
-          # keyed off deployment_slot, so it flips at apply time, before the
-          # health gate). If the apply below also fails, this line is what keeps
-          # the recorded active slot honest.
-          aws ssm put-parameter \
-            --name "/nexusdeploy/${{ inputs.environment }}/deployment/active_slot" \
-            --value "$OLD_SLOT" --type String --overwrite \
-            --region ${{ env.AWS_REGION }} || true
+          # Reassert active_slot=$OLD_SLOT.
+          #
+          # In the steady state this is a no-op: aws_ssm_parameter.active_slot
+          # declares `lifecycle { ignore_changes = [value] }`, so Terraform only
+          # sets the value when it CREATES the parameter — it does not flip on
+          # update — and promotion is the only thing that writes the new slot.
+          # It is not a no-op on the apply that first creates the parameter, and
+          # it costs nothing to make the recorded slot unambiguous either way.
+          #
+          # Not `|| true`. If this genuinely cannot be written, active_slot may
+          # name the failed slot, and the NEXT deploy would then read it, target
+          # the still-serving OLD slot, and redeploy over live traffic. Retry,
+          # and if it still fails say so loudly — but do not exit, because the
+          # terraform apply below is the more important half of the rollback.
+          SSM_RESTORED=false
+          for attempt in 1 2 3; do
+            if aws ssm put-parameter \
+                --name "/nexusdeploy/${{ inputs.environment }}/deployment/active_slot" \
+                --value "$OLD_SLOT" --type String --overwrite \
+                --region ${{ env.AWS_REGION }}; then
+              SSM_RESTORED=true
+              break
+            fi
+            echo "⚠️  active_slot restore attempt $attempt failed; retrying..."
+            sleep $((attempt * 5))
+          done
+          echo "ssm_restored=$SSM_RESTORED" >> $GITHUB_OUTPUT
+          if [[ "$SSM_RESTORED" != "true" ]]; then
+            echo "::error::Could not restore active_slot to $OLD_SLOT after 3 attempts. SSM may still name the FAILED slot $NEW_SLOT as active — the next deploy would then target $OLD_SLOT, which is serving live traffic. Fix this parameter by hand before deploying ${{ inputs.environment }} again."
+          fi
 
           # reclaimed=false is the honest default: every early exit below leaves
           # the failed slot AT CAPACITY. Only the completed apply flips it true.
@@ -681,10 +730,27 @@ jobs:
             echo "| Image         | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
             echo "| Health gate   | API HEALTHY + worker/beat at desired count |" >> $GITHUB_STEP_SUMMARY
           else
-            echo "## ❌ ${{ inputs.environment }} Deployment Failed - Rolled Back" >> $GITHUB_STEP_SUMMARY
+            # The heading has to agree with the table under it. "Rolled Back" is
+            # only true when a rollback both applied AND had somewhere to roll
+            # back to — a first deploy has no previous slot, and an incomplete
+            # rollback has left the failed slot running.
+            if [[ "${{ steps.slot.outputs.current_slot }}" == "none" ]]; then
+              echo "## ❌ ${{ inputs.environment }} Deployment Failed - No Rollback Target (first deploy)" >> $GITHUB_STEP_SUMMARY
+            elif [[ "${{ steps.rollback.outputs.reclaimed }}" == "true" ]]; then
+              echo "## ❌ ${{ inputs.environment }} Deployment Failed - Rolled Back" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "## ❌ ${{ inputs.environment }} Deployment Failed - ⚠️ Rollback Incomplete" >> $GITHUB_STEP_SUMMARY
+            fi
             echo "| | |" >> $GITHUB_STEP_SUMMARY
             echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-            echo "| Active slot remains | ${{ steps.slot.outputs.current_slot }} (never stopped serving) |" >> $GITHUB_STEP_SUMMARY
+            if [[ "${{ steps.slot.outputs.current_slot }}" == "none" ]]; then
+              echo "| Active slot remains | none — nothing was serving before this deploy |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| Active slot remains | ${{ steps.slot.outputs.current_slot }} (never stopped serving) |" >> $GITHUB_STEP_SUMMARY
+            fi
+            if [[ "${{ steps.rollback.outputs.ssm_restored }}" == "false" ]]; then
+              echo "| active_slot in SSM | ⚠️ **COULD NOT BE RESTORED** — verify by hand before redeploying |" >> $GITHUB_STEP_SUMMARY
+            fi
             if [[ "${{ steps.rollback.outputs.reclaimed }}" == "true" ]]; then
               echo "| Failed slot         | ${{ steps.slot.outputs.new_slot }} (scaled to 0) |" >> $GITHUB_STEP_SUMMARY
             else
