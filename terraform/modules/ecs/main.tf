@@ -211,9 +211,27 @@ resource "aws_ecs_task_definition" "beat" {
       name      = "beat"
       image     = var.worker_image
       essential = true
-      command   = ["celery", "-A", "src.celery_worker:celery", "beat", "--loglevel=info"]
+      # --schedule is NOT optional here. Celery Beat writes its schedule database
+      # to the working directory by default, and the image's WORKDIR (/app) is
+      # root-owned: Dockerfile.worker's `COPY --chown=celeryuser` sets ownership
+      # on the copied CONTENTS, not on the directory itself, so the celeryuser
+      # the container runs as cannot create a file there. Beat crashed on boot
+      # with "_gdbm.error: [Errno 13] Permission denied: 'celerybeat-schedule'"
+      # and the deployment circuit breaker retired every task.
+      #
+      # Pointing the schedule at /tmp is the right fix rather than making /app
+      # writable: the code directory SHOULD stay read-only to the runtime user,
+      # and Beat's schedule is disposable state (it tracks last-run times and is
+      # rebuilt from the beat_schedule config on boot). The worker is unaffected
+      # because it never writes to the working directory.
+      command = ["celery", "-A", "src.celery_worker:celery", "beat", "--loglevel=info", "--schedule=/tmp/celerybeat-schedule"]
 
-      environment = local.app_environment
+      # Beat shares the worker image, and that image's entrypoint runs init_db.
+      # Both services start together, so leaving this unset had the two of them
+      # racing to initialise the same database. The worker owns initialisation.
+      environment = concat(local.app_environment, [
+        { name = "SKIP_INIT_DB", value = "true" }
+      ])
 
       # Beat boots the same Flask app as the worker (create_app validates
       # SECRET_KEY/JWT in production and wires Redis/Celery), so it needs the

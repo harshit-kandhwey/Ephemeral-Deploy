@@ -320,6 +320,85 @@ resource "aws_cloudwatch_metric_alarm" "redis_memory_high" {
   tags          = var.common_tags
 }
 
+# ── ECS service task shortfall ────────────────────────────────────────────────
+# The gap this closes: a service can sit at 0 running tasks indefinitely and
+# every existing alarm stays green. CPU alarms cannot catch it — a service with
+# no tasks reports no CPU, which is missing data, not high data. That is exactly
+# how a crash-looping beat went unnoticed: green deploy, green alarms, no
+# scheduled tasks running at all.
+#
+# Metric math (desired - running) rather than a plain threshold on running,
+# because blue-green idles a whole slot at desired_count=0. A "running < 1"
+# alarm would fire permanently for the idle slot; the shortfall is 0 - 0 = 0
+# there, so only a genuine deficit alarms.
+#
+# PROD ONLY, and not by preference: RunningTaskCount/DesiredTaskCount come from
+# Container Insights, which modules/ecs enables solely on prod as a cost
+# trade-off. Dev and staging get deploy-time coverage instead (the worker/beat
+# checks in deploy.yml and deploy-blue-green.yml), which catches a service that
+# never starts but not one that dies later. To get runtime coverage in staging,
+# enable Container Insights on its cluster — this alarm then applies with no
+# change here.
+locals {
+  task_shortfall_targets = startswith(var.environment, "prod") ? {
+    for pair in setproduct(var.ecs_cluster_names, ["api", "worker", "beat"]) :
+    "${pair[0]}-${pair[1]}" => {
+      cluster = pair[0]
+      service = "${pair[0]}-${pair[1]}"
+    }
+  } : {}
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_service_tasks_missing" {
+  for_each = local.task_shortfall_targets
+
+  alarm_name          = "${each.value.service}-tasks-missing"
+  alarm_description   = "ECS service ${each.value.service} is running fewer tasks than desired (crash loop, failed deployment, or capacity starvation)"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+
+  metric_query {
+    id          = "shortfall"
+    expression  = "desired - running"
+    label       = "${each.value.service} missing tasks"
+    return_data = true
+  }
+
+  metric_query {
+    id = "desired"
+    metric {
+      metric_name = "DesiredTaskCount"
+      namespace   = "ECS/ContainerInsights"
+      period      = 60
+      stat        = "Average"
+      dimensions = {
+        ClusterName = each.value.cluster
+        ServiceName = each.value.service
+      }
+    }
+  }
+
+  metric_query {
+    id = "running"
+    metric {
+      metric_name = "RunningTaskCount"
+      namespace   = "ECS/ContainerInsights"
+      period      = 60
+      stat        = "Average"
+      dimensions = {
+        ClusterName = each.value.cluster
+        ServiceName = each.value.service
+      }
+    }
+  }
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+  tags          = var.common_tags
+}
+
 # ── CloudWatch Dashboard ──────────────────────────────────────────────────────
 resource "aws_cloudwatch_dashboard" "main" {
   dashboard_name = "${var.project}-${var.environment}"
