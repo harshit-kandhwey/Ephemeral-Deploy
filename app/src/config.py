@@ -25,6 +25,25 @@ def _get_cors_origins():
     return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
+def redact_url(url):
+    """
+    Mask the password in a URL so it is safe to log.
+
+    Redis/DB URLs carry credentials in the netloc; CloudWatch retains whatever
+    we print, so never log one raw.
+    """
+    if not url:
+        return repr(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return "<unparseable>"
+    if parsed.password:
+        netloc = parsed.netloc.replace(f":{parsed.password}@", ":***@", 1)
+        parsed = parsed._replace(netloc=netloc)
+    return urlunparse(parsed)
+
+
 def _get_ratelimit_redis_url():
     ratelimit_redis_url = os.environ.get("RATELIMIT_REDIS_URL")
     if ratelimit_redis_url:
@@ -33,12 +52,15 @@ def _get_ratelimit_redis_url():
     redis_url = os.environ.get("REDIS_URL")
     if redis_url:
         parsed = urlparse(redis_url)
-        path = (parsed.path or "/").rstrip("/") + "/1"
+        # A Redis URL's path IS the database index ("/0"), so isolating rate
+        # limits on DB 1 means REPLACING that segment, not appending to it.
+        # Appending turned "redis://host:6379/0" into "redis://host:6379/0/1",
+        # a path of "/0/1" that is not a valid database selector.
         return urlunparse(
             (
                 parsed.scheme,
                 parsed.netloc,
-                path,
+                "/1",
                 parsed.params,
                 parsed.query,
                 parsed.fragment,

@@ -5,7 +5,7 @@ from flask import Flask, jsonify
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from sqlalchemy import text
 
-from .config import config
+from .config import config, redact_url
 from .extensions import cors, db, init_celery, init_redis, jwt, limiter, migrate, swagger
 
 # ── Prometheus metrics ────────────────────────
@@ -52,6 +52,32 @@ def create_app(config_name="default"):
     migrate.init_app(app, db)
     jwt.init_app(app)
     limiter.init_app(app)
+
+    # Staging containers logged flask-limiter's "using the in-memory storage
+    # for tracking rate limits as no storage was explicitly specified" warning
+    # even though RATELIMIT_STORAGE_URI resolves to a Redis URL, and a local
+    # repro of create_app("production") never reproduced it. In-memory storage
+    # means limits are per-gunicorn-worker and reset on restart — the documented
+    # global limit would not actually be in force.
+    #
+    # ECS Exec is not enabled, so the container cannot be inspected directly.
+    # Log what it actually resolved instead, so the running task reports the
+    # answer itself. Password-redacted: CloudWatch keeps whatever we print.
+    # limiter.storage is a property guarded by `assert self._storage`, so it
+    # raises AssertionError (not AttributeError) when storage is unset — which
+    # is the normal state when rate limiting is disabled, as TestingConfig does.
+    # getattr's default only swallows AttributeError, so this needs try/except.
+    # "unset" here is itself the signal we are looking for.
+    try:
+        storage_backend = type(limiter.storage).__name__
+    except Exception:
+        storage_backend = "unset"
+
+    app.logger.info(
+        "Rate limiter storage: uri=%s backend=%s",
+        redact_url(app.config.get("RATELIMIT_STORAGE_URI")),
+        storage_backend,
+    )
 
     # CORS is scoped to the configured origin allowlist (empty by default).
     # The monitoring console is same-origin via the nginx reverse proxy, so it
