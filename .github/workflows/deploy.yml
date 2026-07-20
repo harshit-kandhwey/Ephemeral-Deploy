@@ -711,13 +711,13 @@ jobs:
           printf '%s\n' "${{ steps.health.outputs.status_rows }}" >> $GITHUB_STEP_SUMMARY
           echo "| Grafana | ${{ steps.outputs.outputs.grafana_url }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Prometheus | ${{ steps.outputs.outputs.prometheus_url }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| ⚠️ Auto-destroy in | 45 minutes |" >> $GITHUB_STEP_SUMMARY
+          echo "| ⚠️ Auto-destroy in | 30 minutes |" >> $GITHUB_STEP_SUMMARY
 
   # ─────────────────────────────────────────────
-  # POST-DEPLOY: Success → cleanup after 45 min TTL
+  # POST-DEPLOY: Success → cleanup after 30 min TTL
   # ─────────────────────────────────────────────
   cleanup-on-success:
-    name: Schedule cleanup (45 min TTL)
+    name: Schedule cleanup (30 min TTL)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: [setup, deploy-dev]
@@ -730,7 +730,7 @@ jobs:
       actions: write
 
     steps:
-      - name: Trigger cleanup after 45 minutes
+      - name: Trigger cleanup after 30 minutes
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
@@ -742,11 +742,11 @@ jobs:
                 ref: context.ref,
                 inputs: {
                   environment: 'dev',
-                  delay_minutes: '45',
-                  reason: 'Auto-cleanup: dev TTL (45 min) expired'
+                  delay_minutes: '30',
+                  reason: 'Auto-cleanup: dev TTL (30 min) expired'
                 }
               });
-              console.log('⏳ Cleanup scheduled in 45 minutes');
+              console.log('⏳ Cleanup scheduled in 30 minutes');
             } catch (err) {
               if (err.status === 422) {
                 console.warn('⚠️  cleanup.yml is disabled — skipping auto-cleanup. Enable it in GitHub → Actions to restore auto-cleanup.');
@@ -822,9 +822,9 @@ jobs:
     secrets: inherit
     with:
       environment: staging
-      drain_minutes: "120"
+      drain_minutes: "60"
       drain_ref: staging
-      drain_label: 2h
+      drain_label: 1h
       run_init_db: true
       app_changed: ${{ needs.setup.outputs.app_changed }}
       api_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}

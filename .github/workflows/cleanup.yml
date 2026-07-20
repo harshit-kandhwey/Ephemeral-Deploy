@@ -56,7 +56,7 @@ env:
 jobs:
   destroy:
     name: Destroy ${{ github.event.inputs.environment || 'dev' }}
-    # Generous: this job sleeps up to delay_minutes (45 for the dev TTL path)
+    # Generous: this job sleeps up to delay_minutes (30 for the dev TTL path)
     # BEFORE running terraform destroy, so the cap must clear the sleep + destroy.
     timeout-minutes: 90
     runs-on: ubuntu-latest
@@ -87,10 +87,10 @@ jobs:
           fi
           # This job's timeout-minutes is 90 and it must still run terraform
           # destroy + fallback cleanup + state backup after the sleep. Cap the
-          # delay at the documented 45-min dev-TTL path so a large manual value
+          # delay at the documented 30-min dev-TTL path so a large manual value
           # can't cancel the job mid-run before anything is destroyed.
-          if (( DELAY > 45 )); then
-            echo "❌ Invalid delay_minutes: exceeds the maximum destroy delay (45)"
+          if (( DELAY > 30 )); then
+            echo "❌ Invalid delay_minutes: exceeds the maximum destroy delay (30)"
             exit 1
           fi
           echo "⏳ Waiting ${DELAY} minutes before cleanup..."

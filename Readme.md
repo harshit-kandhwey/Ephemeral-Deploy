@@ -18,7 +18,7 @@
 8. [CI/CD Pipeline](#8-cicd-pipeline)
 9. [OIDC Authentication — No Stored AWS Keys](#9-oidc-authentication--no-stored-aws-keys)
 10. [Blue-Green Deployment (prod)](#10-blue-green-deployment-prod)
-11. [Auto-Cleanup — 45-Minute Dev TTL](#11-auto-cleanup--45-minute-dev-ttl)
+11. [Auto-Cleanup — 30-Minute Dev TTL](#11-auto-cleanup--30-minute-dev-ttl)
 12. [Monitoring Stack](#12-monitoring-stack)
 13. [Cost Engineering](#13-cost-engineering)
 14. [Commented-Out Features](#14-commented-out-features)
@@ -39,7 +39,7 @@
 | **Secrets Management**     | SSM Parameter Store → Secrets Manager → ECS runtime injection                         |
 | **Deployment Strategy**    | Blue-green with automated health checks, instant rollback, 24 h drain                 |
 | **Observability**          | Prometheus + Grafana on EC2 + CloudWatch alarms + CloudWatch dashboard                |
-| **Cost Engineering**       | 45-min ephemeral dev environments, Spot pricing, free-tier sizing                     |
+| **Cost Engineering**       | 30-min ephemeral dev environments, Spot pricing, free-tier sizing                     |
 | **Security Hardening**     | Non-root containers, Grype/Trivy scanning, least-privilege IAM, REJECT-only flow logs |
 
 ---
@@ -50,8 +50,8 @@
 
 ```
 feature/** ──PR──▶  ci.yml   ──▶  lint + test + scan       (no AWS touched)
-dev        ──push─▶ deploy.yml ─▶  dev environment          (auto-destroys in 45 min)
-staging    ──push─▶ deploy.yml ─▶  staging environment      (blue-green, 2h drain, manual destroy)
+dev        ──push─▶ deploy.yml ─▶  dev environment          (auto-destroys in 30 min)
+staging    ──push─▶ deploy.yml ─▶  staging environment      (blue-green, 1h drain, manual destroy)
 main       ──push─▶ deploy.yml ─▶  prod environment         (blue-green, 24h drain, manual destroy)
 archive    ── (no triggers) ──▶   history only              (never deployed)
 ```
@@ -421,7 +421,7 @@ Step 3: Delete S3 state file
          Prevents orphaned state confusing future deployments
 ```
 
-A nightly GitHub Actions cron also runs cleanup against any forgotten dev environments (useful if a dev deploy ran and the 45-min dispatch was missed).
+A nightly GitHub Actions cron also runs cleanup against any forgotten dev environments (useful if a dev deploy ran and the 30-min dispatch was missed).
 
 ---
 
@@ -515,11 +515,11 @@ The deployment controller is set to `type = "ECS"` (Terraform-managed). The alte
 
 ---
 
-## 11. Auto-Cleanup — 45-Minute Dev TTL
+## 11. Auto-Cleanup — 30-Minute Dev TTL
 
-Dev environments are designed to be thrown away. Every push to `dev` deploys a fresh environment and schedules its own destruction 45 minutes later via `cleanup.yml`.
+Dev environments are designed to be thrown away. Every push to `dev` deploys a fresh environment and schedules its own destruction 30 minutes later via `cleanup.yml`.
 
-### Why 45 minutes?
+### Why 30 minutes?
 
 That's enough time to manually test the deployment, check Grafana, and hit the API. After that, the environment costs nothing because it no longer exists. You can always push to `dev` again to spin it back up in ~8 minutes.
 
@@ -649,7 +649,7 @@ Every sizing and configuration decision is deliberate. Nothing is over-provision
 
 | Resource           | Configuration                      | Why                                                 | Cost                    |
 | ------------------ | ---------------------------------- | --------------------------------------------------- | ----------------------- |
-| ECS Fargate (dev)  | FARGATE_SPOT, 256 CPU / 512 MB     | Spot = 70% cheaper; dev tolerates interruption      | ~$0.02 per 45-min run   |
+| ECS Fargate (dev)  | FARGATE_SPOT, 256 CPU / 512 MB     | Spot = 70% cheaper; dev tolerates interruption      | ~$0.015 per 30-min run  |
 | ECS Fargate (prod) | FARGATE on-demand, same size       | On-demand required for prod reliability             | ~$0.05/hr while running |
 | RDS                | db.t3.micro, 20 GB                 | Free tier                                           | Free (750 hrs/month)    |
 | ElastiCache        | cache.t3.micro                     | Free tier                                           | Free (750 hrs/month)    |
@@ -873,7 +873,7 @@ Set `github_org` to your GitHub username and `github_repo` to your exact repo na
 git push origin dev
 ```
 
-Watch GitHub Actions: `lint → test → docker-build → terraform-validate → build → deploy-dev`. After ~8 minutes, the Grafana and API URLs appear in the Actions job summary. The environment auto-destroys in 45 minutes.
+Watch GitHub Actions: `lint → test → docker-build → terraform-validate → build → deploy-dev`. After ~8 minutes, the Grafana and API URLs appear in the Actions job summary. The environment auto-destroys in 30 minutes.
 
 ### Step 7: Deploy to prod
 
