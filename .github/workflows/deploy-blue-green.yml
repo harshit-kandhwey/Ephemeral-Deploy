@@ -125,12 +125,31 @@ jobs:
           # an empty state and trigger destructive reconciliation of live
           # resources.
           set +e
-          state_list=$(terraform state list 2>&1)
+          state_list=$(terraform state list -no-color 2>&1)
           state_rc=$?
           set -e
 
           if [[ $state_rc -ne 0 ]]; then
-            if grep -qi 'No state file was found' <<<"$state_list"; then
+            # Match the FIRST LINE exactly. A substring test anywhere in the
+            # output is too loose — a backend, lock, or auth diagnostic that
+            # happened to quote this phrase would enable the destructive
+            # reconciliation below. Equality against the WHOLE output is wrong
+            # in the other direction: terraform 1.7.0 prints the diagnostic plus
+            # three lines of advice,
+            #
+            #   No state file was found!
+            #
+            #   State management commands require a state file. Run this command
+            #   in a directory where Terraform has been run or use the -state flag
+            #   to point the command to a specific state location.
+            #
+            # so a whole-output comparison never matches and the first-deploy
+            # bug comes straight back. Anchoring to line 1 is strict without
+            # depending on the advice text. -no-color above keeps terraform from
+            # wrapping it in ANSI escapes; the sed/tr are belt-and-braces for a
+            # runner that forces color on anyway.
+            first_line=$(printf '%s\n' "$state_list" | head -1 | sed -E 's/\x1b\[[0-9;]*m//g' | tr -d '\r')
+            if [[ "$first_line" == "No state file was found!" ]]; then
               echo "🆕 No state file (post-cleanup or first deploy) — orphan reconciliation will run."
               echo "fresh=true" >> "$GITHUB_OUTPUT"
               exit 0
