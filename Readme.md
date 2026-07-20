@@ -51,8 +51,17 @@
 ```
 feature/** ──PR──▶  ci.yml   ──▶  lint + test + scan       (no AWS touched)
 dev        ──push─▶ deploy.yml ─▶  dev environment          (auto-destroys in 45 min)
-main       ──push─▶ deploy.yml ─▶  prod environment         (blue-green, manual destroy)
+staging    ──push─▶ deploy.yml ─▶  staging environment      (blue-green, 2h drain, manual destroy)
+main       ──push─▶ deploy.yml ─▶  prod environment         (blue-green, 24h drain, manual destroy)
+archive    ── (no triggers) ──▶   history only              (never deployed)
 ```
+
+`staging` mirrors prod — same provider pin, same blue-green slot rotation — but
+adds `init_db` on deploy and skips the manual approval gate.
+
+PRs into `main` merge with a **merge commit**; squash is reserved for Dependabot.
+`archive` holds the pre-squash history of the five substantive PRs that were
+squashed before that policy changed.
 
 ### High-Level Architecture
 
