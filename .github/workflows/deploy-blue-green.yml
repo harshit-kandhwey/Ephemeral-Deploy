@@ -112,11 +112,34 @@ jobs:
           # otherwise the delete step would churn live log groups every deploy.
           # Fail CLOSED: a backend/lock/auth/network error must not read as an
           # empty state and trigger destructive reconciliation of live resources.
-          if ! state_list=$(terraform state list 2>&1); then
+          # `terraform state list` exits 1 in TWO very different situations:
+          # there is no state file at all, and the backend could not be read.
+          # Treating both as fatal made a first (or post-cleanup) deploy
+          # impossible — the very case the orphan reconciliation below exists to
+          # serve. Staging failed here with "No state file was found!" on a
+          # completely clean slate.
+          #
+          # So distinguish them the same way the SSM read below does: match the
+          # one benign message explicitly, and keep failing closed on everything
+          # else. An auth/lock/network error must still abort rather than read as
+          # an empty state and trigger destructive reconciliation of live
+          # resources.
+          set +e
+          state_list=$(terraform state list 2>&1)
+          state_rc=$?
+          set -e
+
+          if [[ $state_rc -ne 0 ]]; then
+            if grep -qi 'No state file was found' <<<"$state_list"; then
+              echo "🆕 No state file (post-cleanup or first deploy) — orphan reconciliation will run."
+              echo "fresh=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
             echo "::error::'terraform state list' failed — aborting to avoid destructive reconciliation on an unknown state."
             echo "$state_list"
             exit 1
           fi
+
           if [[ -z "$state_list" ]]; then
             echo "🆕 State is empty (post-cleanup or first deploy) — orphan reconciliation will run."
             echo "fresh=true" >> "$GITHUB_OUTPUT"
