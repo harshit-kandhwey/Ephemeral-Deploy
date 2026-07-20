@@ -322,10 +322,15 @@ jobs:
           ENV: ${{ needs.setup.outputs.environment }}
           TAG: ${{ github.sha }}
         run: |
+          # scope= is load-bearing: both builds default to the same gha cache
+          # key, and with mode=max the second export overwrites the first, so
+          # api and worker evicted each other's layers on every run. ci.yml
+          # already scopes per image via its build matrix; these are the
+          # deploy-side equivalents.
           docker buildx build \
             --platform linux/amd64 \
-            --cache-from type=gha \
-            --cache-to   type=gha,mode=max \
+            --cache-from type=gha,scope=api \
+            --cache-to   type=gha,scope=api,mode=max \
             --build-arg GIT_COMMIT=$TAG \
             --tag $REGISTRY/nexusdeploy-api-$ENV:$TAG \
             --tag $REGISTRY/nexusdeploy-api-$ENV:latest \
@@ -334,8 +339,8 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             --file ./app/Dockerfile.worker \
-            --cache-from type=gha \
-            --cache-to   type=gha,mode=max \
+            --cache-from type=gha,scope=worker \
+            --cache-to   type=gha,scope=worker,mode=max \
             --tag $REGISTRY/nexusdeploy-worker-$ENV:$TAG \
             --tag $REGISTRY/nexusdeploy-worker-$ENV:latest \
             --push ./app
