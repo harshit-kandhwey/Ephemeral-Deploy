@@ -120,6 +120,44 @@ jobs:
             -backend-config="encrypt=true" \
             -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
 
+      # Prod sets deletion_protection = true. RDS rejects the delete until it
+      # is cleared, and Terraform never clears it for us — it just fails the
+      # destroy. scripts/cleanup.sh has always done this (see its RDS section);
+      # this workflow did not, so the documented prod teardown path failed on
+      # its first attempt every time and needed a manual modify-db-instance.
+      #
+      # Safe for dev/staging too: they set deletion_protection = false, so the
+      # describe returns False and this is a no-op. A missing instance (already
+      # destroyed, or a re-run) reports ABSENT rather than failing the job.
+      - name: Clear RDS deletion protection
+        env:
+          DB_IDENTIFIER: nexusdeploy-${{ env.TF_ENV }}-postgres
+        run: |
+          PROTECTED=$(aws rds describe-db-instances \
+            --db-instance-identifier "$DB_IDENTIFIER" \
+            --region "${{ env.AWS_REGION }}" \
+            --query 'DBInstances[0].DeletionProtection' \
+            --output text 2>/dev/null || echo "ABSENT")
+
+          case "$PROTECTED" in
+            True)
+              echo "🔓 Deletion protection enabled on $DB_IDENTIFIER — clearing it before destroy"
+              aws rds modify-db-instance \
+                --db-instance-identifier "$DB_IDENTIFIER" \
+                --no-deletion-protection \
+                --apply-immediately \
+                --region "${{ env.AWS_REGION }}" \
+                --no-cli-pager > /dev/null
+              echo "✅ Deletion protection cleared"
+              ;;
+            ABSENT)
+              echo "ℹ️  No RDS instance named $DB_IDENTIFIER — nothing to clear"
+              ;;
+            *)
+              echo "ℹ️  Deletion protection already off for $DB_IDENTIFIER"
+              ;;
+          esac
+
       # ── Step 1: Graceful Terraform destroy ──────────────────────────────
       - name: Terraform Destroy
         id: tf_destroy
