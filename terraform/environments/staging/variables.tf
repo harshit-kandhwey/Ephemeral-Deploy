@@ -62,6 +62,12 @@ variable "deployment_slot" {
   }
 }
 
+variable "keep_previous_slot_running" {
+  description = "Keep the inactive slot at capacity so it serves traffic until the new slot is verified healthy (blue-green overlap). The deploy apply sets true; the reclaim apply sets false to scale the drained slot to 0."
+  type        = bool
+  default     = false
+}
+
 variable "previous_api_image" {
   description = "Previous API image — kept on the inactive slot"
   type        = string

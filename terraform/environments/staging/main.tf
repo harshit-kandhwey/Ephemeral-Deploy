@@ -46,6 +46,18 @@ locals {
 
   active_slot = var.deployment_slot # "slot1" or "slot2"
 
+  # Capacity for the NON-active slot. Blue-green needs the previous slot to keep
+  # serving until the new slot is verified healthy, otherwise a single apply
+  # scales the old slot to 0 while the new one is still inside its startPeriod —
+  # an outage window with no slot serving. The deploy apply passes true (overlap);
+  # the reclaim apply (cleanup.yml, after the drain delay) passes false to
+  # actually scale the drained slot down.
+  #
+  # API and worker only. Beat is a SINGLETON — two Beat containers fire every
+  # scheduled task twice, and the overlap window is 2h (staging) / 24h (prod),
+  # so beat_desired_count stays tied to the active slot alone.
+  inactive_slot_count = var.keep_previous_slot_running ? 1 : 0
+
   common_tags = {
     Project     = local.project
     Environment = local.environment
@@ -278,8 +290,8 @@ module "ecs_slot1" {
   seed_secrets_arn              = aws_secretsmanager_secret.seed.arn
   log_retention_days            = 14
 
-  api_desired_count    = local.active_slot == "slot1" ? 1 : 0
-  worker_desired_count = local.active_slot == "slot1" ? 1 : 0
+  api_desired_count    = local.active_slot == "slot1" ? 1 : local.inactive_slot_count
+  worker_desired_count = local.active_slot == "slot1" ? 1 : local.inactive_slot_count
   beat_desired_count   = local.active_slot == "slot1" ? 1 : 0
   api_cpu              = 256
   api_memory           = 512
@@ -316,8 +328,8 @@ module "ecs_slot2" {
   seed_secrets_arn              = aws_secretsmanager_secret.seed.arn
   log_retention_days            = 14
 
-  api_desired_count    = local.active_slot == "slot2" ? 1 : 0
-  worker_desired_count = local.active_slot == "slot2" ? 1 : 0
+  api_desired_count    = local.active_slot == "slot2" ? 1 : local.inactive_slot_count
+  worker_desired_count = local.active_slot == "slot2" ? 1 : local.inactive_slot_count
   beat_desired_count   = local.active_slot == "slot2" ? 1 : 0
   api_cpu              = 256
   api_memory           = 512
