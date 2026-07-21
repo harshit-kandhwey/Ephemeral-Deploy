@@ -216,6 +216,7 @@ jobs:
 
       # ── Step 2: Fallback — tag-based nuke script ─────────────────────────
       - name: Fallback cleanup script (if Terraform failed)
+        id: fallback_cleanup
         if: steps.tf_destroy.outputs.tf_destroy_exit != '0'
         run: |
           echo "⚠️ Terraform destroy failed — running tag-based cleanup script..."
@@ -231,10 +232,16 @@ jobs:
       # Terraform, so `terraform destroy` never removed them. Left behind they
       # are orphans: the next deploy reads a stale active_slot/generation and
       # targets the wrong slot. Only staging/prod run blue-green, so only they
-      # have these parameters. Runs after the fallback so it fires whether the
-      # destroy succeeded or the tag-based script did the teardown.
+      # have these parameters. Gated on a teardown actually succeeding (the
+      # Terraform destroy OR the fallback script): if both failed, live slot
+      # resources may remain, and deleting active_slot would make the next
+      # deploy treat it as a first deploy and apply over the serving slot.
       - name: Delete deployment SSM parameters
-        if: always() && (env.TF_ENV == 'staging' || env.TF_ENV == 'prod')
+        if: >-
+          always() &&
+          (env.TF_ENV == 'staging' || env.TF_ENV == 'prod') &&
+          (steps.tf_destroy.outputs.tf_destroy_exit == '0' ||
+           steps.fallback_cleanup.outcome == 'success')
         run: |
           for name in active_slot generation prev_api_image prev_worker_image; do
             PARAM="/nexusdeploy/${{ env.TF_ENV }}/deployment/${name}"
