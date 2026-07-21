@@ -171,12 +171,13 @@ jobs:
         run: |
           echo "🔥 Starting Terraform destroy for ${{ env.TF_ENV }}..."
 
-          # dev uses a single module.ecs; staging/prod use blue-green split modules
-          # plus an active_slot SSM parameter that must be destroyed too — the
-          # state file is wiped afterwards, so anything skipped here becomes an
-          # orphan that fails the next deploy with ParameterAlreadyExists.
+          # dev uses a single module.ecs; staging/prod use blue-green split modules.
+          # The deployment/* SSM parameters (active_slot, generation, prev_*_image)
+          # are all workflow-owned now — none is a Terraform resource — so they are
+          # not targeted here. A dedicated step below deletes all four so none is
+          # left as an orphan that misdirects the next deploy.
           if [[ "${{ env.TF_ENV }}" == "staging" || "${{ env.TF_ENV }}" == "prod" ]]; then
-            ECS_TARGETS="-target=module.ecs_slot1 -target=module.ecs_slot2 -target=aws_ssm_parameter.active_slot"
+            ECS_TARGETS="-target=module.ecs_slot1 -target=module.ecs_slot2"
           else
             ECS_TARGETS="-target=module.ecs"
           fi
@@ -223,6 +224,28 @@ jobs:
             --env ${{ env.TF_ENV }} \
             --region ${{ env.AWS_REGION }} \
             --force
+
+      # ── Step 2.5: Delete workflow-owned deployment SSM parameters ────────
+      # active_slot, generation, prev_api_image and prev_worker_image under
+      # /nexusdeploy/<env>/deployment/ are written by deploy-blue-green.yml, not
+      # Terraform, so `terraform destroy` never removed them. Left behind they
+      # are orphans: the next deploy reads a stale active_slot/generation and
+      # targets the wrong slot. Only staging/prod run blue-green, so only they
+      # have these parameters. Runs after the fallback so it fires whether the
+      # destroy succeeded or the tag-based script did the teardown.
+      - name: Delete deployment SSM parameters
+        if: always() && (env.TF_ENV == 'staging' || env.TF_ENV == 'prod')
+        run: |
+          for name in active_slot generation prev_api_image prev_worker_image; do
+            PARAM="/nexusdeploy/${{ env.TF_ENV }}/deployment/${name}"
+            if aws ssm delete-parameter \
+                --name "$PARAM" \
+                --region "${{ env.AWS_REGION }}" 2>/dev/null; then
+              echo "🗑️  Deleted $PARAM"
+            else
+              echo "ℹ️  $PARAM not present — nothing to delete"
+            fi
+          done
 
       # ECR images are intentionally NOT deleted during cleanup.
       # The lifecycle policy on each repo handles image retention automatically:

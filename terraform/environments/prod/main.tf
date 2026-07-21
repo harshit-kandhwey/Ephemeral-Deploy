@@ -405,19 +405,11 @@ module "monitoring" {
   alert_email  = var.alert_email
 }
 
-# ── SSM: Store active slot for next deployment ─
-# deploy.yml reads this to know which slot is currently active
-resource "aws_ssm_parameter" "active_slot" {
-  name  = "/${local.project}/${local.environment}/deployment/active_slot"
-  type  = "String"
-  value = local.active_slot
-
-  tags = local.common_tags
-
-  lifecycle {
-    ignore_changes = [value] # deploy.yml manages this value, not Terraform
-  }
-}
+# NOTE: the /deployment/active_slot SSM parameter is intentionally NOT a
+# Terraform resource. deploy-blue-green.yml creates and updates it (alongside
+# the workflow-owned generation / prev_*_image parameters), and cleanup.yml
+# deletes all four on teardown. Keeping it out of state avoids the split
+# ownership that used to orphan the other three on `terraform destroy`.
 
 # ── Outputs ───────────────────────────────────────────────────────────────────
 output "app_secret_arn" {

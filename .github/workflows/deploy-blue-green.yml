@@ -268,7 +268,8 @@ jobs:
           adopt module.iam.aws_iam_role.ecs_task                  "nexusdeploy-$ENV-ecs-task"
           adopt module.iam.aws_iam_role.vpc_flow_log              "nexusdeploy-$ENV-vpc-flow-log"
           adopt module.vpc.aws_cloudwatch_log_group.vpc_flow_logs "/aws/vpc/flowlogs/nexusdeploy-$ENV"
-          adopt aws_ssm_parameter.active_slot                     "/nexusdeploy/$ENV/deployment/active_slot"
+          # active_slot is workflow-owned (created by the promote step below), not
+          # a Terraform resource, so there is nothing to import here.
           adopt module.ecr.aws_ecr_repository.api                 "nexusdeploy-api-$ENV"
           adopt module.ecr.aws_ecr_repository.worker              "nexusdeploy-worker-$ENV"
 
