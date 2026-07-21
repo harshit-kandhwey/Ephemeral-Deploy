@@ -20,6 +20,13 @@ def create_app(config_name="default"):
     app = Flask(__name__)
     app.config.from_object(config[config_name])
 
+    # ── Logging ───────────────────────────────
+    # Configure the root logger up front. Flask's app.logger inherits root's
+    # level (WARNING by default), so any INFO diagnostic emitted before this
+    # call is dropped — including the rate-limiter storage line below, whose
+    # whole purpose is to be read from CloudWatch. basicConfig must precede it.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
     # ── Production startup validation ─────────
     # Fail loudly at startup if required secrets are missing.
     # Better to crash immediately with a clear message than to start
@@ -122,9 +129,6 @@ def create_app(config_name="default"):
             "security": [{"Bearer": []}],
         }
         swagger.init_app(app)
-
-    # ── Logging ───────────────────────────────
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     # ── Blueprints ────────────────────────────
     from .api.v1 import api_v1
