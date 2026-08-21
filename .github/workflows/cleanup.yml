@@ -72,7 +72,7 @@ jobs:
       TF_ENV: ${{ github.event.inputs.environment || 'dev' }}
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Sleep BEFORE acquiring AWS credentials — the OIDC token is only
       # requested when configure-aws-credentials runs, so sleeping here
@@ -554,7 +554,7 @@ jobs:
       # infrastructure commit merged in the meantime.
       - name: Checkout Terraform at the deployed revision
         if: steps.guard.outputs.proceed == 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.inputs.terraform_ref || github.sha }}
 
