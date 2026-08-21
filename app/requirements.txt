@@ -8,10 +8,10 @@ flask-limiter==4.1.1
 
 # Database
 psycopg2-binary==2.9.9
-alembic==1.18.5
+alembic==1.19.1
 
 # Redis & Celery
-redis==8.0.1
+redis==8.1.0
 celery==5.6.3
 
 # AWS — keep boto3 and botocore on the same version: boto3 X.Y.Z requires
@@ -28,7 +28,7 @@ python-dotenv==1.2.2
 flasgger==0.9.7.1
 
 # Monitoring
-prometheus-client==0.25.0
+prometheus-client==0.26.0
 
 # Server
 gunicorn==26.0.0
