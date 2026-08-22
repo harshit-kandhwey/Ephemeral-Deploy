@@ -12,9 +12,7 @@ on:
         type: boolean
         default: false
 
-# One CI run per branch — a newer push cancels the in-progress run for the
-# same ref, so a burst of merges (e.g. several dependabot PRs) doesn't queue
-# a pile of stale runs waiting for hosted runners.
+# One run per ref; a newer push cancels the in-progress run.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -24,21 +22,17 @@ env:
   AWS_REGION: us-east-1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-# Least privilege by default: every job inherits read-only access to the repo.
-# The three jobs that need more declare it themselves —
-#   lint / terraform-lint : contents: write   (push auto-format commits)
+# Read-only by default; jobs needing more declare it themselves:
+#   lint / terraform-lint : contents: write        (push auto-format commits)
 #   docker-build          : security-events: write (upload the Grype SARIF)
-#   ci-summary            : actions: write    (dispatch the deploy workflow)
-# Granting write here would hand the elevated token to every job, including the
-# ones that run third-party actions over pull-request code.
+#   ci-summary            : actions: write         (dispatch deploy.yml)
+# See docs/design-decisions.md#least-privilege-workflow-permissions
 permissions:
   contents: read
 
 jobs:
-  # ─────────────────────────────────────────────
-  # JOB 0: Detect what changed
-  # Runs first so all other jobs can skip intelligently.
-  # ─────────────────────────────────────────────
+  # Gates the other jobs: app changes drive lint/test/docker-build,
+  # infra changes drive terraform-lint.
   detect-changes:
     name: Detect Changed Files
     runs-on: ubuntu-latest
@@ -50,15 +44,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          # Full history — a multi-commit push is diffed against
-          # github.event.before, which can be many commits back.
+          # Full history: the diff range below can reach many commits back.
           fetch-depth: 0
 
       - name: Detect changed paths
         id: filter
         run: |
-          # Manual dispatch = full run. Path filtering only applies to
-          # automatic triggers (push / pull_request).
+          # Manual dispatch runs every check; path filters apply to push and
+          # pull_request only.
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "app=true"   >> $GITHUB_OUTPUT
             echo "infra=true" >> $GITHUB_OUTPUT
@@ -67,12 +60,10 @@ jobs:
           fi
 
           # Diff the whole trigger range, not just the last commit:
-          #   push         → event.before..HEAD covers every commit in the push
-          #   new branch   → event.before is all zeros — fall back to HEAD~1
-          #   pull_request → HEAD is the synthetic merge commit, so HEAD~1 is
-          #                  the base branch tip and the diff is the full PR
-          # If the diff fails (e.g. force push pruned event.before), fall back
-          # to treating everything as changed — safe, just runs more jobs.
+          #   push         → event.before..HEAD, every commit in the push
+          #   new branch   → event.before is all zeros, so use HEAD~1
+          #   pull_request → HEAD is the merge commit, so HEAD~1 is the base tip
+          # On diff failure, treat everything as changed and run more jobs.
           BASE="HEAD~1"
           if [[ "${{ github.event_name }}" == "push" && \
                 "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
@@ -96,12 +87,8 @@ jobs:
             echo "⏭️  No infra changes"
           fi
 
-  # ─────────────────────────────────────────────
-  # JOB 1: Lint & Static Analysis
-  # Always runs — catches hardcoded credentials,
-  # formatting issues, and security anti-patterns
-  # regardless of what changed.
-  # ─────────────────────────────────────────────
+  # Auto-formats with black/isort and commits the result, then runs flake8,
+  # bandit and pip-audit.
   lint:
     name: Lint & Static Analysis
     runs-on: ubuntu-latest
@@ -155,18 +142,13 @@ jobs:
         continue-on-error: true
 
       - name: Run pip-audit (dependency vulnerability scan)
-        # Replaces `safety`, which now requires an authenticated account and
-        # EOFs in non-interactive CI (scanning nothing). pip-audit is free, needs
-        # no login, and reads requirements.txt directly. Non-blocking, same intent
-        # as the bandit/grype scans: visibility, not a hard gate.
+        # Reads requirements.txt directly. Non-blocking.
+        # See docs/design-decisions.md#non-blocking-security-scanners
         run: pip-audit --requirement app/requirements.txt --desc
         continue-on-error: true
 
-  # ─────────────────────────────────────────────
-  # JOB 2: Unit & Integration Tests
-  # Skipped when only infra files changed.
-  # Runs in PARALLEL with docker-build.
-  # ─────────────────────────────────────────────
+  # Runs against live postgres and redis service containers.
+  # Parallel with docker-build; both need lint to pass first.
   test:
     name: Run Tests
     runs-on: ubuntu-latest
@@ -232,9 +214,8 @@ jobs:
 
       - name: Upload coverage report
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
-        # Codecov dropped tokenless uploads — without CODECOV_TOKEN the upload is
-        # rejected ("not valid tokenless upload"). Add the repo secret to enable
-        # it; until then this is best-effort and must never fail the run.
+        # Requires the CODECOV_TOKEN repo secret; best-effort so a missing
+        # token never fails the run.
         continue-on-error: true
         with:
           files: app/coverage.xml
@@ -242,11 +223,7 @@ jobs:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 
-  # ─────────────────────────────────────────────
-  # JOB 3: Docker Build & Security Scan
-  # Skipped when only infra files changed.
-  # Runs in PARALLEL with test — no dependency between them.
-  # ─────────────────────────────────────────────
+  # Builds and scans both images. Parallel with test.
   docker-build:
     name: Docker Build & Security Scan (${{ matrix.image }})
     runs-on: ubuntu-latest
@@ -258,13 +235,9 @@ jobs:
       needs.detect-changes.outputs.app_changed == 'true' &&
       (needs.lint.result == 'success' || needs.lint.result == 'skipped')
 
-    # BOTH images are built and scanned. Only the API was, which left the image
-    # that worker and beat actually run completely unscanned — a different
-    # Dockerfile with its own package set (it installs curl, the API's does not),
-    # so the API's results never described it.
-    #
-    # fail-fast: false so a build failure in one image still lets the other
-    # report its findings; the scan is for visibility, not a gate.
+    # api and worker have separate Dockerfiles and package sets, so each needs
+    # its own scan. fail-fast: false lets one image still report when the
+    # other's build fails.
     strategy:
       fail-fast: false
       matrix:
@@ -292,8 +265,8 @@ jobs:
           push: false
           load: true
           tags: nexusdeploy-${{ matrix.image }}:${{ github.sha }}
-          # Scope the cache per image — a shared key would have the two builds
-          # overwriting each other's layers on every run.
+          # Per-image cache scope; a shared key lets the two builds overwrite
+          # each other's layers.
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
@@ -318,24 +291,19 @@ jobs:
 
       - name: Upload Grype results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4
-        # Skip when the scan never ran (e.g. docker build failed) — with a
-        # plain always() this step errored on the missing sarif_file input.
-        # !cancelled() (not always()) so a superseded run stops here too.
+        # Skip when the scan produced no SARIF (e.g. the build failed).
+        # !cancelled() rather than always() so a superseded run stops here.
         if: ${{ !cancelled() && steps.grype.outputs.sarif != '' }}
         with:
           sarif_file: ${{ steps.grype.outputs.sarif }}
-          # REQUIRED once more than one image is uploaded. Code scanning keys
-          # results on (category, ref); without distinct categories the second
-          # upload REPLACES the first, so adding the worker scan would have
-          # silently wiped every API finding instead of adding to them.
+          # Code scanning keys results on (category, ref), so each image needs
+          # its own category or the second upload replaces the first.
+          # Changing these strings resets the alert history:
+          # see docs/design-decisions.md#grype-sarif-categories
           category: grype-${{ matrix.image }}
         continue-on-error: true
 
-  # ─────────────────────────────────────────────
-  # JOB 4: Terraform Lint
-  # Skipped when only app files changed.
-  # Runs in PARALLEL with lint, test, docker-build.
-  # ─────────────────────────────────────────────
+  # Formats, lints and validates the terraform tree. Parallel with the app jobs.
   terraform-lint:
     name: Terraform Validate & Lint
     runs-on: ubuntu-latest
@@ -384,9 +352,8 @@ jobs:
           tflint --recursive
         continue-on-error: true
 
-      # Checkov is a static security scanner for IaC. Non-blocking, for the same
-      # reason Grype is: the intent is visibility, not a hard gate. A finding
-      # here should start a conversation, not fail an unrelated deploy.
+      # Static security scanner for IaC. Non-blocking.
+      # See docs/design-decisions.md#non-blocking-security-scanners
       - name: Run Checkov (IaC security scan)
         continue-on-error: true
         run: |
@@ -398,22 +365,22 @@ jobs:
             --soft-fail \
             --output cli \
             --skip-check CKV_AWS_79,CKV2_AWS_5
-          # CKV_AWS_79   IMDSv1 — the monitoring user_data already uses IMDSv2 tokens.
-          # CKV2_AWS_5   "SG is unattached" — false positive: the SGs are wired in
-          #              via variables from the environment root, which Checkov
-          #              does not follow across module boundaries.
+          # CKV_AWS_79   IMDSv1 — the monitoring user_data already uses IMDSv2.
+          # CKV2_AWS_5   "SG is unattached" — false positive; the SGs are wired
+          #              in via variables from the environment root, across a
+          #              module boundary Checkov does not follow.
 
       - name: Validate each environment
         continue-on-error: true
         env:
           TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/tf-plugin-cache
-          # Fake values so terraform plan can evaluate templatefile() and
-          # other functions that validate doesn't catch
+          # Placeholders so plan can evaluate templatefile() and the other
+          # functions validate does not reach.
           TF_VAR_api_image: "placeholder"
           TF_VAR_worker_image: "placeholder"
           TF_VAR_git_commit: "ci-validate"
-          # Required by staging/prod; dev doesn't declare it — a TF_VAR env var
-          # is silently ignored there, unlike -var which is a hard error
+          # Required by staging/prod. dev does not declare it, and an unused
+          # TF_VAR is ignored rather than an error (unlike -var).
           TF_VAR_monitoring_allowed_cidr: "[]"
         run: |
           mkdir -p "$TF_PLUGIN_CACHE_DIR"
@@ -422,8 +389,8 @@ jobs:
             cd terraform/environments/$env
             terraform init -backend=false -input=false
             terraform validate
-            # plan -refresh=false catches templatefile() and function errors
-            # that validate misses — no real AWS calls made with -backend=false
+            # Catches templatefile() and function errors validate misses;
+            # -backend=false means no AWS calls.
             terraform plan -refresh=false -input=false \
               -var-file=terraform.tfvars \
               -var="aws_region=us-east-1" \
@@ -434,22 +401,17 @@ jobs:
             cd ../../..
           done
 
-  # ─────────────────────────────────────────────
-  # SUMMARY: Gate + dispatch deploy on success
-  # Waits for all jobs — skipped jobs count as passed.
-  # ─────────────────────────────────────────────
+  # Required status check for the main ruleset. Gates on the jobs that ran
+  # (skipped counts as passed) and dispatches deploy.yml on success.
   ci-summary:
     name: CI Summary
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [detect-changes, lint, test, docker-build, terraform-lint]
-    # !cancelled(), NOT always(): with always() a run cancelled by
-    # concurrency cancel-in-progress would still reach this job, count the
-    # cancelled jobs as passed, and dispatch a deploy for the stale commit.
+    # !cancelled() rather than always(): a run cancelled by cancel-in-progress
+    # must not count its cancelled jobs as passed and deploy a stale commit.
     if: ${{ !cancelled() }}
-    # actions: write is what lets this job dispatch deploy.yml. It used to be
-    # inherited from a workflow-level grant that also handed it to every other
-    # job; it is scoped to this one job now.
+    # actions: write lets this job dispatch deploy.yml; scoped to this job only.
     permissions:
       actions: write
       contents: read
@@ -489,16 +451,12 @@ jobs:
           echo "   Infra jobs: ${{ needs.terraform-lint.result }}"
 
       - name: Trigger deploy pipeline
-        # Deploys cost real AWS money — dependency bumps should run CI but
-        # never auto-deploy. Covers all three merge styles of a Dependabot PR:
-        # squash ("chore(deps): ..." or "chore(deps-dev): ..."), merge commit
-        # ("Merge pull request ... from <org>/dependabot/..."), and direct
-        # dependabot pushes. The 'chore(deps' prefix (no closing paren) matches
-        # both the deps and deps-dev groups.
-        # An explicit [skip deploy] in the head commit message also skips it.
-        # A manual run (workflow_dispatch) never deploys UNLESS the 'deploy'
-        # input is checked in the Run-workflow UI — so the default manual run
-        # is "CI without deploy".
+        # Dependency bumps run CI but never deploy. The guard covers all three
+        # Dependabot merge styles: squash ("chore(deps" matches both the deps
+        # and deps-dev groups), merge commit ("...from <org>/dependabot/..."),
+        # and direct pushes. [skip deploy] in the head commit also skips.
+        # A manual run deploys only when the 'deploy' input is checked.
+        # See docs/design-decisions.md#deploy-dispatch-guard
         if: |
           (github.ref_name == 'dev' || github.ref_name == 'staging' || github.ref_name == 'main') &&
           (
@@ -543,7 +501,6 @@ jobs:
           )
         run: |
           echo "⏭️  CI passed but deploy was NOT dispatched — dependency bump, [skip deploy] marker, or a manual run with deploy unchecked." | tee -a $GITHUB_STEP_SUMMARY
-          # NOT "re-run": a GitHub re-run replays the original run's context, so
-          # the deploy input stays false however the box is ticked. It has to be
-          # a fresh dispatch.
+          # A re-run replays the original run's inputs, so 'deploy' stays false
+          # however the box is ticked; only a fresh dispatch changes it.
           echo "Start a NEW manual run with the 'deploy' box checked (re-running this one keeps deploy=false), or run deploy.yml manually (Actions → Deploy → Run workflow), to ship this change." | tee -a $GITHUB_STEP_SUMMARY

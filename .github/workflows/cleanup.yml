@@ -7,9 +7,9 @@ on:
         description: "Environment to target"
         required: true
         type: choice
-        # prod IS destroyable here, but the destroy job runs under the `prod`
-        # GitHub environment, so it blocks on manual approval. That gate — not
-        # this list — is the guardrail. (There is no one-command local prod destroy.)
+        # prod is destroyable here, but its destroy job runs under the `prod`
+        # GitHub environment and blocks on manual approval.
+        # See docs/design-decisions.md#prod-teardown-is-gated-not-forbidden
         options: [dev, staging, prod]
       action:
         description: "Action to perform"
@@ -56,8 +56,8 @@ env:
 jobs:
   destroy:
     name: Destroy ${{ github.event.inputs.environment || 'dev' }}
-    # Generous: this job sleeps up to delay_minutes (30 for the dev TTL path)
-    # BEFORE running terraform destroy, so the cap must clear the sleep + destroy.
+    # Sleeps up to delay_minutes (30 on the dev TTL path) before destroying,
+    # so the cap must cover the sleep plus the destroy.
     timeout-minutes: 90
     runs-on: ubuntu-latest
     # Scheduled runs are always dev destroy. Manual runs skip destroy for drain_old_slot.
@@ -74,9 +74,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      # Sleep BEFORE acquiring AWS credentials — the OIDC token is only
-      # requested when configure-aws-credentials runs, so sleeping here
-      # does not consume any credential TTL.
+      # Sleep before acquiring credentials: the OIDC token is requested by
+      # configure-aws-credentials below, so this does not consume its TTL.
       - name: Wait for TTL delay
         if: github.event.inputs.delay_minutes != '0' && github.event.inputs.delay_minutes != ''
         run: |
@@ -85,10 +84,9 @@ jobs:
             echo "❌ Invalid delay_minutes: must be a non-negative integer, got: $DELAY"
             exit 1
           fi
-          # This job's timeout-minutes is 90 and it must still run terraform
-          # destroy + fallback cleanup + state backup after the sleep. Cap the
-          # delay at the documented 30-min dev-TTL path so a large manual value
-          # can't cancel the job mid-run before anything is destroyed.
+          # Capped at the documented 30-minute dev TTL: the job must still run
+          # destroy, fallback cleanup and state backup inside its 90-minute
+          # timeout, so a larger manual value would cancel it mid-run.
           if (( DELAY > 30 )); then
             echo "❌ Invalid delay_minutes: exceeds the maximum destroy delay (30)"
             exit 1
@@ -120,15 +118,10 @@ jobs:
             -backend-config="encrypt=true" \
             -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
 
-      # Prod sets deletion_protection = true. RDS rejects the delete until it
-      # is cleared, and Terraform never clears it for us — it just fails the
-      # destroy. scripts/cleanup.sh has always done this (see its RDS section);
-      # this workflow did not, so the documented prod teardown path failed on
-      # its first attempt every time and needed a manual modify-db-instance.
-      #
-      # Safe for dev/staging too: they set deletion_protection = false, so the
-      # describe returns False and this is a no-op. A missing instance (already
-      # destroyed, or a re-run) reports ABSENT rather than failing the job.
+      # Prod sets deletion_protection = true and Terraform will not clear it —
+      # it just fails the destroy. No-op for dev/staging, which set it false;
+      # a missing instance reports ABSENT rather than failing the job.
+      # See docs/design-decisions.md#rds-deletion-protection-is-cleared-before-destroy
       - name: Clear RDS deletion protection
         env:
           DB_IDENTIFIER: nexusdeploy-${{ env.TF_ENV }}-postgres
@@ -171,11 +164,9 @@ jobs:
         run: |
           echo "🔥 Starting Terraform destroy for ${{ env.TF_ENV }}..."
 
-          # dev uses a single module.ecs; staging/prod use blue-green split modules.
-          # The deployment/* SSM parameters (active_slot, generation, prev_*_image)
-          # are all workflow-owned now — none is a Terraform resource — so they are
-          # not targeted here. A dedicated step below deletes all four so none is
-          # left as an orphan that misdirects the next deploy.
+          # dev has a single module.ecs; staging/prod use the blue-green split.
+          # The deployment/* SSM parameters are workflow-owned, not Terraform
+          # resources, so a dedicated step below deletes them.
           if [[ "${{ env.TF_ENV }}" == "staging" || "${{ env.TF_ENV }}" == "prod" ]]; then
             ECS_TARGETS="-target=module.ecs_slot1 -target=module.ecs_slot2"
           else
@@ -210,8 +201,9 @@ jobs:
             -target=aws_secretsmanager_secret_version.seed \
             2>&1 | tee destroy_output.txt
           echo "tf_destroy_exit=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
-          # NOTE: module.iam (OIDC + deploy role) and module.ecr are excluded.
-          # They are bootstrap-owned and must survive cleanup. See bootstrap.sh.
+          # module.iam (OIDC + deploy role) and module.ecr are excluded: they are
+          # bootstrap-owned and must survive cleanup.
+          # See docs/design-decisions.md#bootstrap-owned-resources-survive-cleanup
         continue-on-error: true # fallback script runs if this fails
 
       # ── Step 2: Fallback — tag-based nuke script ─────────────────────────
@@ -227,15 +219,10 @@ jobs:
             --force
 
       # ── Step 2.5: Delete workflow-owned deployment SSM parameters ────────
-      # active_slot, generation, prev_api_image and prev_worker_image under
-      # /nexusdeploy/<env>/deployment/ are written by deploy-blue-green.yml, not
-      # Terraform, so `terraform destroy` never removed them. Left behind they
-      # are orphans: the next deploy reads a stale active_slot/generation and
-      # targets the wrong slot. Only staging/prod run blue-green, so only they
-      # have these parameters. Gated on a teardown actually succeeding (the
-      # Terraform destroy OR the fallback script): if both failed, live slot
-      # resources may remain, and deleting active_slot would make the next
-      # deploy treat it as a first deploy and apply over the serving slot.
+      # Written by deploy-blue-green.yml, so terraform destroy never removes
+      # them; left behind they misdirect the next deploy. Only staging/prod run
+      # blue-green. Gated on a teardown having succeeded — see
+      # docs/design-decisions.md#deployment-ssm-parameters-are-workflow-owned
       - name: Delete deployment SSM parameters
         if: >-
           always() &&
@@ -254,19 +241,14 @@ jobs:
             fi
           done
 
-      # ECR images are intentionally NOT deleted during cleanup.
-      # The lifecycle policy on each repo handles image retention automatically:
-      #   - Keeps last 3 tagged images
-      #   - Deletes untagged images after 1 day
-      # Manually deleting images would incur unnecessary API calls and would
-      # force a full image rebuild on the next deploy even if app code unchanged.
+      # ECR images are left to each repo's lifecycle policy: keep the last 3
+      # tagged images, expire untagged ones after a day.
+      # See docs/design-decisions.md#ecr-images-are-left-to-the-lifecycle-policy
 
       # ── Step 3: Clean monitoring configs from S3 ────────────────────────
-      # Delete only THIS environment's monitoring config objects. Configs are
-      # env-scoped under monitoring/config/<env>/, so cleaning one environment
-      # never removes another's — safe when dev and staging run in parallel.
-      # The S3 bucket itself is NEVER deleted — it is bootstrap infrastructure
-      # and holds all Terraform state.
+      # Configs are env-scoped under monitoring/config/<env>/, so cleaning one
+      # environment never removes another's. The bucket itself is never deleted:
+      # it is bootstrap infrastructure and holds all Terraform state.
       - name: Clean monitoring config objects from S3
         run: |
           echo "🧹 Cleaning monitoring config objects for ${{ env.TF_ENV }} from S3..."
@@ -283,7 +265,7 @@ jobs:
               --key "$STATE_KEY" \
               --region "${{ env.AWS_REGION }}" 2>/dev/null; then
 
-            # Backup before deleting — abort if backup fails to prevent permanent loss
+            # Back up first; abort the deletion if the backup fails.
             if ! aws s3 cp \
               "s3://${{ env.TF_STATE_BUCKET }}/$STATE_KEY" \
               "s3://${{ env.TF_STATE_BUCKET }}/backups/${{ env.TF_ENV }}/terraform-$(date +%Y%m%d-%H%M%S).tfstate" \
@@ -301,10 +283,9 @@ jobs:
             echo "ℹ️ No state file found for ${{ env.TF_ENV }}"
           fi
 
-          # Remove the S3-backend state-checksum row from the lock table.
-          # Without this, a later `terraform init` fails with "checksum
-          # calculated for the state stored in S3 does not match the checksum
-          # stored in DynamoDB" because the digest outlives the deleted state.
+          # The state-checksum row outlives the deleted state and makes the next
+          # `terraform init` fail on a checksum mismatch.
+          # See docs/design-decisions.md#state-deletion-also-clears-the-dynamodb-rows
           DIGEST_ID="${{ env.TF_STATE_BUCKET }}/$STATE_KEY-md5"
           aws dynamodb delete-item \
             --table-name "${{ env.TF_LOCK_TABLE }}" \
@@ -313,12 +294,9 @@ jobs:
           && echo "✅ Stale state digest removed from ${{ env.TF_LOCK_TABLE }}" \
           || echo "ℹ️ No state digest to remove"
 
-          # Drop the lock mutex row too. Terraform releases it after a clean
-          # destroy, but a killed/timed-out destroy leaves it stale and blocks
-          # the next init/apply with "Error acquiring the state lock". Once the
-          # env is torn down it is orphaned garbage, so removing it makes cleanup
-          # self-healing. Safe here: nothing legitimately operates on an env that
-          # is being destroyed.
+          # A killed or timed-out destroy leaves the lock mutex held, blocking
+          # the next init with "Error acquiring the state lock". It is orphaned
+          # once the environment is gone.
           LOCK_ID="${{ env.TF_STATE_BUCKET }}/$STATE_KEY"
           aws dynamodb delete-item \
             --table-name "${{ env.TF_LOCK_TABLE }}" \
@@ -342,24 +320,12 @@ jobs:
           echo "| S3 Bucket | ✅ Preserved (bootstrap resource) |" >> $GITHUB_STEP_SUMMARY
           echo "| State File | 🗑️ Deleted (backed up) |" >> $GITHUB_STEP_SUMMARY
 
-  # ─────────────────────────────────────────────
-  # Blue-green: drain old slot after 24h health window
-  # Triggered by deploy-prod after new slot is promoted.
-  # Scales old ECS services to 0 — does NOT destroy infrastructure.
-  # ─────────────────────────────────────────────
-  # The wait and the reclaim are SEPARATE jobs on purpose.
+  # Blue-green drain, scheduled by deploy-blue-green.yml after a promotion.
+  # Scales the old slot's ECS services to 0; does not destroy infrastructure.
   #
-  # 1. Only the reclaim joins the blue-green-<env> concurrency group. The guard
-  #    below reads active_slot and the apply acts on it moments later; without
-  #    serialization a deploy promoting in that window would leave the guard
-  #    stale and the apply would scale the newly-LIVE slot to 0. Terraform's
-  #    DynamoDB lock does not help — it covers the apply, not the preceding SSM
-  #    read. Sharing the group with the deploy job closes that window. Putting
-  #    the multi-hour sleep in the group instead would block deploys for a day.
-  # 2. Only the reclaim carries `environment:`, which for prod means a required
-  #    reviewer. Previously the whole job did, so a 24h prod drain demanded an
-  #    approval on EVERY 300-minute chunk (five of them). Now the sleeping half
-  #    runs unattended and the approval is asked once, for the short apply.
+  # Split into three jobs (wait → approve → reclaim) so the multi-hour sleep
+  # holds neither the concurrency group nor a pending prod approval.
+  # See docs/design-decisions.md#the-drain-is-three-jobs-not-one
   drain-wait:
     name: Drain delay (${{ github.event.inputs.old_slot }})
     runs-on: ubuntu-latest
@@ -375,9 +341,8 @@ jobs:
       drain_now: ${{ steps.wait.outputs.drain_now }}
 
     steps:
-      # GitHub kills hosted-runner jobs at 360 min, so prod's 24h drain delay
-      # cannot sleep in a single job. Sleep at most 300 min per run; if delay
-      # remains, re-dispatch this workflow with the remainder and skip the drain.
+      # GitHub kills hosted jobs at 360 min, so prod's 24h delay cannot sleep in
+      # one job. Sleep at most 300 min, then re-dispatch with the remainder.
       - name: Wait for delay
         id: wait
         if: github.event.inputs.delay_minutes != '0' && github.event.inputs.delay_minutes != ''
@@ -424,23 +389,10 @@ jobs:
             });
             console.log('🔁 Drain re-dispatched with ${{ steps.wait.outputs.remaining }} min remaining');
 
-  # The approval gate is a job of its own, and it deliberately does NOT join the
-  # blue-green concurrency group.
-  #
-  # A job pending environment approval HOLDS its concurrency group — GitHub marks
-  # it as occupying the lock while it waits for a reviewer, and a second run in
-  # the same group cannot even be approved until the first clears
-  # (github.com/orgs/community/discussions/17401). prod requires a reviewer, so
-  # carrying `environment:` and the group on one job meant an unattended prod
-  # drain would block every prod DEPLOY for as long as nobody clicked approve —
-  # up to the 24h drain window and beyond.
-  #
-  # Splitting the approval out keeps the prod protection rule intact (it still
-  # gates the reclaim, since drain-reclaim needs this job) while the lock is only
-  # taken for the seconds the guard-and-apply actually runs. A prod deploy is now
-  # free to proceed while a drain sits unapproved; when the reviewer finally
-  # approves, the guard re-reads SSM, sees the newer generation, and aborts. That
-  # is exactly what the guard is for.
+  # Carries `environment:` — and so prod's required reviewer — on a job that is
+  # deliberately outside the blue-green concurrency group, because a job pending
+  # approval holds its group.
+  # See docs/design-decisions.md#the-drain-is-three-jobs-not-one
   drain-approve:
     name: Approve drain (${{ github.event.inputs.environment }})
     needs: drain-wait
@@ -452,10 +404,8 @@ jobs:
     permissions:
       contents: read
 
-    # drain-reclaim no longer declares `environment:`, so environment-scoped
-    # `vars` do not resolve there. Carry them across as job outputs. Both are
-    # non-secret configuration (a CIDR and an email); no secret crosses here —
-    # AWS_DEPLOY_ROLE_ARN is a repository-level secret and resolves in either job.
+    # drain-reclaim has no `environment:`, so environment-scoped `vars` do not
+    # resolve there. Both values carried here are non-secret configuration.
     outputs:
       monitoring_allowed_cidr: ${{ steps.envvars.outputs.monitoring_allowed_cidr }}
       alert_email: ${{ steps.envvars.outputs.alert_email }}
@@ -476,12 +426,11 @@ jobs:
     if: needs.drain-wait.outputs.drain_now != 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # No `environment:` here on purpose — the approval already happened in
-    # drain-approve, and re-declaring it would put an approval wait back inside
-    # the concurrency group. See the comment on drain-approve.
+    # No `environment:` here: drain-approve already gated this, and re-declaring
+    # it would put an approval wait back inside the concurrency group.
 
-    # Shared with deploy-blue-green.yml's deploy job: the guard-then-apply pair
-    # must not interleave with a deploy that promotes a slot.
+    # Shared with deploy-blue-green.yml's deploy job so the guard-then-apply
+    # pair cannot interleave with a deploy that promotes a slot.
     concurrency:
       group: blue-green-${{ github.event.inputs.environment }}
       cancel-in-progress: false
@@ -510,13 +459,9 @@ jobs:
           TF_REF="${{ github.event.inputs.terraform_ref }}"
           ENV="${{ env.TF_ENV }}"
 
-          # FAIL CLOSED on the safety inputs. Every one of them is supplied
-          # automatically by deploy-blue-green.yml; a dispatch missing any of
-          # them is either a hand-typed run or a drain scheduled by an older
-          # version of the workflow. Treating those as "proceed on whatever
-          # checks we can manage" is how a drain ends up bypassing the ABA guard
-          # and applying Terraform from an unrelated revision. There is no safe
-          # partial mode here — refuse, and let a human re-dispatch completely.
+          # Fail closed on the safety inputs. deploy-blue-green.yml supplies all
+          # four automatically, so a dispatch missing any is hand-typed or from
+          # an older workflow. There is no safe partial mode: refuse instead.
           MISSING=""
           [[ -z "$OLD_SLOT" ]]     && MISSING="$MISSING old_slot"
           [[ -z "$EXPECTED" ]]     && MISSING="$MISSING expected_active_slot"
@@ -527,9 +472,8 @@ jobs:
             exit 1
           fi
 
-          # The slot names are interpolated into resource names and drive which
-          # slot Terraform scales down. Anything outside the known set is a typo
-          # or a stale convention, never something to act on.
+          # Slot names are interpolated into resource names and select the slot
+          # Terraform scales down, so reject anything outside the known set.
           for pair in "old_slot:$OLD_SLOT" "expected_active_slot:$EXPECTED"; do
             name="${pair%%:*}"; val="${pair#*:}"
             if [[ "$val" != "slot1" && "$val" != "slot2" ]]; then
@@ -543,12 +487,9 @@ jobs:
             exit 1
           fi
 
-          # This job was scheduled 2h (staging) or 24h (prod) ago, and it may
-          # have been re-dispatched across several 300-min chunks since. Deploys
-          # kept happening in that window, and because slots alternate, a newer
-          # deploy can have promoted the very slot we were told to drain. Acting
-          # on the stale instruction would scale down the LIVE environment.
-          # So: re-read the truth NOW and only proceed if nothing has moved.
+          # Re-read the current state: this drain was scheduled hours ago, and
+          # because slots alternate, a later deploy may have promoted the very
+          # slot it was told to drain. Proceed only if nothing has moved.
           set +e
           ACTIVE=$(aws ssm get-parameter \
             --name "/nexusdeploy/${ENV}/deployment/active_slot" \
@@ -575,19 +516,10 @@ jobs:
             exit 0
           fi
 
-          # The slot comparison alone has an ABA hole: slots only alternate, so
-          # after TWO further promotions active_slot is back to $EXPECTED and the
-          # checks above pass again — while the slot we were told to drain is now
-          # the latest deploy's rollback target, still inside ITS 2h/24h window.
-          # Draining it there would silently delete that deploy's safety net.
-          #
-          # The generation is the deploy-attempt epoch (the run id of the last
-          # deploy that reached its terraform apply — see deploy-blue-green.yml).
-          # It never repeats, so comparing it closes the ABA hole. It also
-          # advances on FAILED deploys, which matters here: a failed deploy still
-          # applied its own Terraform revision, so this drain's pinned revision is
-          # no longer the newest one applied and reapplying it would revert that
-          # deploy's infrastructure changes.
+          # The generation is the deploy-attempt epoch and never repeats, which
+          # closes the ABA hole the slot comparison alone leaves open. It also
+          # advances on failed deploys, whose Terraform revision is still applied.
+          # See docs/design-decisions.md#the-drain-guard-closes-an-aba-hole
           set +e
           GEN=$(aws ssm get-parameter \
             --name "/nexusdeploy/${ENV}/deployment/generation" \
@@ -613,13 +545,9 @@ jobs:
           echo "generation=$GEN" >> $GITHUB_OUTPUT
           echo "proceed=true" >> $GITHUB_OUTPUT
 
-      # The drain used to be pure AWS CLI and needed no working tree; now that it
-      # reclaims capacity through Terraform, it needs the config checked out.
-      #
-      # Pinned to the SHA the deploy ran, NOT the branch. This job fires 2h/24h
-      # later, so a default checkout would resolve whatever the branch points at
-      # by then and the "capacity-only" apply would quietly ship every unrelated
-      # infrastructure commit merged in the meantime.
+      # Pinned to the SHA the deploy ran, not the branch: this job fires hours
+      # later, and a branch checkout would ship every unrelated infrastructure
+      # commit merged since.
       - name: Checkout Terraform at the deployed revision
         if: steps.guard.outputs.proceed == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -650,28 +578,22 @@ jobs:
         working-directory: terraform/environments/${{ env.TF_ENV }}
         env:
           TF_VAR_deployment_slot: ${{ steps.guard.outputs.active_slot }}
-          # The whole point of the drain: drop the overlap the deploy put in
-          # place, so the inactive slot finally goes to desired_count 0.
+          # Drops the overlap the deploy put in place, taking the inactive slot
+          # to desired_count 0.
           TF_VAR_keep_previous_slot_running: "false"
-          # Match the checked-out revision, not this run's SHA, so the tag
-          # reflects the code actually being applied.
+          # The checked-out revision, not this run's SHA, so the tag reflects
+          # the code being applied.
           TF_VAR_git_commit: ${{ github.event.inputs.terraform_ref || github.sha }}
-          # Carried from drain-approve — this job has no `environment:`, so
-          # environment-scoped vars do not resolve here directly.
+          # Carried from drain-approve; this job has no `environment:`.
           TF_VAR_monitoring_allowed_cidr: ${{ needs.drain-approve.outputs.monitoring_allowed_cidr }}
           TF_VAR_alert_email: ${{ needs.drain-approve.outputs.alert_email }}
         run: |
           ENV="${{ env.TF_ENV }}"
 
-          # desired_count is NOT in the ECS module's ignore_changes, so Terraform
-          # is authoritative over capacity. The old `aws ecs update-service
-          # --desired-count 0` drain was therefore drift: it worked for minutes,
-          # then the next deploy's apply put the drained slot straight back to 1.
-          # Reclaiming through an apply is the only durable form of this step.
-          #
-          # SSM prev_*_image holds the images running on the ACTIVE slot (the
-          # deploy writes them there after promotion), so feeding them back keeps
-          # this apply a capacity-only change and never re-images a live slot.
+          # Terraform is authoritative over desired_count, so capacity has to be
+          # reclaimed by an apply. prev_*_image holds the ACTIVE slot's images,
+          # so feeding them back keeps this a capacity-only change.
+          # See docs/design-decisions.md#the-drain-reclaims-capacity-through-terraform
           API_IMAGE=$(aws ssm get-parameter \
             --name "/nexusdeploy/${ENV}/deployment/prev_api_image" \
             --query 'Parameter.Value' --output text \
@@ -681,13 +603,10 @@ jobs:
             --query 'Parameter.Value' --output text \
             --region "${{ env.AWS_REGION }}" 2>/dev/null || echo "")
 
-          # Empty AND the literal "placeholder" are both disqualifying. Checking
-          # only for empty misses the case that matters more: "placeholder" is
-          # the variables.tf default and an unpullable image reference, so a
-          # parameter holding it would sail through a non-empty check and this
-          # supposed capacity-only apply would replace the LIVE slot's task
-          # definitions with images ECS can never pull. Mirrors the same guard in
-          # deploy-blue-green.yml's apply.
+          # Empty and the literal "placeholder" are both disqualifying:
+          # "placeholder" is the variables.tf default and an unpullable
+          # reference, so an emptiness check alone would let it re-image the
+          # live slot. Mirrors the guard in deploy-blue-green.yml's apply.
           for pair in "prev_api_image:$API_IMAGE" "prev_worker_image:$WORKER_IMAGE"; do
             name="${pair%%:*}"; val="${pair#*:}"
             if [[ -z "$val" || "$val" == "placeholder" ]]; then
@@ -716,12 +635,9 @@ jobs:
       - name: Drain summary
         if: always()
         run: |
-          # Four distinct outcomes, and the guard's two failure modes must not be
-          # conflated. `proceed` is empty BOTH when the guard deliberately
-          # aborted and when it exited non-zero (bad input, unreadable SSM), so
-          # testing `proceed != true` alone would report a crashed guard as a
-          # safe supersede — "left at capacity on purpose" — when in fact nothing
-          # was verified at all. Check the step outcome first.
+          # `proceed` is empty both when the guard deliberately aborted and when
+          # it errored, so check the step outcome first — otherwise a crashed
+          # guard reports as a safe supersede.
           if [[ "${{ steps.guard.outcome }}" == "failure" ]]; then
             echo "## ❌ Blue-Green Drain FAILED (guard error)" >> $GITHUB_STEP_SUMMARY
             echo "The generation guard could not establish whether this drain is still current, so nothing was touched. \`${{ github.event.inputs.old_slot }}\` is still at capacity. Check the guard step's log — a missing safety input or an unreadable SSM parameter are the usual causes." >> $GITHUB_STEP_SUMMARY
