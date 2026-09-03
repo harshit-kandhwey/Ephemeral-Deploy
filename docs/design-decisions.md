@@ -173,6 +173,31 @@ for staging, 24 hours for prod.
 The old slot is kept at capacity for that window so a rollback is an SSM write
 and a capacity change, not a rebuild.
 
+### The old slot stays at capacity through the apply
+
+The apply that stands up the new slot also holds the old slot at capacity
+(`keep_previous_slot_running`), so it keeps serving while the new slot boots
+and health-checks. Without the overlap, a single apply would scale the old
+slot to 0 while the new one is still inside its startPeriod — a real outage
+window — and a rollback would then have to resurrect capacity Terraform
+believes should already be 0.
+
+Held `false` only on a first deploy: there is no previous slot, and the
+standby slot's image is still the `variables.tf` placeholder default, so
+overlapping it would ask ECS to run a task definition it can never pull.
+
+The overlap is why the deploy apply, and the rollback apply below it, both
+refuse to run when `prev_*_image` hasn't resolved to a real value: the old
+slot is *live* for the whole apply, so an unresolved image would replace its
+serving task definitions rather than merely fail to add a new one.
+
+### `init_db` failure blocks promotion
+
+A migration task that exits non-zero fails the promotion gate, the same as a
+failed health check. Both fail the same way for the same reason: promoting a
+slot with a broken schema or a service that can't reach its dependencies
+ships a deploy that looks green while serving requests badly.
+
 ### Fail-closed state reads
 
 Two reads decide destructive behaviour, and both fail closed.
@@ -280,6 +305,56 @@ Both empty and the literal `placeholder` are disqualifying: `placeholder` is the
 `variables.tf` default and an unpullable reference, so an emptiness check alone
 would let it through and the apply would replace the live slot's task
 definitions with images ECS can never pull.
+
+---
+
+## Dev deploy
+
+### Dev orphan reconciliation is best-effort
+
+Before each apply, a step deletes AWS resources that survive a failed cleanup
+but never made it into Terraform state (log groups, pending-deletion secrets,
+the monitoring IAM role) — Terraform cannot create something that already
+exists under a different identity. A second step then imports whatever that
+step left behind (or never touches, e.g. IAM roles and ECR repos) so the
+apply doesn't fail with "already exists" either.
+
+Both steps run unconditionally (`continue-on-error: true`), unlike the
+blue-green fail-closed reads above. Dev has no equivalent guard because
+getting it wrong costs much less: dev auto-destroys in 30 minutes, so a bad
+reconciliation degrades one disposable environment rather than a long-lived
+staging/prod slot carrying real traffic.
+
+### `init_db` runs as a one-shot, non-blocking task
+
+`init_db.py` creates the least-privilege `nexusapp` DB user and runs
+`db.create_all()`. It runs as a standalone ECS Fargate task — the worker's
+task definition with its command overridden — inside the VPC, so it reaches
+private RDS the same way the app does. It is idempotent, so re-running it on
+every deploy is safe and simpler than tracking whether it already ran.
+`continue-on-error: true` because a failed init shouldn't block a deploy
+whose schema is already in place from a prior run.
+
+### Dev health gate covers all three services
+
+The health gate is a single loop polling API, worker and beat together so
+they share one time budget. Polling the API to its full timeout and then
+sampling worker/beat once would false-positive as "degraded" whenever the
+sidecars are still a few seconds behind a fast-healthy API — the one-shot
+sample would land during their normal startup window. The blue-green health
+gate uses the same shape.
+
+Checking worker and beat matters: an earlier version checked only the API,
+which let beat crash-loop on every deploy (it could not write its schedule
+file into the root-owned `/app`) without the deploy ever reporting failure.
+Neither container defines a health check, so both are gated on
+`runningCount == desiredCount` instead — enough to catch a service that never
+starts, though not a finer-grained failure.
+
+The gate is deliberately non-blocking: failing the deploy job would trigger
+`cleanup-on-failure`'s immediate teardown, destroying the environment before
+anyone can look at it. It reports loudly instead, via a per-service status
+row in the job summary.
 
 ---
 

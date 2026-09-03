@@ -1,9 +1,8 @@
 name: Deploy
 
 on:
-  # Triggered explicitly by ci.yml on successful push to dev/main.
-  # This replaces the workflow_run trigger which was unreliable.
-  # Chain: push → ci.yml passes → dispatches deploy.yml → deploy dispatches cleanup.yml
+  # Dispatched via the GitHub API by ci.yml (never workflow_run — see
+  # docs/design-decisions.md#deploy-dispatch-guard), or manually.
   workflow_dispatch:
     inputs:
       environment:
@@ -20,7 +19,7 @@ on:
       app_changed:
         description: "Whether app code changed (passed from CI)"
         required: false
-        default: "false" # default false — CI passes the real value; manual triggers skip build if images exist
+        default: "false" # CI always passes the real value; manual runs skip the build when ECR already has images
 
 concurrency:
   group: deploy-${{ github.ref_name }}
@@ -38,9 +37,6 @@ env:
   TF_LOCK_TABLE: nexusdeploy-terraform-locks
 
 jobs:
-  # ─────────────────────────────────────────────
-  # Determine context
-  # ─────────────────────────────────────────────
   setup:
     name: Setup Context
     runs-on: ubuntu-latest
@@ -74,8 +70,6 @@ jobs:
       - name: Determine context
         id: ctx
         run: |
-          # deploy.yml is only triggered via workflow_dispatch
-          # (either from ci.yml on push, or manually)
           echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
           echo "tf_action=${{ github.event.inputs.action }}"        >> $GITHUB_OUTPUT
           echo "📦 Environment: ${{ github.event.inputs.environment }}"
@@ -84,11 +78,8 @@ jobs:
       - name: Detect changed files
         id: changed
         run: |
-          # Decision logic:
-          #   app_changed=true  → build image
-          #   app_changed=false → check ECR
-          #     ECR empty       → build image
-          #     ECR has images  → skip build
+          # An empty ECR forces a build even when app_changed is false — there
+          # is no existing image to fall back to.
           APP_CHANGED="${{ github.event.inputs.app_changed }}"
           ENV="${{ github.event.inputs.environment }}"
 
@@ -115,8 +106,8 @@ jobs:
 
       - name: Get current image URIs (infra-only deploy)
         id: current_images
-        # Only runs when app unchanged AND ECR has images (detect step guarantees this).
-        # Simply fetches the most recently pushed image URI for Terraform to use.
+        # Runs only when unchanged with images already in ECR (guaranteed by the
+        # detect step); fetches the most recent tag for Terraform to reuse.
         if: steps.changed.outputs.app_changed == 'false'
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -143,18 +134,14 @@ jobs:
           echo "worker_image=$REGISTRY/nexusdeploy-worker-$ENV:$WORKER_IMAGE" >> $GITHUB_OUTPUT
           echo "ℹ️  Using existing images: api=$API_IMAGE worker=$WORKER_IMAGE"
 
-  # ─────────────────────────────────────────────
-  # Phase 1a: Provision ECR repositories
-  # Runs in parallel with image build.
-  # Must complete before images can be pushed.
-  # ─────────────────────────────────────────────
+  # Runs in parallel with the image build; push-image waits on this completing.
   ecr-provision:
     name: Provision ECR (${{ needs.setup.outputs.environment }})
     runs-on: ubuntu-latest
     timeout-minutes: 40
     needs: setup
-    # Always runs — ecr-check step inside skips terraform apply if repos already exist.
-    # This ensures repos are created even on infra-only pushes where repos may be missing.
+    # Always runs; ecr-check below skips the apply once repos exist, so this
+    # also covers infra-only pushes where they're still missing.
     if: always() && needs.setup.result == 'success'
     environment: ${{ needs.setup.outputs.environment }}
 
@@ -216,8 +203,7 @@ jobs:
           fi
 
       - name: Terraform Apply — ECR only
-        # Only runs when repos don't exist yet (first deploy or after full teardown).
-        # Skipped when repos already exist — avoids redundant Terraform runs.
+        # First deploy or post-teardown only — skipped once the repos exist.
         if: steps.ecr-check.outputs.repos_exist == 'false'
         timeout-minutes: 30
         working-directory: terraform/environments/${{ needs.setup.outputs.environment }}
@@ -225,8 +211,8 @@ jobs:
           TF_VAR_api_image: "placeholder"
           TF_VAR_worker_image: "placeholder"
           TF_VAR_git_commit: ${{ github.sha }}
-          # Required by staging/prod (no default in variables.tf); silently ignored by dev.
-          # Even with -target=module.ecr, Terraform evaluates the whole config.
+          # Required by staging/prod (no default in variables.tf); Terraform
+          # evaluates the whole config even with -target=module.ecr.
           TF_VAR_monitoring_allowed_cidr: "[]"
         run: |
           terraform apply \
@@ -237,8 +223,7 @@ jobs:
           echo "✅ ECR repositories provisioned"
 
       - name: Ensure ECR lifecycle policies exist
-        # Lifecycle policies may have been deleted manually or by a failed cleanup.
-        # Create them via AWS CLI if missing — idempotent, safe to run every time.
+        # Recreates a policy if it was deleted manually or by a failed cleanup; idempotent.
         run: |
           ENV="${{ needs.setup.outputs.environment }}"
           REGION="${{ env.AWS_REGION }}"
@@ -269,14 +254,8 @@ jobs:
         id: ecr-login
         uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2
 
-  # Phase 1b removed — build-image was redundant.
-  # push-image builds and pushes in one step using GHA cache.
 
-  # ─────────────────────────────────────────────
-  # Phase 2: Push images to ECR
-  # Waits for BOTH ECR to exist AND images to be built.
-  # ECR repos guaranteed to exist at this point.
-  # ─────────────────────────────────────────────
+  # Needs ecr-provision to finish so the repos exist before pushing.
   push-image:
     name: Push Images (${{ needs.setup.outputs.environment }})
     runs-on: ubuntu-latest
@@ -348,10 +327,7 @@ jobs:
           echo "api_image=$REGISTRY/nexusdeploy-api-$ENV:$TAG"       >> $GITHUB_OUTPUT
           echo "worker_image=$REGISTRY/nexusdeploy-worker-$ENV:$TAG" >> $GITHUB_OUTPUT
 
-  # ─────────────────────────────────────────────
-  # DEV DEPLOYMENT (branch: dev)
-  # Straightforward: plan → apply → schedule cleanup
-  # ─────────────────────────────────────────────
+  # dev is single-slot: apply, then schedule its 30-minute TTL cleanup.
   deploy-dev:
     name: Deploy → dev
     runs-on: ubuntu-latest
@@ -399,16 +375,14 @@ jobs:
             -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
 
       - name: Delete orphaned resources (prevents EntityAlreadyExists / ResourceAlreadyExistsException)
-        # Some resources survive failed cleanups but aren't in Terraform state.
-        # Terraform cannot create them if they already exist — delete them so
-        # Terraform creates fresh. Import blocks handle resources that ALWAYS survive.
+        # See docs/design-decisions.md#dev-orphan-reconciliation-is-best-effort
         continue-on-error: true
         run: |
           ENV="${{ needs.setup.outputs.environment }}"
           REGION="${{ env.AWS_REGION }}"
           PROJECT="nexusdeploy"
 
-          # ── CloudWatch Log Groups ──────────────────────────────────────────
+          # CloudWatch log groups
           for lg in \
             "/ecs/$PROJECT/$ENV/api" \
             "/ecs/$PROJECT/$ENV/worker" \
@@ -422,8 +396,7 @@ jobs:
             fi
           done
 
-          # ── Secrets Manager ───────────────────────────────────────────────
-          # Secrets may be in pending-deletion state from a previous failed cleanup.
+          # Secrets Manager — may be pending deletion from a previous failed cleanup.
           for secret_id in "$PROJECT/$ENV/app-secrets" "$PROJECT/$ENV/init-secrets" "$PROJECT/$ENV/seed-secrets"; do
             SECRET_STATE=$(aws secretsmanager describe-secret \
               --secret-id "$secret_id" --region "$REGION" \
@@ -441,7 +414,8 @@ jobs:
           # monitoring module creates these internally but they survive cleanup
           # because module.monitoring is targeted in destroy. Delete so Terraform
           # can recreate them fresh on next deploy.
-          # ── Monitoring IAM role + instance profile ────────────────────────
+          # Monitoring IAM role + instance profile — module.monitoring is targeted
+          # in destroy, so these survive cleanup; delete so Terraform recreates them.
           MONITORING_ROLE="$PROJECT-$ENV-monitoring-ec2"
           MONITORING_PROFILE="$PROJECT-$ENV-monitoring"
 
@@ -466,14 +440,11 @@ jobs:
           echo "✅ Orphaned resource cleanup complete"
 
       - name: Adopt orphaned Terraform resources
-        # If a previous deploy failed mid-way and cleanup didn't run, AWS
-        # resources can exist without being in Terraform state. The next apply
-        # then fails with "already exists". This step imports each resource only
-        # when it exists in AWS but is absent from state — both "not in AWS" and
-        # "already in state" cases are silenced with || true so a clean first
-        # deploy or a replay of a successful one both pass without errors.
-        # TF_VAR_* placeholders are required so Terraform can parse the config
-        # during import (these vars have no defaults in the module).
+        # Imports each resource only when it exists in AWS but is absent from
+        # state; || true covers both "not in AWS" and "already in state" so a
+        # clean deploy or a replay both pass. TF_VAR_* placeholders let Terraform
+        # parse the config during import (no defaults in the module).
+        # See docs/design-decisions.md#dev-orphan-reconciliation-is-best-effort
         working-directory: terraform/environments/dev
         env:
           TF_VAR_api_image: "placeholder"
@@ -520,9 +491,7 @@ jobs:
         run: terraform apply -input=false -var-file=terraform.tfvars -auto-approve
 
       - name: Run database init (ECS one-off task inside VPC)
-        # Runs init_db.py as ECS task inside VPC — can reach private RDS.
-        # Creates NexusAppUser + schema. Idempotent — safe on every deploy.
-        # continue-on-error: init_db failure should not block deployment.
+        # See docs/design-decisions.md#init-db-runs-as-a-one-shot-non-blocking-task
         continue-on-error: true
         working-directory: terraform/environments/dev
         run: |
@@ -573,24 +542,8 @@ jobs:
 
       - name: Verify service health (dev)
         id: health
-        # Dev is single-slot, so there is no promotion to gate — this is a light
-        # post-deploy check that surfaces a broken deploy in the logs. Especially
-        # useful when validating infra changes here (e.g. Redis/ElastiCache): if
-        # the API cannot reach its dependencies, /health fails and the tasks
-        # never reach HEALTHY.
-        #
-        # Deliberately still non-blocking: a failed deploy job triggers the
-        # immediate cleanup-on-failure teardown, which would destroy the very
-        # environment you need in order to debug. It reports loudly instead —
-        # see the summary step, which now renders a per-service status row.
-        #
-        # Worker and beat are checked too. They were not, and that hid a real
-        # bug: beat crash-looped on boot (it could not write celerybeat-schedule
-        # into the root-owned /app) until the circuit breaker retired it, while
-        # the deploy still reported success because only the API was inspected.
-        # Neither defines a container health check, so they can only be gated on
-        # runningCount == desiredCount — but that is enough to catch a service
-        # that never starts.
+        # Non-blocking: reports API + worker + beat status without gating the
+        # deploy. See docs/design-decisions.md#dev-health-gate-covers-all-three-services
         continue-on-error: true
         run: |
           CLUSTER="nexusdeploy-dev"
@@ -603,12 +556,9 @@ jobs:
           STATUS_ROWS=""
           FAILED_DETAIL=""
 
-          # ONE loop covering all three services, so they share the same time
-          # budget. Polling the API to MAX_WAIT and then sampling worker/beat a
-          # single time would report a false "degraded" in the common case where
-          # the API goes healthy early and the sidecars are a few seconds behind
-          # it — the check would fire during their startup and never look again.
-          # This is the same shape as the blue-green health gate.
+          # One loop for all three services so they share the same time budget —
+          # see the anchor above for why a single API-then-sidecars pass would
+          # false-positive on a "degraded" reading.
           while :; do
             # API: container health, not merely RUNNING. A task counts as RUNNING
             # for its whole startPeriod, before /health has passed even once.
@@ -624,10 +574,9 @@ jobs:
               API_OK=true
             fi
 
-            # Sidecars: runningCount vs desiredCount, plus the rollout state,
-            # which is what actually names the failure ("circuit breaker: tasks
-            # failed to start") when a container exits on boot. Recomputed every
-            # pass so the reported rows describe the final observation.
+            # Sidecars: runningCount vs desiredCount plus rolloutState, which
+            # names the failure when a container exits on boot. Recomputed each
+            # pass so the reported rows reflect the final observation.
             SIDECARS_OK=true
             STATUS_ROWS=""
             FAILED_DETAIL=""
@@ -694,9 +643,8 @@ jobs:
       - name: Deployment summary
         continue-on-error: true # Non-blocking — summary failure should not fail the deploy
         run: |
-          # "Complete" is not the same as "working". Terraform applying cleanly
-          # while a service never starts is exactly what happened with beat, so
-          # the heading reflects the observed service state, not just the apply.
+          # "Complete" is not "working" — the heading reflects observed service
+          # state, not just the apply outcome (see the health-gate anchor above).
           if [[ "${{ steps.health.outputs.api_ok }}" == "true" \
                 && "${{ steps.health.outputs.sidecars_ok }}" == "true" ]]; then
             echo "## ✅ Dev Deployment Complete" >> $GITHUB_STEP_SUMMARY
@@ -713,9 +661,6 @@ jobs:
           echo "| Prometheus | ${{ steps.outputs.outputs.prometheus_url }} |" >> $GITHUB_STEP_SUMMARY
           echo "| ⚠️ Auto-destroy in | 30 minutes |" >> $GITHUB_STEP_SUMMARY
 
-  # ─────────────────────────────────────────────
-  # POST-DEPLOY: Success → cleanup after 30 min TTL
-  # ─────────────────────────────────────────────
   cleanup-on-success:
     name: Schedule cleanup (30 min TTL)
     runs-on: ubuntu-latest
@@ -755,9 +700,6 @@ jobs:
               }
             }
 
-  # ─────────────────────────────────────────────
-  # POST-DEPLOY: Failure → cleanup immediately
-  # ─────────────────────────────────────────────
   cleanup-on-failure:
     name: Cleanup on failure (immediate)
     runs-on: ubuntu-latest
@@ -797,14 +739,10 @@ jobs:
               }
             }
 
-  # ─────────────────────────────────────────────
-  # STAGING & PROD — Blue-Green (reusable workflow)
-  #
-  # The full slot-rotation flow lives in deploy-blue-green.yml; these two callers
-  # differ only by environment, drain timing/ref, and whether init_db runs. The
-  # resolved image inputs use the same fallback as dev — the freshly pushed image
+  # The full slot-rotation flow lives in deploy-blue-green.yml; these two
+  # callers differ only by environment, drain timing/ref, and whether init_db
+  # runs. Image inputs use the same fallback as dev: the freshly pushed image
   # on an app change, otherwise the image already running (infra-only deploy).
-  # ─────────────────────────────────────────────
   deploy-staging:
     name: Deploy → staging (blue-green)
     needs: [setup, ecr-provision, push-image]
