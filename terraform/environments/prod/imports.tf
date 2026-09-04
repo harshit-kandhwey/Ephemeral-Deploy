@@ -1,34 +1,19 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# imports.tf — Adopt bootstrap-created resources into Terraform state
+# Adopts bootstrap-created resources into Terraform state. See
+# docs/design-decisions.md#bootstrap-owns-the-deploy-role-identity. Terraform
+# import block `id` values must be literal strings, not expressions — the
+# account ID below is hardcoded for that reason, not by oversight.
 #
-# The GitHub OIDC provider and deploy IAM role are owned by bootstrap.sh.
-# Bootstrap is the source of truth for their permissions — Terraform imports
-# them into state so it can reference them, but never modifies them.
-#
-# lifecycle { ignore_changes = all } in modules/iam/main.tf ensures Terraform
-# will never overwrite what bootstrap created, even if the config differs.
-#
-# How it works (Terraform 1.5+):
-#   First apply  → imports existing resource into state, no changes made
-#   Subsequent   → resource already in state, import block silently ignored
-#
-# NOTE: import block `id` values must be literal strings — expressions are
-# not supported. Account ID 415838720130 is hardcoded intentionally.
-# ─────────────────────────────────────────────────────────────────────────────
+# No OIDC provider import here: create_oidc_provider = false in prod, so the
+# resource has count = 0 and cannot be imported. dev creates and owns it
+# (create_oidc_provider = true); reference it via var.oidc_provider_arn if
+# the IAM module's trust policy needs it.
 
-# GitHub OIDC provider: create_oidc_provider = false in prod, so the resource
-# has count = 0 and cannot be imported here. The provider is created by dev env
-# (create_oidc_provider = true) and shared — reference it via var.oidc_provider_arn
-# if the IAM module trust policy needs it.
 
-# GitHub Actions deploy IAM role — owned by bootstrap.sh, shared
 import {
   to = module.iam.aws_iam_role.github_actions_deploy
   id = "nexusdeploy-github-actions-deploy"
 }
 
-# Inline policies — split into two to stay under 10240 char limit per policy
-# Same policies as dev; these are shared bootstrap-owned resources
 import {
   to = module.iam.aws_iam_role_policy.github_actions_deploy
   id = "nexusdeploy-github-actions-deploy:nexusdeploy-github-actions-deploy-1"
@@ -39,8 +24,7 @@ import {
   id = "nexusdeploy-github-actions-deploy:nexusdeploy-github-actions-deploy-2"
 }
 
-# ECR repositories are managed by the ecr-provision job — NO import blocks here.
-# Import blocks hard-fail when the remote object doesn't exist, and ecr-provision's
-# targeted apply only runs when the repos are missing — exactly when the import
-# would fail. The repos-exist-but-state-wiped case is handled by the tolerant
-# adopt() step (terraform import || true) in deploy.yml instead.
+# ECR is deliberately NOT imported here: a missing repo would fail this
+# import outright, whereas ecr-provision's own `terraform apply
+# -target=module.ecr` creates it; deploy.yml's tolerant `adopt()` (import ||
+# true) handles the case where the repo exists but state was wiped.

@@ -1,7 +1,4 @@
-# ─────────────────────────────────────────────
-# Dev Environment - Cost-optimized, short-lived
-# Branch: dev → auto-destroys after 30 minutes
-# ─────────────────────────────────────────────
+# Cost-optimized, short-lived: branch dev auto-destroys after 30 minutes.
 
 terraform {
   required_version = ">= 1.7.0"
@@ -17,10 +14,7 @@ terraform {
     }
   }
 
-  # ── Remote State Backend ──────────────────
-  # State stored in S3 per environment.
-  # Bucket/key/region passed via -backend-config flags in CI/CD (deploy.yml).
-  #
+  # Bucket/key/region passed via -backend-config flags in deploy.yml.
   backend "s3" {
     # All values passed via -backend-config in deploy.yml:
     # -backend-config="bucket=nexusdeploy-terraform-state"
@@ -42,7 +36,6 @@ provider "aws" {
   }
 }
 
-# ── Locals ────────────────────────────────────
 locals {
   environment = "dev"
   project     = "nexusdeploy"
@@ -57,21 +50,8 @@ locals {
   }
 }
 
-# ══════════════════════════════════════════════
-# SECRETS — Zero hardcoded values
-#
-# All credentials follow this flow:
-#   1. bootstrap.sh creates SSM SecureString parameters (run once manually)
-#   2. Terraform reads them via data sources (never stored in .tf or .tfvars)
-#   3. Terraform builds Secrets Manager secret from SSM values
-#   4. ECS injects Secrets Manager values as env vars at container launch
-#   5. App code reads standard env vars — has no knowledge of AWS
-#
-# DB has two users:
-#   master_user  → RDS superuser (only used by Terraform / init scripts)
-#   app_user     → Limited-privilege user the Flask app connects as
-#                  Created by the db-init ECS task on first boot
-# ══════════════════════════════════════════════
+# Zero hardcoded credentials — see CLAUDE.md "Secrets flow" and
+# "Database initialisation". Read from SSM below, never stored in .tf/.tfvars.
 
 data "aws_ssm_parameter" "db_master_username" {
   name            = "/${local.project}/${local.environment}/db/master_username"
@@ -103,7 +83,6 @@ data "aws_ssm_parameter" "jwt_secret_key" {
   with_decryption = true
 }
 
-# ── Secrets Manager (ECS runtime injection) ──
 resource "aws_secretsmanager_secret" "app" {
   name                    = "${local.project}/${local.environment}/app-secrets"
   description             = "Runtime secrets injected by ECS at container launch"
@@ -114,7 +93,6 @@ resource "aws_secretsmanager_secret" "app" {
 resource "aws_secretsmanager_secret_version" "app" {
   secret_id = aws_secretsmanager_secret.app.id
 
-  # All values sourced from SSM - zero hardcoding
   # DB_MASTER_USER/PASSWORD intentionally excluded — injected only into the
   # worker init task via a separate init-secrets secret (see below).
   secret_string = jsonencode({
@@ -131,7 +109,6 @@ resource "aws_secretsmanager_secret_version" "app" {
   })
 }
 
-# ── Init secrets (DB master credentials for worker startup only) ─
 resource "aws_secretsmanager_secret" "init" {
   name                    = "${local.project}/${local.environment}/init-secrets"
   description             = "DB master credentials for worker DB initialisation only"
@@ -148,13 +125,7 @@ resource "aws_secretsmanager_secret_version" "init" {
   })
 }
 
-# ── Seed user passwords ───────────────────────────────────────
-# Strong, unique-per-environment passwords for the demo seed users, injected
-# into the worker init task via a SEPARATE secret from the DB master credentials.
-# Kept apart on purpose: an operator can be granted read on seed-secrets to sign
-# in as a demo user without also being handed DB_MASTER_PASSWORD (GetSecretValue
-# cannot be scoped to a single JSON key). Held in Terraform state (S3, encrypted)
-# and stable across applies, so re-seeding is unnecessary.
+# See docs/design-decisions.md#seed-passwords-are-a-separate-secret-from-db-credentials
 resource "random_password" "seed_admin" {
   length           = 24
   special          = true
@@ -190,9 +161,6 @@ resource "aws_secretsmanager_secret_version" "seed" {
   })
 }
 
-# ══════════════════════════════════════════════
-# INFRASTRUCTURE MODULES
-# ══════════════════════════════════════════════
 
 module "iam" {
   source = "../../modules/iam"
@@ -217,8 +185,8 @@ module "vpc" {
   environment           = local.environment
   vpc_cidr              = var.vpc_cidr
   availability_zones    = var.availability_zones
-  enable_nat_gateway    = false # VPC endpoints used instead — saves ~$1/day
-  single_az_endpoints   = true  # dev is disposable; skip per-AZ endpoint HA to halve endpoint ENI hours
+  enable_nat_gateway    = false # see docs/design-decisions.md#vpc-interface-endpoints-replace-nat-for-ecs-fargate
+  single_az_endpoints   = true  # dev is disposable — see the same anchor
   aws_region            = var.aws_region
   flow_log_role_arn     = module.iam.vpc_flow_log_role_arn
   flow_log_traffic_type = "REJECT" # Cost-optimised: capture security events only
@@ -307,12 +275,8 @@ module "ecs" {
   ]
 }
 
-# ── Monitoring: Prometheus + Grafana on EC2 ──
-# t3.micro = free tier (750 hrs/month)
-# Dual monitoring strategy:
-#   1. Prometheus scrapes the Flask /metrics endpoint on ECS tasks
-#   2. CloudWatch Logs Insights for log analysis (both use same log groups)
-# Grafana visualizes both data sources in one dashboard
+# t3.micro = free tier. Grafana visualizes both Prometheus (scraping the
+# Flask /metrics endpoint) and CloudWatch Logs Insights in one dashboard.
 module "monitoring" {
   source = "../../modules/monitoring"
 
@@ -333,7 +297,6 @@ module "monitoring" {
   ]
 }
 
-# ── Outputs ───────────────────────────────────────────────────────────────────
 output "app_secret_arn" {
   description = "ARN of the app secrets in Secrets Manager"
   value       = aws_secretsmanager_secret.app.arn

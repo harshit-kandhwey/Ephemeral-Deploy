@@ -9,12 +9,8 @@ terraform {
   }
 }
 
-# ─────────────────────────────────────────────
-# Security Groups - Least-privilege network rules
-# ─────────────────────────────────────────────
 
-# ── ALB Security Group ────────────────────────
-# (Commented out since ALB is optional, but defined for completeness)
+# See docs/design-decisions.md#alb-is-commented-out-not-deleted
 # resource "aws_security_group" "alb" {
 #   name        = "${var.project}-${var.environment}-alb-sg"
 #   description = "Allow inbound HTTP/HTTPS from internet to ALB"
@@ -46,13 +42,11 @@ terraform {
 #   tags = merge(var.common_tags, { Name = "${var.project}-${var.environment}-alb-sg" })
 # }
 
-# ── API Security Group ────────────────────────
 resource "aws_security_group" "api" {
   name        = "${var.project}-${var.environment}-api-sg"
   description = "ECS API tasks - accepts traffic from within VPC only"
   vpc_id      = var.vpc_id
 
-  # Inbound: only from VPC CIDR (or ALB if enabled)
   ingress {
     description = "API port from VPC"
     from_port   = 5000
@@ -62,12 +56,10 @@ resource "aws_security_group" "api" {
     # When ALB is enabled, replace with: security_groups = [aws_security_group.alb.id]
   }
 
-  # Egress: scoped to least-privilege destinations only.
-  # API tasks need:
-  #   1. PostgreSQL and Redis — within the VPC
-  #   2. HTTPS to AWS APIs   — ECR image pulls, Secrets Manager, SSM, CloudWatch
-  #      (NAT Gateway or VPC endpoints forward these; dest is still 0.0.0.0/0
-  #       at the SG layer since AWS service IPs are not fixed CIDR blocks)
+  # Egress destinations are VPC-internal (Postgres/Redis) plus HTTPS to AWS
+  # APIs (ECR, Secrets Manager, SSM, CloudWatch) — that HTTPS rule is still
+  # 0.0.0.0/0 at the SG layer since AWS service IPs aren't fixed CIDR blocks,
+  # regardless of whether a NAT Gateway or VPC endpoints forward it.
   egress {
     description = "PostgreSQL and Redis within VPC"
     from_port   = 0
@@ -89,13 +81,11 @@ resource "aws_security_group" "api" {
   })
 }
 
-# ── Worker Security Group ─────────────────────
 resource "aws_security_group" "worker" {
   name        = "${var.project}-${var.environment}-worker-sg"
   description = "Celery workers - no inbound, only outbound to Redis/DB"
   vpc_id      = var.vpc_id
 
-  # No inbound rules - workers initiate all connections outbound
 
   egress {
     description = "Redis access"
@@ -126,7 +116,6 @@ resource "aws_security_group" "worker" {
   })
 }
 
-# ── RDS Security Group ────────────────────────
 resource "aws_security_group" "rds" {
   name        = "${var.project}-${var.environment}-rds-sg"
   description = "RDS PostgreSQL - only accepts from app and worker SGs"
@@ -152,7 +141,6 @@ resource "aws_security_group" "rds" {
   })
 }
 
-# ── Redis/ElastiCache Security Group ─────────
 resource "aws_security_group" "redis" {
   name        = "${var.project}-${var.environment}-redis-sg"
   description = "Redis - only accepts from app and worker SGs"
@@ -178,8 +166,6 @@ resource "aws_security_group" "redis" {
   })
 }
 
-# ── Monitoring Security Group ─────────────────
-# Only created when monitoring_enabled = true
 resource "aws_security_group" "monitoring" {
   count = var.monitoring_enabled ? 1 : 0
 
@@ -187,7 +173,7 @@ resource "aws_security_group" "monitoring" {
   description = "Prometheus and Grafana - inbound from internet on specific ports only"
   vpc_id      = var.vpc_id
 
-  # Grafana UI — restrict to var.monitoring_allowed_cidr (set to your IP/VPN in prod)
+  # monitoring_allowed_cidr should be set to your IP/VPN in prod, not left open.
   ingress {
     description = "Grafana"
     from_port   = 3000
@@ -196,7 +182,6 @@ resource "aws_security_group" "monitoring" {
     cidr_blocks = var.monitoring_allowed_cidr
   }
 
-  # Prometheus UI — restrict to var.monitoring_allowed_cidr (set to your IP/VPN in prod)
   ingress {
     description = "Prometheus"
     from_port   = 9090

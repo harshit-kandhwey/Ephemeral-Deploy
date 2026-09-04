@@ -9,14 +9,10 @@ terraform {
   }
 }
 
-# ─────────────────────────────────────────────
-# IAM Module - OIDC, ECS roles, least-privilege
-# ─────────────────────────────────────────────
 
-# ── GitHub OIDC Provider ──────────────────────
-# This allows GitHub Actions to assume AWS roles WITHOUT
-# storing any long-lived credentials in GitHub Secrets.
-# This is the modern, secure way to authenticate CI/CD.
+# Lets GitHub Actions assume AWS roles via OIDC, without a long-lived
+# credential stored in GitHub Secrets. See
+# docs/design-decisions.md#bootstrap-owns-the-deploy-role-identity
 resource "aws_iam_openid_connect_provider" "github" {
   count = var.create_oidc_provider ? 1 : 0
 
@@ -30,15 +26,11 @@ resource "aws_iam_openid_connect_provider" "github" {
   tags = var.common_tags
 
   lifecycle {
-    # bootstrap.sh is the owner of this resource.
-    # Terraform imports it for reference but never modifies it.
     ignore_changes = all
   }
 }
 
-# ── GitHub Actions Deploy Role ────────────────
-# This role is assumed by GitHub Actions via OIDC.
-# Only our specific repo/branch can assume it.
+# Assumed by GitHub Actions via OIDC; restricted to specific repo/branch below.
 resource "aws_iam_role" "github_actions_deploy" {
   name = "${var.project}-github-actions-deploy"
 
@@ -67,13 +59,10 @@ resource "aws_iam_role" "github_actions_deploy" {
   tags = var.common_tags
 
   lifecycle {
-    # bootstrap.sh owns this role and its trust policy.
-    # Permissions are managed via bootstrap — never overwritten by Terraform.
     ignore_changes = all
   }
 }
 
-# ── Deploy Role Policy ────────────────────────
 resource "aws_iam_role_policy" "github_actions_deploy" {
   name = "${var.project}-github-actions-deploy-policy"
   role = aws_iam_role.github_actions_deploy.id
@@ -81,14 +70,7 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      # Guardrail: the Allow statements below grant iam:PutRolePolicy (and other
-      # role-write actions) on role/${var.project}-*, which matches THIS role.
-      # Without this Deny, anyone able to trigger a deploy could have the role
-      # rewrite its own policy to full admin. Deny always wins over Allow, so
-      # this closes the self-escalation path while leaving reads (GetRole,
-      # GetRolePolicy — used by the import blocks on every apply) untouched, and
-      # leaving management of the per-environment roles (a different ARN) intact.
-      # Mirrors DenySelfModification in bootstrap.sh, which owns the live policy.
+      # See docs/design-decisions.md#deploy-role-cannot-modify-its-own-permissions
       {
         Sid    = "DenySelfModification"
         Effect = "Deny"
@@ -295,20 +277,15 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
   })
 
   lifecycle {
-    # bootstrap.sh is the sole owner of this policy.
-    # All permission changes go through bootstrap.sh — not Terraform.
-    # This prevents Terraform from ever downgrading carefully managed permissions.
     ignore_changes = all
   }
 }
 
-# Second inline policy — split from github_actions_deploy to stay under 10240 char limit
 resource "aws_iam_role_policy" "github_actions_deploy_2" {
   name = "${var.project}-github-actions-deploy-2"
   role = aws_iam_role.github_actions_deploy.id
 
-  # Placeholder — real policy managed by bootstrap.sh
-  # This resource exists only so Terraform can import and track it in state.
+  # Placeholder — see docs/design-decisions.md#bootstrap-owns-the-deploy-role-identity
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -324,9 +301,9 @@ resource "aws_iam_role_policy" "github_actions_deploy_2" {
   }
 }
 
-# ── ECS Task Execution Role (API) ────────────
-# Used by the API task definition. Grants access only to the app-secrets secret.
-# Does NOT receive init_secrets_arn — API has no legitimate use for DB master creds.
+# Used by the API task definition; grants access only to the app-secrets
+# secret. Does NOT receive init_secrets_arn — API has no legitimate use for
+# DB master credentials.
 resource "aws_iam_role" "ecs_execution" {
   name = "${var.project}-${var.environment}-ecs-execution"
 
@@ -361,11 +338,10 @@ resource "aws_iam_role_policy" "ecs_execution_secrets" {
   })
 }
 
-# ── ECS Task Execution Role (Worker) ─────────
-# Separate role for the worker task definition.
-# Adds init_secrets_arn so entrypoint-worker.sh can run init_db at startup.
-# Keeping this separate means a task-def change cannot accidentally grant the
-# API container access to master DB credentials.
+# Separate role for the worker task definition, with init_secrets_arn added
+# so entrypoint-worker.sh can run init_db at startup — keeping it separate
+# means a task-def change can't accidentally grant the API container access
+# to master DB credentials.
 resource "aws_iam_role" "ecs_execution_worker" {
   name = "${var.project}-${var.environment}-ecs-execution-worker"
 
@@ -400,9 +376,8 @@ resource "aws_iam_role_policy" "ecs_execution_worker_secrets" {
   })
 }
 
-# ── ECS Task Role ─────────────────────────────
-# This is the role YOUR APPLICATION CODE uses at runtime.
-# Principle: only grant what the app actually needs.
+# The role the application code itself uses at runtime — only grant what it
+# actually needs.
 resource "aws_iam_role" "ecs_task" {
   name = "${var.project}-${var.environment}-ecs-task"
 
@@ -418,7 +393,6 @@ resource "aws_iam_role" "ecs_task" {
   tags = var.common_tags
 }
 
-# App can write to S3 (for file attachments)
 resource "aws_iam_role_policy" "ecs_task_s3" {
   name = "${var.project}-${var.environment}-task-s3"
   role = aws_iam_role.ecs_task.id
@@ -433,7 +407,6 @@ resource "aws_iam_role_policy" "ecs_task_s3" {
   })
 }
 
-# ── VPC Flow Log Role ─────────────────────────
 resource "aws_iam_role" "vpc_flow_log" {
   name = "${var.project}-${var.environment}-vpc-flow-log"
 

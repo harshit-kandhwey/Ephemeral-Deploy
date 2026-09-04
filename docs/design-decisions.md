@@ -358,6 +358,127 @@ row in the job summary.
 
 ---
 
+## Terraform
+
+### VPC interface endpoints replace NAT for ECS Fargate
+
+Interface endpoints let ECS tasks in private subnets reach AWS APIs without
+a NAT Gateway — cheaper (~$0.01/hr each vs. NAT's $0.045/hr) and avoids a
+single NAT instance being a shared point of failure/throughput limit for
+every private-subnet service. Required set for this stack: `ecr.api` (pull
+auth), `ecr.dkr` (layer download), `logs` (CloudWatch streaming),
+`secretsmanager` (secrets at task startup), `ssm` (parameter store), plus
+the `s3` Gateway endpoint (ECR layer storage — free, no hourly charge,
+routes over the AWS backbone instead of the endpoint ENIs).
+
+`single_az_endpoints` puts every interface endpoint's ENIs in one AZ instead
+of one-per-AZ, halving the per-ENI-per-AZ charge — a deliberate non-HA
+trade-off for dev only, where workloads in the other AZ share that one ENI's
+failure domain. staging/prod leave it `false` (AWS recommends ≥2 AZs for
+endpoint HA).
+
+### Bootstrap owns the deploy role identity
+
+The GitHub OIDC provider, the `github-actions-deploy` role, and its two
+inline policies are all created by `bootstrap.sh`, not Terraform. Terraform
+imports each one (`ignore_changes = all` on every one of them) so they show
+up in state and `terraform plan` doesn't propose recreating them, but it
+never writes to them — every permission change goes through `bootstrap.sh`.
+The second inline policy (`github-actions-deploy-2`) exists only because the
+role's real policy exceeds the 10,240-char aggregate inline-policy limit
+split across two resources; Terraform's copy is a placeholder so it has
+something to track in state.
+
+### Deploy role cannot modify its own permissions
+
+The deploy role's policy grants it `iam:PutRolePolicy` and other role-write
+actions scoped to `role/${project}-*` — which matches the deploy role
+itself. An explicit `Deny` on those same actions, scoped to just this role's
+ARN, closes the self-escalation path that would otherwise let anything able
+to trigger a deploy rewrite the role's own policy toward full admin. `Deny`
+always wins over `Allow` in IAM evaluation, so this is airtight regardless of
+ordering; reads (`GetRole`, `GetRolePolicy`, used by every apply's import
+blocks) stay allowed, and management of the per-environment ECS/task roles
+(a different ARN) is untouched. Mirrored by `DenySelfModification` in
+`bootstrap.sh`, which owns the live policy this Terraform resource only
+imports for tracking.
+
+### Container env strips the slot suffix and forces debug off
+
+`ENV` passed to the containers is `development` only for `dev`; everything
+else — including blue-green's `staging-slot1`/`prod-slot2` — resolves to
+`production`. `config.py` only defines `development`/`production`/`testing`;
+leaking a slot-suffixed value into `ENV` would `KeyError` at startup.
+
+`FLASK_DEBUG` and `SQLALCHEMY_ECHO` are hardcoded off for every deployed
+environment, including dev. `SQLALCHEMY_ECHO` logs every statement with its
+bind parameters — bcrypt hashes, emails — straight to CloudWatch. Local
+`docker-compose` keeps both on; the deployed path never does.
+
+### Seed passwords are a separate secret from DB credentials
+
+`init_db`'s demo-data passwords (`SEED_ADMIN_PASSWORD` etc.) live in their
+own Secrets Manager secret, not alongside `DB_MASTER_PASSWORD`. That lets
+demo logins be shared or rotated without exposing the master DB credential
+(`GetSecretValue` can't be scoped to a single JSON key, so there's no way to
+hand out one without the other from a shared secret), and only the
+worker/init task definition is granted them — the API task definition never
+sees them. Generated per environment by Terraform (`random_password`,
+stable across applies), replacing the `"ChangeMe-*"` fallback passwords
+`init_db.py` would otherwise use — visible in the public repo, not something
+to actually rely on.
+
+### Alarm notifications are wired unconditionally
+
+The SNS topic routing alarm ALARM/OK transitions is created and wired
+regardless of whether `alert_email` is set — the topic itself is free, email
+delivery is free, and the alarms already bill (~$0.10 each) whether or not
+anything is subscribed. A blank `alert_email` still creates the topic (alarms
+show up in the SNS console); setting it just adds a mail subscription.
+
+The topic is left on the AWS-managed SSE default (unencrypted), not a
+customer-managed key: the built-in `alias/aws/sns` key's policy omits
+`cloudwatch.amazonaws.com`, so encrypting with it would block CloudWatch from
+publishing at all, and a real CMK is ~$1/month — not worth it for alarm
+fan-out on a stack this size. Suppressed with a `checkov:skip` comment
+carrying the reason inline (checkov reads that reason from the same line, so
+it isn't relocated here the way other suppression rationale is).
+
+### Task-shortfall alarm catches what CPU alarms can't
+
+A service sitting at 0 running tasks reports no CPU — missing data, not high
+data — so a CPU alarm stays green through it. That's exactly how a
+crash-looping beat once went unnoticed: green deploy, green alarms, no
+scheduled tasks running at all. A `desired - running` metric-math alarm
+closes the gap.
+
+Metric math instead of a plain threshold on `running`, because blue-green
+idles a whole slot at `desired_count = 0` — a "running < 1" alarm would fire
+permanently on the idle slot, where the shortfall is legitimately 0 - 0 = 0.
+
+Prod-only, and not by preference: the underlying `RunningTaskCount`/
+`DesiredTaskCount` metrics come from Container Insights, which the ECS module
+enables only on prod as a cost trade-off. Dev and staging get deploy-time
+coverage instead (the worker/beat checks in `deploy.yml`/
+`deploy-blue-green.yml`), which catches a service that never starts but not
+one that dies later. Enabling Container Insights on staging's cluster would
+make this alarm apply there too with no change to this file.
+
+### ALB is commented out, not deleted
+
+The ECS module's ALB/target-group/listener wiring stays in the file,
+disabled, rather than being removed: direct ECS task IPs are used instead
+(no load balancer running, no ~$16/month ALB cost), and keeping the config
+in place means enabling it later is uncommenting, not re-deriving the target
+group and listener rules from scratch.
+
+The ECS service's `deployment_controller` is `type = "ECS"`, not
+`CODE_DEPLOY`: blue-green here is implemented at the two-full-service-set
+level described in [Slot model](#slot-model), not via ECS/CodeDeploy's own
+native blue-green primitive — the two mechanisms would be redundant.
+
+---
+
 ## Application
 
 ### `/health` vs `/ready`
