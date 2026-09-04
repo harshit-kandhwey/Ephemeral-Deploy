@@ -413,11 +413,12 @@ jobs:
     steps:
       - name: Carry environment configuration to the reclaim job
         id: envvars
-        # Must go through env:, not raw ${{ }} inside the echo string: GitHub
-        # substitutes ${{ }} as literal text before bash parses the line, so a
-        # value containing its own quotes (MONITORING_ALLOWED_CIDR is a JSON
-        # array, e.g. ["1.2.3.0/24"]) collides with the echo argument's own
-        # quoting and bash silently eats the inner quotes — corrupting it to
+        # Must go through env:, not a raw GH expression inside the echo string:
+        # GitHub interpolates an expression like vars.X as literal text before
+        # bash ever parses the line, so a value containing its own quotes
+        # (MONITORING_ALLOWED_CIDR is a JSON array, e.g. ["1.2.3.0/24"])
+        # collides with the echo argument's own quoting and bash silently
+        # eats the inner quotes — corrupting it to
         # [1.2.3.0/24], which is not valid JSON. $VAR expansion inside a
         # double-quoted bash string does not have this problem.
         env:

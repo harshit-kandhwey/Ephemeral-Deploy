@@ -646,3 +646,22 @@ quote characters as syntax. `deploy-blue-green.yml`'s direct
 `TF_VAR_monitoring_allowed_cidr: ${{ vars.MONITORING_ALLOWED_CIDR }}` reads
 were never affected — that's a step-level `env:` mapping already, not a
 value built into a bash command string via `echo`.
+
+**`ci.yml`'s `workflow-lint` job now catches this class of bug
+automatically** — greps every workflow file for `vars.`/`secrets.`/
+`needs.*.outputs.*` interpolated directly inside an `echo "..."` string and
+fails the build if found. Runs unconditionally (no path gating), so it
+catches a workflow-only edit too. `github.event.inputs.X` is deliberately
+exempt — a `workflow_dispatch` choice input's value space is a fixed enum,
+so it cannot carry a stray `"`. If a real future value legitimately needs
+this pattern, route it through `env:` first rather than adding an
+exception to the grep.
+
+**Meta-note on writing this very fix:** don't put a literal `${{ }}` — even
+empty, even inside a `#` comment — anywhere in a workflow YAML file. A
+`run: |` block scalar has no bash-level comments from YAML's perspective;
+GitHub scans the whole resulting string for expressions before bash ever
+sees it, so `${{ }}` there is a real (if empty and invalid) expression
+attempt, not inert text. Describe the mechanism in words instead (as this
+section does) — `.md` files like this one are never parsed by GitHub
+Actions, so the literal syntax is safe to show here.

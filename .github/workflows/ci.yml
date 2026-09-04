@@ -307,6 +307,32 @@ jobs:
           category: grype-${{ matrix.image }}
         continue-on-error: true
 
+  # Always runs, no path gating — a single workflow-file edit is exactly what
+  # this needs to catch, independent of what else changed.
+  # See docs/design-decisions.md#github-vars-containing-quotes-must-cross-github_output-via-env-not-raw-
+  workflow-lint:
+    name: Workflow Quoting Safety Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Check for GH-expression-into-echo-string quoting risk
+        run: |
+          # vars./secrets./job-output values can contain arbitrary content
+          # (including quotes, e.g. a JSON-array-shaped var) — interpolating
+          # them directly inside an `echo "..."` string corrupts the value if
+          # it contains a `"`, because GitHub interpolates a GH expression as
+          # literal text BEFORE bash parses the line. workflow_dispatch choice
+          # inputs (github.event.inputs.X) are exempt: their value space is a
+          # fixed enum, so this class of corruption cannot occur.
+          PATTERN='echo[^\n]*"[^"]*\$\{\{[[:space:]]*(vars\.|secrets\.|needs\.[A-Za-z0-9_-]+\.outputs\.)'
+          if grep -rnE "$PATTERN" .github/workflows/ --include='*.yml' --include='*.yaml'; then
+            echo "::error::Found a GH expression (vars.*/secrets.*/needs.*.outputs.*) interpolated directly inside an echo string. This corrupts the value if it ever contains a double-quote. Pass it through env: instead and reference it as \$VAR inside the string. See docs/design-decisions.md#github-vars-containing-quotes-must-cross-github_output-via-env-not-raw- for the exact bug this caught."
+            exit 1
+          fi
+          echo "✅ No risky GH-expression-into-echo-string patterns found"
+
   # Formats, lints and validates the terraform tree. Parallel with the app jobs.
   terraform-lint:
     name: Terraform Validate & Lint
@@ -421,7 +447,7 @@ jobs:
     name: CI Summary
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [detect-changes, lint, test, docker-build, terraform-lint]
+    needs: [detect-changes, lint, test, docker-build, terraform-lint, workflow-lint]
     # !cancelled() rather than always(): a run cancelled by cancel-in-progress
     # must not count its cancelled jobs as passed and deploy a stale commit.
     if: ${{ !cancelled() }}
@@ -456,6 +482,12 @@ jobs:
             fi
           fi
 
+          # workflow-lint has no path gating — always check it.
+          if [[ "${{ needs.workflow-lint.result }}" == "failure" ]]; then
+            echo "❌ Workflow quoting safety check failed — deploy will not run"
+            FAILED=true
+          fi
+
           if [[ "$FAILED" == "true" ]]; then
             exit 1
           fi
@@ -463,6 +495,7 @@ jobs:
           echo "✅ All required CI checks passed"
           echo "   App jobs:   ${{ needs.lint.result }} / ${{ needs.test.result }} / ${{ needs.docker-build.result }}"
           echo "   Infra jobs: ${{ needs.terraform-lint.result }}"
+          echo "   Workflow quoting check: ${{ needs.workflow-lint.result }}"
 
       - name: Trigger deploy pipeline
         # Dependency bumps run CI but never deploy. The guard covers all three

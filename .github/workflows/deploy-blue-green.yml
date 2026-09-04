@@ -211,6 +211,11 @@ jobs:
           TF_VAR_monitoring_allowed_cidr: "[]"
         run: |
           ENV="${{ inputs.environment }}"
+          echo "ℹ️  On a genuinely fresh environment, every adopt() below is expected"
+          echo "   to log \"Error: Cannot import non-existent remote object\" and a red"
+          echo "   \"Terraform exited with code 1\" annotation — that's GitHub's own"
+          echo "   problem-matcher scanning tolerated output, not a real failure. The"
+          echo "   || true below means this step still reports success either way."
           adopt() {
             local addr=$1 id=$2
             terraform state show "$addr" &>/dev/null && return 0
