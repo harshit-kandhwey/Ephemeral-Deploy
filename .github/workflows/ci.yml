@@ -11,6 +11,10 @@ on:
         description: "Also dispatch a deploy after CI passes (manual runs only; off = CI without deploy)"
         type: boolean
         default: false
+      drain_minutes:
+        description: "Only used if 'deploy' is checked. Override the old-slot drain wait, in minutes (blank = environment default: staging 60, prod 1440)."
+        required: false
+        default: ""
 
 # One run per ref; a newer push cancels the in-progress run.
 concurrency:
@@ -492,7 +496,10 @@ jobs:
               inputs: {
                 environment,
                 action: 'apply',
-                app_changed: '${{ needs.detect-changes.outputs.app_changed }}'
+                app_changed: '${{ needs.detect-changes.outputs.app_changed }}',
+                // Empty on a plain push (github.event.inputs doesn't exist for
+                // that event) — deploy.yml's own default then applies.
+                drain_minutes: '${{ github.event.inputs.drain_minutes }}'
               }
             });
             console.log(`🚀 Deploy triggered for ${branch} → ${environment}`);

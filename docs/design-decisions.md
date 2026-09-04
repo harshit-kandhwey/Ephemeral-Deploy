@@ -309,6 +309,23 @@ fires hours later, so a default checkout would resolve whatever the branch point
 at by then, and a supposedly capacity-only apply would ship every unrelated
 infrastructure commit merged in the meantime.
 
+### `drain_minutes` is overridable per dispatch
+
+The default drain (1h staging, 24h prod) exists to prove the new slot
+stable under real traffic before the old one loses capacity — but every
+minute of overlap is double capacity, double cost. A manual dispatch of
+`deploy.yml` (or `ci.yml` with its `deploy` box checked) can override it
+with `drain_minutes` — blank keeps the environment default, `0` drains
+immediately (already a supported `cleanup.yml` mode: its "Wait for delay"
+step's own `if:` skips the sleep entirely on `0`, needing no changes
+there).
+
+**A plain `git push` cannot carry this** — GitHub only attaches `inputs` to
+`workflow_dispatch` events; a `push` has none. `ci.yml`'s auto-triggered
+deploy (the one that fires on every ordinary push) always gets an empty
+`drain_minutes`, so it always uses the environment default. Overriding it
+requires manually dispatching one of the two workflows above.
+
 ### The ECS service is authoritative over task_definition too
 
 Each service resource used to carry `ignore_changes = [task_definition]`,

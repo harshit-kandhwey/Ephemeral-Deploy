@@ -20,6 +20,10 @@ on:
         description: "Whether app code changed (passed from CI)"
         required: false
         default: "false" # CI always passes the real value; manual runs skip the build when ECR already has images
+      drain_minutes:
+        description: "Override the old-slot drain wait, in minutes (blank = environment default: staging 60, prod 1440). Only affects staging/prod — dev has no blue-green drain."
+        required: false
+        default: ""
 
 concurrency:
   group: deploy-${{ github.ref_name }}
@@ -760,9 +764,10 @@ jobs:
     secrets: inherit
     with:
       environment: staging
-      drain_minutes: "60"
+      # See docs/design-decisions.md#drain-minutes-is-overridable-per-dispatch
+      drain_minutes: ${{ github.event.inputs.drain_minutes != '' && github.event.inputs.drain_minutes || '60' }}
       drain_ref: staging
-      drain_label: 1h
+      drain_label: ${{ github.event.inputs.drain_minutes != '' && format('{0}min (custom)', github.event.inputs.drain_minutes) || '1h' }}
       run_init_db: true
       app_changed: ${{ needs.setup.outputs.app_changed }}
       api_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}
@@ -787,9 +792,10 @@ jobs:
     secrets: inherit
     with:
       environment: prod
-      drain_minutes: "1440"
+      # See docs/design-decisions.md#drain-minutes-is-overridable-per-dispatch
+      drain_minutes: ${{ github.event.inputs.drain_minutes != '' && github.event.inputs.drain_minutes || '1440' }}
       drain_ref: main
-      drain_label: 24h
+      drain_label: ${{ github.event.inputs.drain_minutes != '' && format('{0}min (custom)', github.event.inputs.drain_minutes) || '24h' }}
       run_init_db: false
       app_changed: ${{ needs.setup.outputs.app_changed }}
       api_image: ${{ needs.setup.outputs.app_changed == 'true' && needs.push-image.outputs.api_image || needs.setup.outputs.current_api }}
