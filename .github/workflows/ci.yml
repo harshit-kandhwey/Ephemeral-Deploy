@@ -294,7 +294,7 @@ jobs:
         continue-on-error: true
 
       - name: Upload Grype results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
         # Skip when the scan produced no SARIF (e.g. the build failed).
         # !cancelled() rather than always() so a superseded run stops here.
         if: ${{ !cancelled() && steps.grype.outputs.sarif != '' }}
