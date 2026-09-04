@@ -300,6 +300,21 @@ fires hours later, so a default checkout would resolve whatever the branch point
 at by then, and a supposedly capacity-only apply would ship every unrelated
 infrastructure commit merged in the meantime.
 
+### The ECS service is authoritative over task_definition too
+
+Each service resource used to carry `ignore_changes = [task_definition]`,
+commented "Managed by CI/CD" — but no such step existed anywhere in
+`deploy.yml`/`deploy-blue-green.yml`; the apply above is the only thing that
+ever sets it. `ignore_changes` only skips *updates*, so a service's live task
+definition stayed pinned to whatever it was at creation, forever, no matter
+how many new revisions Terraform registered afterward. This went undetected
+since every prior real deploy created its services fresh (image already
+correct at creation); it first surfaced the moment an *existing* service
+(one already deployed once) was asked to take a new image — confirmed via
+CloudTrail: the `UpdateService` call carried `desiredCount` but no
+`taskDefinition` field at all. Removed, so this resource matches
+`desired_count`'s already-documented model above: Terraform owns it, fully.
+
 It feeds `prev_*_image` back in so the apply changes capacity and nothing else.
 Both empty and the literal `placeholder` are disqualifying: `placeholder` is the
 `variables.tf` default and an unpullable reference, so an emptiness check alone

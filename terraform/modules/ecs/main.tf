@@ -262,10 +262,6 @@ resource "aws_ecs_service" "api" {
   }
 
   tags = var.common_tags
-
-  lifecycle {
-    ignore_changes = [task_definition] # Managed by CI/CD
-  }
 }
 
 resource "aws_ecs_service" "worker" {
@@ -291,10 +287,6 @@ resource "aws_ecs_service" "worker" {
   }
 
   tags = var.common_tags
-
-  lifecycle {
-    ignore_changes = [task_definition] # Managed by CI/CD
-  }
 }
 
 resource "aws_ecs_service" "beat" {
@@ -320,10 +312,6 @@ resource "aws_ecs_service" "beat" {
   }
 
   tags = var.common_tags
-
-  lifecycle {
-    ignore_changes = [task_definition] # Managed by CI/CD
-  }
 }
 
 # Auto-scaling: API only — worker/beat scale by fixed desired_count.
