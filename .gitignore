@@ -53,6 +53,7 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Claude Code
+# AI coding agents
 .claude/
 CLAUDE.md
+AGENTS.md
