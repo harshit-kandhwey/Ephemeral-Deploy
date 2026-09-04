@@ -25,6 +25,25 @@ def _get_cors_origins():
     return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
+def redact_url(url):
+    """
+    Mask the password in a URL so it is safe to log.
+
+    Redis/DB URLs carry credentials in the netloc; CloudWatch retains whatever
+    we print, so never log one raw.
+    """
+    if not url:
+        return repr(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return "<unparseable>"
+    if parsed.password:
+        netloc = parsed.netloc.replace(f":{parsed.password}@", ":***@", 1)
+        parsed = parsed._replace(netloc=netloc)
+    return urlunparse(parsed)
+
+
 def _get_ratelimit_redis_url():
     ratelimit_redis_url = os.environ.get("RATELIMIT_REDIS_URL")
     if ratelimit_redis_url:
@@ -33,12 +52,15 @@ def _get_ratelimit_redis_url():
     redis_url = os.environ.get("REDIS_URL")
     if redis_url:
         parsed = urlparse(redis_url)
-        path = (parsed.path or "/").rstrip("/") + "/1"
+        # A Redis URL's path IS the database index ("/0"), so isolating rate
+        # limits on DB 1 means REPLACING that segment, not appending to it.
+        # Appending turned "redis://host:6379/0" into "redis://host:6379/0/1",
+        # a path of "/0/1" that is not a valid database selector.
         return urlunparse(
             (
                 parsed.scheme,
                 parsed.netloc,
-                path,
+                "/1",
                 parsed.params,
                 parsed.query,
                 parsed.fragment,
@@ -144,13 +166,10 @@ class ProductionConfig(Config):
     # every route and schema to anyone who can reach the API.
     ENABLE_SWAGGER = _env_flag("ENABLE_SWAGGER", default=False)
 
-    # All three values below deliberately use .get() with no fallback so they
-    # resolve to None when the env var is absent. They are NOT fail-fast here
-    # by design — the validation block in app.py's create_app() is the single
-    # authoritative place that checks for missing values and raises a
-    # RuntimeError with a clear message listing every missing variable at once.
-    # Using os.environ['KEY'] here would raise a bare KeyError at import time
-    # with no context, before the logger is even configured.
+    # .get() with no fallback, not os.environ['KEY']: the latter raises a bare
+    # KeyError at import time, before the logger is even configured, instead
+    # of resolving to None and letting create_app()'s validation block name
+    # every missing variable at once.
     SECRET_KEY = os.environ.get("SECRET_KEY")  # validated in app.py
     JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY") or os.environ.get(  # validated in app.py
         "SECRET_KEY"

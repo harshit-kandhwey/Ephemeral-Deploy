@@ -1,6 +1,4 @@
-# ─────────────────────────────────────────────
-# VPC Module - Isolated networking per environment
-# ─────────────────────────────────────────────
+# Isolated networking per environment.
 
 terraform {
   required_version = ">= 1.7.0"
@@ -13,7 +11,6 @@ terraform {
   }
 }
 
-# ── VPC ──────────────────────────────────────
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
   enable_dns_hostnames = true
@@ -24,7 +21,6 @@ resource "aws_vpc" "main" {
   })
 }
 
-# ── Internet Gateway ──────────────────────────
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 
@@ -33,7 +29,7 @@ resource "aws_internet_gateway" "main" {
   })
 }
 
-# ── Public Subnets (API / Load Balancer) ─────
+# Public subnets: API / load balancer.
 resource "aws_subnet" "public" {
   count = length(var.availability_zones)
 
@@ -48,7 +44,7 @@ resource "aws_subnet" "public" {
   })
 }
 
-# ── Private Subnets (ECS Tasks / App Layer) ──
+# Private subnets: ECS tasks / app layer.
 resource "aws_subnet" "private_app" {
   count = length(var.availability_zones)
 
@@ -62,7 +58,7 @@ resource "aws_subnet" "private_app" {
   })
 }
 
-# ── Private Subnets (RDS / Database Layer) ───
+# Private subnets: RDS / database layer.
 resource "aws_subnet" "private_db" {
   count = length(var.availability_zones)
 
@@ -76,7 +72,7 @@ resource "aws_subnet" "private_db" {
   })
 }
 
-# ── Private Subnets (Cache / Redis Layer) ────
+# Private subnets: cache / Redis layer.
 resource "aws_subnet" "private_cache" {
   count = length(var.availability_zones)
 
@@ -90,9 +86,7 @@ resource "aws_subnet" "private_cache" {
   })
 }
 
-# ── NAT Gateway (single, cost-optimized) ─────
-# NOTE: In production with HA requirements, use one NAT GW per AZ.
-# For cost optimization, we use a single NAT GW for non-prod.
+# Single NAT Gateway — cost-optimized. An HA deployment would use one per AZ.
 resource "aws_eip" "nat" {
   count  = var.enable_nat_gateway ? 1 : 0
   domain = "vpc"
@@ -117,7 +111,6 @@ resource "aws_nat_gateway" "main" {
   depends_on = [aws_internet_gateway.main]
 }
 
-# ── Route Tables ─────────────────────────────
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
 
@@ -147,7 +140,6 @@ resource "aws_route_table" "private" {
   })
 }
 
-# ── Route Table Associations ─────────────────
 resource "aws_route_table_association" "public" {
   count          = length(var.availability_zones)
   subnet_id      = aws_subnet.public[count.index].id
@@ -172,7 +164,6 @@ resource "aws_route_table_association" "private_cache" {
   route_table_id = aws_route_table.private.id
 }
 
-# ── VPC Flow Logs (security/observability) ───
 resource "aws_cloudwatch_log_group" "vpc_flow_logs" {
   name              = "/aws/vpc/flowlogs/${var.project}-${var.environment}"
   retention_in_days = var.log_retention_days
@@ -191,18 +182,8 @@ resource "aws_flow_log" "main" {
   })
 }
 
-# ── VPC Endpoints ─────────────────────────────────────────────────────────────
-# Interface endpoints allow ECS tasks in private subnets to reach AWS APIs
-# without a NAT Gateway. Cheaper than NAT (~$0.01/hr each vs $0.045/hr NAT).
-#
-# Required for ECS Fargate:
-#   ecr.api       — image pull authentication
-#   ecr.dkr       — image layer download
-#   logs          — CloudWatch log streaming from containers
-#   secretsmanager— app secrets fetched at task startup
-#   ssm           — SSM parameter store access
-#   s3 (Gateway)  — ECR image layer storage; free, no hourly charge
 
+# See docs/design-decisions.md#vpc-interface-endpoints-replace-nat-for-ecs-fargate
 resource "aws_security_group" "vpc_endpoints" {
   name        = "${var.project}-${var.environment}-vpc-endpoints-sg"
   description = "Allow HTTPS from within VPC to AWS service endpoints"
@@ -228,7 +209,6 @@ resource "aws_security_group" "vpc_endpoints" {
 }
 
 locals {
-  # Interface endpoints — one per service, shared across all private subnets
   interface_endpoints = {
     ecr_api        = "com.amazonaws.${var.aws_region}.ecr.api"
     ecr_dkr        = "com.amazonaws.${var.aws_region}.ecr.dkr"
@@ -246,12 +226,7 @@ resource "aws_vpc_endpoint" "interface" {
   vpc_id            = aws_vpc.main.id
   service_name      = each.value
   vpc_endpoint_type = "Interface"
-  # One ENI per AZ by default; single AZ when single_az_endpoints is set (dev),
-  # which halves per-ENI-per-AZ endpoint charges on a disposable environment.
-  # Non-HA contract: with a single AZ, workloads in the other AZ reach these
-  # endpoints across a single ENI and share its failure domain — deliberate for
-  # dev only. staging/prod leave this false for one ENI per AZ (AWS recommends
-  # >=2 AZs for endpoint HA).
+  # See docs/design-decisions.md#vpc-interface-endpoints-replace-nat-for-ecs-fargate
   subnet_ids          = var.single_az_endpoints ? [aws_subnet.private_app[0].id] : aws_subnet.private_app[*].id
   security_group_ids  = [aws_security_group.vpc_endpoints.id]
   private_dns_enabled = true

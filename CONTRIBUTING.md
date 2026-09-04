@@ -49,7 +49,7 @@ Line length is 120 (set in `pyproject.toml`).
 | Branch       | Purpose                                                                                  |
 | ------------ | ---------------------------------------------------------------------------------------- |
 | `feature/**` | Your work. Opens a PR → CI runs lint, test, scan. No AWS touched.                        |
-| `dev`        | Integration. Merging here auto-deploys to the dev environment (auto-destroys in 45 min). |
+| `dev`        | Integration. Merging here auto-deploys to the dev environment (auto-destroys in 30 min). |
 | `main`       | Production. Merging here triggers a blue-green prod deploy.                              |
 
 1. Fork the repo and create a branch from `dev`: `git checkout -b feature/my-change`

@@ -106,48 +106,22 @@ jobs:
         id: state_check
         working-directory: terraform/environments/${{ inputs.environment }}
         run: |
-          # Orphan reconciliation (delete + adopt below) exists ONLY to recover
-          # from a wiped state after a cleanup. When state persists across a
-          # normal deploy it already tracks every resource, so we skip it —
-          # otherwise the delete step would churn live log groups every deploy.
-          # Fail CLOSED: a backend/lock/auth/network error must not read as an
-          # empty state and trigger destructive reconciliation of live resources.
-          # `terraform state list` exits 1 in TWO very different situations:
-          # there is no state file at all, and the backend could not be read.
-          # Treating both as fatal made a first (or post-cleanup) deploy
-          # impossible — the very case the orphan reconciliation below exists to
-          # serve. Staging failed here with "No state file was found!" on a
-          # completely clean slate.
-          #
-          # So distinguish them the same way the SSM read below does: match the
-          # one benign message explicitly, and keep failing closed on everything
-          # else. An auth/lock/network error must still abort rather than read as
-          # an empty state and trigger destructive reconciliation of live
-          # resources.
+          # Orphan reconciliation (delete + adopt below) exists only to recover
+          # from a wiped state after a cleanup, so it runs only when the state
+          # is genuinely absent — never on ordinary deploys, where it would
+          # churn live log groups. Fail-closed: see
+          # docs/design-decisions.md#fail-closed-state-reads
           set +e
           state_list=$(terraform state list -no-color 2>&1)
           state_rc=$?
           set -e
 
           if [[ $state_rc -ne 0 ]]; then
-            # Match the FIRST LINE exactly. A substring test anywhere in the
-            # output is too loose — a backend, lock, or auth diagnostic that
-            # happened to quote this phrase would enable the destructive
-            # reconciliation below. Equality against the WHOLE output is wrong
-            # in the other direction: terraform 1.7.0 prints the diagnostic plus
-            # three lines of advice,
-            #
-            #   No state file was found!
-            #
-            #   State management commands require a state file. Run this command
-            #   in a directory where Terraform has been run or use the -state flag
-            #   to point the command to a specific state location.
-            #
-            # so a whole-output comparison never matches and the first-deploy
-            # bug comes straight back. Anchoring to line 1 is strict without
-            # depending on the advice text. -no-color above keeps terraform from
-            # wrapping it in ANSI escapes; the sed/tr are belt-and-braces for a
-            # runner that forces color on anyway.
+            # Match the first line exactly — a substring match risks a false
+            # positive from a backend/lock/auth diagnostic, and a whole-output
+            # match never fires because terraform 1.7.0 appends three lines of
+            # advice after this message. -no-color/sed/tr strip any ANSI escapes
+            # a runner forces on regardless of the flag.
             first_line=$(printf '%s\n' "$state_list" | head -1 | sed -E 's/\x1b\[[0-9;]*m//g' | tr -d '\r')
             if [[ "$first_line" == "No state file was found!" ]]; then
               echo "🆕 No state file (post-cleanup or first deploy) — orphan reconciliation will run."
@@ -237,6 +211,11 @@ jobs:
           TF_VAR_monitoring_allowed_cidr: "[]"
         run: |
           ENV="${{ inputs.environment }}"
+          echo "ℹ️  On a genuinely fresh environment, every adopt() below is expected"
+          echo "   to log \"Error: Cannot import non-existent remote object\" and a red"
+          echo "   \"Terraform exited with code 1\" annotation — that's GitHub's own"
+          echo "   problem-matcher scanning tolerated output, not a real failure. The"
+          echo "   || true below means this step still reports success either way."
           adopt() {
             local addr=$1 id=$2
             terraform state show "$addr" &>/dev/null && return 0
@@ -268,18 +247,16 @@ jobs:
           adopt module.iam.aws_iam_role.ecs_task                  "nexusdeploy-$ENV-ecs-task"
           adopt module.iam.aws_iam_role.vpc_flow_log              "nexusdeploy-$ENV-vpc-flow-log"
           adopt module.vpc.aws_cloudwatch_log_group.vpc_flow_logs "/aws/vpc/flowlogs/nexusdeploy-$ENV"
-          adopt aws_ssm_parameter.active_slot                     "/nexusdeploy/$ENV/deployment/active_slot"
+          # active_slot is workflow-owned (created by the promote step below), not
+          # a Terraform resource, so there is nothing to import here.
           adopt module.ecr.aws_ecr_repository.api                 "nexusdeploy-api-$ENV"
           adopt module.ecr.aws_ecr_repository.worker              "nexusdeploy-worker-$ENV"
 
       - name: Read active deployment slot from SSM
         id: slot
         run: |
-          # FAIL CLOSED. Only a genuine "the parameter does not exist" may be read
-          # as a first deploy. Swallowing every error (the old `|| echo none`) made
-          # an AccessDenied or a throttle indistinguishable from a fresh
-          # environment — so a transient IAM/API blip would target slot1 and
-          # redeploy straight over the LIVE slot.
+          # Fail-closed: only ParameterNotFound reads as a first deploy. See
+          # docs/design-decisions.md#fail-closed-state-reads
           set +e
           CURRENT=$(aws ssm get-parameter \
             --name "/nexusdeploy/${{ inputs.environment }}/deployment/active_slot" \
@@ -331,21 +308,9 @@ jobs:
             --region ${{ env.AWS_REGION }} 2>/dev/null || echo "placeholder")
           echo "worker=${PREV_WORKER:-placeholder}" >> $GITHUB_OUTPUT
 
-      # Written BEFORE the apply, not after promotion, and deliberately so.
-      #
-      # A generation that only advances on success cannot invalidate the drains
-      # that a FAILED deploy endangers. The failing case: deploy B applies a
-      # newer Terraform revision, fails its gate, and rolls back — but the
-      # rollback apply keeps every infrastructure change B's revision carried.
-      # Deploy A's drain is still pending, still sees A's generation as current,
-      # and its "capacity-only" apply runs against A's older pinned revision —
-      # quietly reverting B's infrastructure hours later.
-      #
-      # Advancing on every apply ATTEMPT closes that: any deploy that could have
-      # touched infrastructure invalidates the pending drains. The cost is that a
-      # failed deploy also aborts a healthy pending drain, leaving the old slot at
-      # capacity until someone re-runs it. That is the safe direction to fail, and
-      # cleanup.yml's summary reports it as an abort rather than a drain.
+      # Written before the apply, not after promotion — every deploy attempt
+      # must invalidate pending drains, not just successful ones. See
+      # docs/design-decisions.md#generation-is-written-before-the-apply-not-after-promotion
       - name: Record deployment attempt epoch
         run: |
           aws ssm put-parameter \
@@ -366,16 +331,8 @@ jobs:
           TF_VAR_git_commit: ${{ github.sha }}
           # The NEW slot becomes active in this apply
           TF_VAR_deployment_slot: ${{ steps.slot.outputs.new_slot }}
-          # OVERLAP. Hold the old slot at capacity through this apply so it keeps
-          # serving while the new slot boots and health-checks. Without it a
-          # single apply scales the old slot to 0 while the new one is still
-          # inside its 60s startPeriod — a real outage window, and a rollback
-          # then has to resurrect capacity Terraform believes should be 0.
+          # See docs/design-decisions.md#the-old-slot-stays-at-capacity-through-the-apply
           # cleanup.yml applies with `false` once the drain delay expires.
-          #
-          # Held false on a FIRST deploy: there is no previous slot, and the
-          # standby slot's image is still the "placeholder" default — overlapping
-          # it would ask ECS to run a task definition that can never pull.
           TF_VAR_keep_previous_slot_running: ${{ steps.slot.outputs.current_slot != 'none' }}
           # Previous images stay on old slot (already running)
           TF_VAR_previous_api_image: ${{ steps.prev_images.outputs.api }}
@@ -388,12 +345,8 @@ jobs:
           # wired; a value adds an email subscription (one-time confirmation).
           TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
         run: |
-          # Fail closed on unresolved previous images. The prev_images step turns
-          # every SSM error into "placeholder", and on a non-first deploy the
-          # overlap holds the old slot AT CAPACITY while Terraform assigns it
-          # exactly these images — so a transient SSM failure would replace the
-          # serving tasks with an unpullable task definition. That is the outage
-          # the overlap exists to prevent.
+          # Fail closed on unresolved previous images while the old slot is live —
+          # see docs/design-decisions.md#the-old-slot-stays-at-capacity-through-the-apply
           if [[ "${{ steps.slot.outputs.current_slot }}" != "none" ]]; then
             if [[ -z "${TF_VAR_previous_api_image:-}" || "${TF_VAR_previous_api_image}" == "placeholder" || \
                   -z "${TF_VAR_previous_worker_image:-}" || "${TF_VAR_previous_worker_image}" == "placeholder" ]]; then
@@ -413,9 +366,35 @@ jobs:
           terraform apply -input=false -var-file=terraform.tfvars -auto-approve
         continue-on-error: true
 
+      # ECS's own deployment_circuit_breaker (rollback=true) can silently revert
+      # a service to its PREVIOUS task definition mid-poll if enough tasks fail
+      # to reach RUNNING — done entirely inside ECS, no Terraform/workflow call
+      # involved. The health check below only checked running-count + container
+      # health, so a self-reverted (old, known-good) service would read as
+      # healthy and get promoted — a false-positive shipping the OLD image.
+      # See docs/design-decisions.md#health-check-verifies-the-task-definition-not-just-health-status
+      - name: Capture expected task definitions
+        id: expected_td
+        if: steps.tf_apply.outcome == 'success'
+        run: |
+          NEW_SLOT="${{ steps.slot.outputs.new_slot }}"
+          CLUSTER="nexusdeploy-${{ inputs.environment }}-$NEW_SLOT"
+          for svc in api worker beat; do
+            TD=$(aws ecs describe-services \
+              --cluster $CLUSTER --services "nexusdeploy-${{ inputs.environment }}-$NEW_SLOT-$svc" \
+              --region ${{ env.AWS_REGION }} \
+              --query 'services[0].taskDefinition' --output text)
+            echo "${svc}_td=$TD" >> $GITHUB_OUTPUT
+            echo "Expected $svc task definition: $TD"
+          done
+
       - name: Health check new slot
         id: health
         if: steps.tf_apply.outcome == 'success'
+        env:
+          API_TD_EXPECTED: ${{ steps.expected_td.outputs.api_td }}
+          WORKER_TD_EXPECTED: ${{ steps.expected_td.outputs.worker_td }}
+          BEAT_TD_EXPECTED: ${{ steps.expected_td.outputs.beat_td }}
         run: |
           NEW_SLOT="${{ steps.slot.outputs.new_slot }}"
           CLUSTER="nexusdeploy-${{ inputs.environment }}-$NEW_SLOT"
@@ -438,12 +417,14 @@ jobs:
               --region ${{ env.AWS_REGION }} \
               --query 'services[0].desiredCount' --output text 2>/dev/null || echo "1")
 
-            # Container-level health, not just "is the task RUNNING". A task
-            # counts as RUNNING throughout its 60s startPeriod — before /health
-            # has passed even once — so running==desired alone can promote a slot
-            # whose app is failing /health, flip traffic, and drain the old slot
-            # into a dead deployment. Gate on the API tasks' healthStatus.
+            # Container-level health, not just RUNNING — a task counts as RUNNING
+            # throughout its startPeriod, before /health has passed even once.
+            # Also verify taskDefinitionArn == what we expect: ECS's own
+            # circuit-breaker rollback (see above) can revert the SERVICE to
+            # the previous, already-healthy revision mid-poll — matching
+            # counts/health alone would then false-positive as "new slot ok".
             HEALTH="none"
+            API_TD_MATCH=false
             if [[ "$RUNNING" =~ ^[0-9]+$ && "$RUNNING" == "$DESIRED" && "$RUNNING" != "0" ]]; then
               ARNS=$(aws ecs list-tasks \
                 --cluster $CLUSTER --service-name $SERVICE --desired-status RUNNING \
@@ -454,37 +435,49 @@ jobs:
                   --cluster $CLUSTER --tasks $ARNS \
                   --region ${{ env.AWS_REGION }} \
                   --query 'tasks[].healthStatus' --output text 2>/dev/null || echo "none")
+                TASK_TDS=$(aws ecs describe-tasks \
+                  --cluster $CLUSTER --tasks $ARNS \
+                  --region ${{ env.AWS_REGION }} \
+                  --query 'tasks[].taskDefinitionArn' --output text 2>/dev/null || echo "")
+                # Every running task must be on the expected revision — a mix
+                # (or all-old) means ECS reverted this service on its own.
+                API_TD_MATCH=true
+                for td in $TASK_TDS; do
+                  [[ "$td" != "$API_TD_EXPECTED" ]] && API_TD_MATCH=false
+                done
               fi
             fi
 
-            # Worker and beat define no container health check, so they can only
-            # be gated on runningCount == desiredCount — but they DO have to be
-            # gated. Checking the API alone would promote (and later drain the
-            # old slot) while the new slot's Celery worker or beat is crash-
-            # looping, leaving the queue unprocessed with a green deploy.
+            # Worker and beat define no container health check, so they're gated
+            # on runningCount == desiredCount instead — checking the API alone
+            # would promote a slot whose worker or beat is crash-looping. Same
+            # task-definition check as API, for the same circuit-breaker reason.
             SIDECARS_OK=true
             SIDECAR_STATUS=""
             for svc in worker beat; do
-              read -r S_RUN S_DES < <(aws ecs describe-services \
+              read -r S_RUN S_DES S_TD < <(aws ecs describe-services \
                 --cluster $CLUSTER --services "nexusdeploy-${{ inputs.environment }}-$NEW_SLOT-$svc" \
                 --region ${{ env.AWS_REGION }} \
-                --query 'services[0].[runningCount,desiredCount]' --output text 2>/dev/null || echo "0 1")
+                --query 'services[0].[runningCount,desiredCount,taskDefinition]' --output text 2>/dev/null || echo "0 1 none")
               SIDECAR_STATUS="$SIDECAR_STATUS $svc=${S_RUN:-0}/${S_DES:-1}"
-              if [[ ! "$S_RUN" =~ ^[0-9]+$ || "$S_RUN" != "$S_DES" || "$S_RUN" == "0" ]]; then
+              EXPECTED_VAR="$(echo $svc | tr '[:lower:]' '[:upper:]')_TD_EXPECTED"
+              if [[ ! "$S_RUN" =~ ^[0-9]+$ || "$S_RUN" != "$S_DES" || "$S_RUN" == "0" \
+                    || "$S_TD" != "${!EXPECTED_VAR}" ]]; then
                 SIDECARS_OK=false
               fi
             done
 
-            echo "  api: $RUNNING/$DESIRED health=$HEALTH |$SIDECAR_STATUS (${ELAPSED}s elapsed)"
+            echo "  api: $RUNNING/$DESIRED health=$HEALTH td_match=$API_TD_MATCH |$SIDECAR_STATUS (${ELAPSED}s elapsed)"
 
-            # Healthy only when the API counts match AND every API task is
-            # HEALTHY (no UNHEALTHY, no still-starting UNKNOWN) AND worker/beat
-            # have reached their desired counts.
+            # Healthy only when the API counts match, every API task is HEALTHY
+            # (no UNHEALTHY, no still-starting UNKNOWN) AND on the expected
+            # revision, AND worker/beat are at desired count on their expected
+            # revision too.
             if [[ "$RUNNING" =~ ^[0-9]+$ && "$RUNNING" == "$DESIRED" && "$RUNNING" != "0" \
                   && "$HEALTH" != "none" && "$HEALTH" != *UNHEALTHY* && "$HEALTH" != *UNKNOWN* \
-                  && "$SIDECARS_OK" == "true" ]]; then
+                  && "$API_TD_MATCH" == "true" && "$SIDECARS_OK" == "true" ]]; then
               echo "health_ok=true" >> $GITHUB_OUTPUT
-              echo "✅ New slot is healthy (API tasks HEALTHY, worker+beat at desired count)!"
+              echo "✅ New slot is healthy (API tasks HEALTHY, worker+beat at desired count, all on expected revision)!"
               exit 0
             fi
 
@@ -498,10 +491,9 @@ jobs:
       - name: Run database init (ECS one-off task inside VPC)
         id: init_db
         if: ${{ inputs.run_init_db && steps.health.outputs.health_ok == 'true' }}
-        # continue-on-error keeps the job alive so the rollback step can run, but
-        # a non-zero exit is now recorded as steps.init_db.outcome == 'failure'
-        # and BLOCKS promotion. Previously a failed migration still promoted the
-        # slot and drained the old one — shipping a schema-broken deploy green.
+        # continue-on-error keeps the job alive so the rollback step can run;
+        # steps.init_db.outcome still blocks promotion — see
+        # docs/design-decisions.md#init-db-failure-blocks-promotion
         continue-on-error: true
         working-directory: terraform/environments/${{ inputs.environment }}
         run: |
@@ -569,25 +561,14 @@ jobs:
             echo "❌ Promotion gate failed (health_ok=${{ steps.health.outputs.health_ok }}, init_db=${{ steps.init_db.outcome }})."
           fi
 
-      # ORDERING IS THE POINT. active_slot is the flag every other actor keys off
-      # — the next deploy picks its target from it, and cleanup.yml's reclaim
-      # reads prev_*_image to decide which images the surviving slot keeps. SSM
-      # has no multi-parameter transaction, so the writes are ordered instead:
-      # every dependency of active_slot is committed BEFORE active_slot itself.
-      #
-      # If this step fails, the job fails with active_slot still naming the old
-      # slot — which is true, because the old slot never stopped serving. The
-      # next deploy then re-targets the same slot this run was using. Had the
-      # order been reversed, a failure here would leave active_slot naming the
-      # new slot with stale prev images, and the next deploy would resolve the
-      # wrong rollback target.
+      # Ordering matters: active_slot is written last, and every dependency of
+      # it is committed first. See
+      # docs/design-decisions.md#promotion-order
       - name: Record deployed images as 'previous' for next deploy
         if: steps.gate.outputs.promote == 'true'
         run: |
-          # The images just deployed become "previous" for the next rotation.
-          # These inputs are already resolved by the caller (real image on an app
-          # change, current running image on an infra-only deploy) and are never
-          # empty — SSM rejects empty values.
+          # Inputs are already resolved by the caller and never empty — SSM
+          # rejects empty values.
           aws ssm put-parameter \
             --name "/nexusdeploy/${{ inputs.environment }}/deployment/prev_api_image" \
             --value "${{ inputs.api_image }}" \
@@ -600,8 +581,7 @@ jobs:
       - name: Promote new slot (update SSM active_slot)
         if: steps.gate.outputs.promote == 'true'
         run: |
-          # LAST write of the promotion. Everything it depends on is already
-          # committed above, so this single put is the atomic cutover point.
+          # The atomic cutover point — see #promotion-order above.
           aws ssm put-parameter \
             --name "/nexusdeploy/${{ inputs.environment }}/deployment/active_slot" \
             --value "${{ steps.slot.outputs.new_slot }}" \
@@ -625,20 +605,10 @@ jobs:
                   environment: '${{ inputs.environment }}',
                   action: 'drain_old_slot',
                   old_slot: '${{ steps.slot.outputs.current_slot }}',
-                  // Generation guard. The drain sleeps 2h/24h before acting, and
-                  // a newer deploy can promote in that window — potentially back
-                  // onto old_slot. cleanup.yml re-reads SSM after the sleep and
-                  // aborts unless active_slot still equals this value, so a
-                  // stale drain can never scale down the LIVE slot.
+                  // See docs/design-decisions.md#the-drain-guard-closes-an-aba-hole
                   expected_active_slot: '${{ steps.slot.outputs.new_slot }}',
-                  // Closes the ABA hole in expected_active_slot: slots only
-                  // alternate, so two further promotions restore the expected
-                  // value while the drain target has become the newest deploy's
-                  // rollback slot. The generation never repeats.
                   expected_generation: '${{ github.run_id }}',
-                  // The drain fires hours from now; pin it to the code this
-                  // deploy applied so its "capacity-only" apply cannot pick up
-                  // unrelated infrastructure commits landed in the meantime.
+                  // See docs/design-decisions.md#the-drain-reclaims-capacity-through-terraform
                   terraform_ref: '${{ github.sha }}',
                   delay_minutes: '${{ inputs.drain_minutes }}',
                   reason: 'Blue-green: draining old ${{ inputs.environment }} slot after ${{ inputs.drain_label }}'
@@ -687,18 +657,9 @@ jobs:
 
           # Reassert active_slot=$OLD_SLOT.
           #
-          # In the steady state this is a no-op: aws_ssm_parameter.active_slot
-          # declares `lifecycle { ignore_changes = [value] }`, so Terraform only
-          # sets the value when it CREATES the parameter — it does not flip on
-          # update — and promotion is the only thing that writes the new slot.
-          # It is not a no-op on the apply that first creates the parameter, and
-          # it costs nothing to make the recorded slot unambiguous either way.
-          #
-          # Not `|| true`. If this genuinely cannot be written, active_slot may
-          # name the failed slot, and the NEXT deploy would then read it, target
-          # the still-serving OLD slot, and redeploy over live traffic. Retry,
-          # and if it still fails say so loudly — but do not exit, because the
-          # terraform apply below is the more important half of the rollback.
+          # Not `|| true`: an unwritten active_slot would leave the NEXT deploy
+          # targeting the still-serving OLD slot. Retry, then fail loudly on
+          # exhaustion — but don't exit, since the apply below matters more.
           SSM_RESTORED=false
           for attempt in 1 2 3; do
             if aws ssm put-parameter \
@@ -720,13 +681,10 @@ jobs:
           # the failed slot AT CAPACITY. Only the completed apply flips it true.
           echo "reclaimed=false" >> $GITHUB_OUTPUT
 
-          # BOTH images, not just the API one. prev_api_image and
-          # prev_worker_image come from two independent SSM reads that each fall
-          # back to "placeholder" on their own transient error, so a real API
-          # image alongside a placeholder worker is a reachable state — and with
-          # deployment_slot pointing at the OLD slot, that apply would re-image
-          # the still-serving worker with a task definition ECS cannot pull.
-          # The deploy apply and the reclaim apply both already check the pair.
+          # Both images, not just the API one: prev_api_image and
+          # prev_worker_image resolve from two independent SSM reads, so a real
+          # API image alongside a placeholder worker is a reachable state — and
+          # the OLD slot is live for this apply, same as the deploy apply above.
           if [[ -z "${TF_VAR_api_image:-}" || "${TF_VAR_api_image}" == "placeholder" || \
                 -z "${TF_VAR_worker_image:-}" || "${TF_VAR_worker_image}" == "placeholder" ]]; then
             echo "::warning::Previous images did not fully resolve (api='${TF_VAR_api_image:-}', worker='${TF_VAR_worker_image:-}') — skipping the rollback apply to avoid re-imaging the live slot with a placeholder. $NEW_SLOT is left UP for debugging; active_slot points at $OLD_SLOT."
@@ -741,10 +699,7 @@ jobs:
             export TF_VAR_monitoring_allowed_cidr='["'"${TF_VAR_monitoring_allowed_cidr}"'"]'
           fi
 
-          # Terraform owns desired_count (it is NOT in the ECS module's
-          # ignore_changes), so scaling the failed slot down has to go through an
-          # apply. An `aws ecs update-service` here would be drift that the very
-          # next deploy silently reverts.
+          # See docs/design-decisions.md#the-drain-reclaims-capacity-through-terraform
           terraform apply -input=false -var-file=terraform.tfvars -auto-approve
           echo "reclaimed=true" >> $GITHUB_OUTPUT
           echo "✅ Rollback complete — $OLD_SLOT serving on previous images, $NEW_SLOT scaled to 0"

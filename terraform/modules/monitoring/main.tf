@@ -9,19 +9,12 @@ terraform {
   }
 }
 
-# ─────────────────────────────────────────────
-# Monitoring Module
+# Prometheus + Grafana on EC2 t3.micro (free tier). Config files live in S3
+# (s3://<state_bucket>/monitoring/config/<env>/) and are downloaded at EC2
+# boot — keeps user_data under the 16KB limit.
 
 data "aws_caller_identity" "current" {}
-# Prometheus + Grafana on EC2 t3.micro (free tier)
-#
-# Config files are stored in S3 (s3://<state_bucket>/monitoring/config/<env>/)
-# and downloaded at EC2 boot time. This keeps user_data under the 16KB limit.
-# ─────────────────────────────────────────────
 
-# ── Upload monitoring configs to S3 ──────────────────────────────────────────
-# These files are downloaded by the EC2 instance at boot via aws s3 cp.
-# Storing them in S3 avoids the 16KB EC2 user_data size limit.
 locals {
   # Env-scoped so each environment's monitoring artifacts are isolated in S3.
   # This lets a cleanup of one env (aws s3 rm .../monitoring/config/<env>/)
@@ -29,7 +22,6 @@ locals {
   # in parallel.
   config_prefix = "monitoring/config/${var.environment}"
 
-  # Static config files uploaded as-is
   static_config_files = {
     "prometheus.yml"             = "${path.module}/files/prometheus.yml"
     "cloudwatch-exporter.yml"    = "${path.module}/files/cloudwatch-exporter.yml"
@@ -68,7 +60,7 @@ resource "aws_s3_object" "monitoring_configs_rendered" {
   tags    = var.common_tags
 }
 
-# ── IAM Role for the monitoring EC2 instance ─────────────────────────────────
+# IAM role for the monitoring EC2 instance
 resource "aws_iam_role" "monitoring" {
   name = "${var.project}-${var.environment}-monitoring-ec2"
 
@@ -109,8 +101,8 @@ resource "aws_iam_role_policy" "monitoring_cloudwatch" {
         Resource = "*"
       },
       {
-        # YACE needs tag:GetResources to discover resources via searchTags
-        # Plus describe APIs for ECS, RDS, ElastiCache metric collection
+        # YACE needs tag:GetResources to discover resources via searchTags,
+        # plus describe APIs for ECS/RDS/ElastiCache metric collection.
         Sid    = "YACEDiscovery"
         Effect = "Allow"
         Action = [
@@ -169,7 +161,7 @@ resource "aws_iam_instance_profile" "monitoring" {
   tags = var.common_tags
 }
 
-# ── EC2 Instance ──────────────────────────────────────────────────────────────
+# EC2 instance
 data "aws_ami" "ubuntu" {
   most_recent = true
   owners      = ["099720109477"] # Canonical
@@ -218,7 +210,6 @@ resource "aws_instance" "monitoring" {
     # to avoid embedding secrets in EC2 user_data (visible in AWS console)
   }))
 
-  # Replace instance when user_data changes (new config = new boot)
   user_data_replace_on_change = true
 
   # Ensure configs are uploaded to S3 before instance boots
@@ -232,17 +223,7 @@ resource "aws_instance" "monitoring" {
   })
 }
 
-# ── SNS: alarm notifications ──────────────────────────────────────────────────
-# The alarms below route both ALARM and OK transitions here. The topic itself is
-# free; email delivery is free; the alarms already bill (~$0.10 each) whether or
-# not anything is subscribed — so wiring this adds no recurring cost and just
-# makes the alarms actually notify. A blank alert_email still creates and wires
-# the topic (alarms show up in the SNS console); set alert_email to also get mail.
-#
-# Left on the AWS-managed SSE default (unencrypted). Encrypting with the built-in
-# alias/aws/sns key would BLOCK CloudWatch from publishing (its key policy omits
-# cloudwatch.amazonaws.com), and a customer-managed key is ~$1/mo — deliberately
-# not worth it for alarm fan-out on a demo stack.
+# See docs/design-decisions.md#alarm-notifications-are-wired-unconditionally
 #checkov:skip=CKV_AWS_26:CloudWatch cannot publish to an aws/sns-encrypted topic; CMK not justified here
 resource "aws_sns_topic" "alerts" {
   name = "${var.project}-${var.environment}-alerts"
@@ -256,7 +237,6 @@ resource "aws_sns_topic_subscription" "alerts_email" {
   endpoint  = var.alert_email
 }
 
-# ── CloudWatch Alarms ─────────────────────────────────────────────────────────
 # One API CPU alarm per cluster: blue-green environments run two clusters
 # (one per slot) and the active one alternates, so both must be watched.
 # The idle slot has desired_count=0 → no data → notBreaching keeps it green.
@@ -320,25 +300,7 @@ resource "aws_cloudwatch_metric_alarm" "redis_memory_high" {
   tags          = var.common_tags
 }
 
-# ── ECS service task shortfall ────────────────────────────────────────────────
-# The gap this closes: a service can sit at 0 running tasks indefinitely and
-# every existing alarm stays green. CPU alarms cannot catch it — a service with
-# no tasks reports no CPU, which is missing data, not high data. That is exactly
-# how a crash-looping beat went unnoticed: green deploy, green alarms, no
-# scheduled tasks running at all.
-#
-# Metric math (desired - running) rather than a plain threshold on running,
-# because blue-green idles a whole slot at desired_count=0. A "running < 1"
-# alarm would fire permanently for the idle slot; the shortfall is 0 - 0 = 0
-# there, so only a genuine deficit alarms.
-#
-# PROD ONLY, and not by preference: RunningTaskCount/DesiredTaskCount come from
-# Container Insights, which modules/ecs enables solely on prod as a cost
-# trade-off. Dev and staging get deploy-time coverage instead (the worker/beat
-# checks in deploy.yml and deploy-blue-green.yml), which catches a service that
-# never starts but not one that dies later. To get runtime coverage in staging,
-# enable Container Insights on its cluster — this alarm then applies with no
-# change here.
+# See docs/design-decisions.md#task-shortfall-alarm-catches-what-cpu-alarms-cant
 locals {
   task_shortfall_targets = startswith(var.environment, "prod") ? {
     for pair in setproduct(var.ecs_cluster_names, ["api", "worker", "beat"]) :
@@ -399,7 +361,6 @@ resource "aws_cloudwatch_metric_alarm" "ecs_service_tasks_missing" {
   tags          = var.common_tags
 }
 
-# ── CloudWatch Dashboard ──────────────────────────────────────────────────────
 resource "aws_cloudwatch_dashboard" "main" {
   dashboard_name = "${var.project}-${var.environment}"
   dashboard_body = jsonencode({

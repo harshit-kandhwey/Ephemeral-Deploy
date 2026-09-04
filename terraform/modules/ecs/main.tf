@@ -9,9 +9,7 @@ terraform {
   }
 }
 
-# ─────────────────────────────────────────────
-# ECS Module - Fargate containers for API + Worker + Beat
-# ─────────────────────────────────────────────
+# Fargate services: API, Celery worker, Celery beat.
 
 locals {
   # var.environment carries the slot suffix in blue-green environments
@@ -19,17 +17,8 @@ locals {
   # silently put production on FARGATE_SPOT with container insights off.
   is_production = startswith(var.environment, "prod")
 
-  # Environment variables shared by the api, worker and beat containers.
-  #
-  # ENV selects the app config in config.py, which only defines
-  # development/production/testing — blue-green slot names like "staging-slot1"
-  # must never leak into it (KeyError at startup).
-  #
-  # The deployed dev environment loads DevelopmentConfig, where DEBUG and
-  # SQLALCHEMY_ECHO default on. SQLALCHEMY_ECHO logs every statement together
-  # with its bind parameters — bcrypt hashes, emails — and on ECS that goes
-  # straight to CloudWatch. Both are forced off here: local docker-compose keeps
-  # them on, the deployed environment does not.
+  # Shared by the api, worker and beat containers. See
+  # docs/design-decisions.md#container-env-strips-the-slot-suffix-and-forces-debug-off
   app_environment = [
     { name = "ENV", value = var.environment == "dev" ? "development" : "production" },
     { name = "FLASK_DEBUG", value = "false" },
@@ -37,7 +26,6 @@ locals {
   ]
 }
 
-# ── ECS Cluster ──────────────────────────────
 resource "aws_ecs_cluster" "main" {
   name = "${var.project}-${var.environment}"
 
@@ -61,7 +49,7 @@ resource "aws_ecs_cluster_capacity_providers" "main" {
   }
 }
 
-# ── CloudWatch Log Groups ─────────────────────
+# CloudWatch log groups
 resource "aws_cloudwatch_log_group" "api" {
   name              = "/ecs/${var.project}/${var.environment}/api"
   retention_in_days = var.log_retention_days
@@ -80,7 +68,6 @@ resource "aws_cloudwatch_log_group" "beat" {
   tags              = var.common_tags
 }
 
-# ── Task Definition: API ──────────────────────
 resource "aws_ecs_task_definition" "api" {
   family                   = "${var.project}-${var.environment}-api"
   requires_compatibilities = ["FARGATE"]
@@ -140,7 +127,6 @@ resource "aws_ecs_task_definition" "api" {
   tags = var.common_tags
 }
 
-# ── Task Definition: Celery Worker ───────────
 resource "aws_ecs_task_definition" "worker" {
   family                   = "${var.project}-${var.environment}-worker"
   requires_compatibilities = ["FARGATE"]
@@ -171,10 +157,7 @@ resource "aws_ecs_task_definition" "worker" {
         { name = "CELERY_RESULT_BACKEND", valueFrom = "${var.secrets_arn}:CELERY_RESULT_BACKEND::" },
         { name = "DB_MASTER_USER", valueFrom = "${var.init_secrets_arn}:DB_MASTER_USER::" },
         { name = "DB_MASTER_PASSWORD", valueFrom = "${var.init_secrets_arn}:DB_MASTER_PASSWORD::" },
-        # Seed passwords for init_db's demo data — generated per-env by Terraform
-        # and kept in a SEPARATE secret from the DB master credentials, so demo
-        # logins can be delegated without exposing DB_MASTER_PASSWORD. Only the
-        # worker/init task gets these; the API task definition does not.
+        # See docs/design-decisions.md#seed-passwords-are-a-separate-secret-from-db-credentials
         { name = "SEED_ADMIN_PASSWORD", valueFrom = "${var.seed_secrets_arn}:SEED_ADMIN_PASSWORD::" },
         { name = "SEED_MANAGER_PASSWORD", valueFrom = "${var.seed_secrets_arn}:SEED_MANAGER_PASSWORD::" },
         { name = "SEED_DEV_PASSWORD", valueFrom = "${var.seed_secrets_arn}:SEED_DEV_PASSWORD::" },
@@ -196,7 +179,6 @@ resource "aws_ecs_task_definition" "worker" {
   tags = var.common_tags
 }
 
-# ── Task Definition: Celery Beat ─────────────
 resource "aws_ecs_task_definition" "beat" {
   family                   = "${var.project}-${var.environment}-beat"
   requires_compatibilities = ["FARGATE"]
@@ -211,31 +193,15 @@ resource "aws_ecs_task_definition" "beat" {
       name      = "beat"
       image     = var.worker_image
       essential = true
-      # --schedule is NOT optional here. Celery Beat writes its schedule database
-      # to the working directory by default, and the image's WORKDIR (/app) is
-      # root-owned: Dockerfile.worker's `COPY --chown=celeryuser` sets ownership
-      # on the copied CONTENTS, not on the directory itself, so the celeryuser
-      # the container runs as cannot create a file there. Beat crashed on boot
-      # with "_gdbm.error: [Errno 13] Permission denied: 'celerybeat-schedule'"
-      # and the deployment circuit breaker retired every task.
-      #
-      # Pointing the schedule at /tmp is the right fix rather than making /app
-      # writable: the code directory SHOULD stay read-only to the runtime user,
-      # and Beat's schedule is disposable state (it tracks last-run times and is
-      # rebuilt from the beat_schedule config on boot). The worker is unaffected
-      # because it never writes to the working directory.
+      # See docs/design-decisions.md#celery-beat-is-a-singleton
       command = ["celery", "-A", "src.celery_worker:celery", "beat", "--loglevel=info", "--schedule=/tmp/celerybeat-schedule"]
 
-      # Beat shares the worker image, and that image's entrypoint runs init_db.
-      # Both services start together, so leaving this unset had the two of them
-      # racing to initialise the same database. The worker owns initialisation.
       environment = concat(local.app_environment, [
         { name = "SKIP_INIT_DB", value = "true" }
       ])
 
-      # Beat boots the same Flask app as the worker (create_app validates
-      # SECRET_KEY/JWT in production and wires Redis/Celery), so it needs the
-      # full secret set — not just the broker URL.
+      # Beat boots the same Flask app as the worker, so it needs the full
+      # secret set — not just the broker URL.
       secrets = [
         { name = "DATABASE_URL", valueFrom = "${var.secrets_arn}:DATABASE_URL::" },
         { name = "REDIS_URL", valueFrom = "${var.secrets_arn}:REDIS_URL::" },
@@ -259,7 +225,6 @@ resource "aws_ecs_task_definition" "beat" {
   tags = var.common_tags
 }
 
-# ── ECS Service: API ─────────────────────────
 resource "aws_ecs_service" "api" {
   name                              = "${var.project}-${var.environment}-api"
   cluster                           = aws_ecs_cluster.main.id
@@ -280,7 +245,6 @@ resource "aws_ecs_service" "api" {
     assign_public_ip = false # Private subnet - no public IP needed
   }
 
-  # Uncomment to attach to ALB (shows LB knowledge)
   # load_balancer {
   #   target_group_arn = var.alb_target_group_arn
   #   container_name   = "api"
@@ -292,19 +256,14 @@ resource "aws_ecs_service" "api" {
     rollback = true # Auto-rollback on failed deployment
   }
 
+  # See docs/design-decisions.md#alb-is-commented-out-not-deleted
   deployment_controller {
     type = "ECS"
-    # For blue/green: type = "CODE_DEPLOY"  ← Shows awareness of deployment strategies
   }
 
   tags = var.common_tags
-
-  lifecycle {
-    ignore_changes = [task_definition] # Managed by CI/CD
-  }
 }
 
-# ── ECS Service: Worker ───────────────────────
 resource "aws_ecs_service" "worker" {
   name            = "${var.project}-${var.environment}-worker"
   cluster         = aws_ecs_cluster.main.id
@@ -328,20 +287,13 @@ resource "aws_ecs_service" "worker" {
   }
 
   tags = var.common_tags
-
-  lifecycle {
-    ignore_changes = [task_definition] # Managed by CI/CD
-  }
 }
 
-# ── ECS Service: Beat ─────────────────────────
 resource "aws_ecs_service" "beat" {
   name            = "${var.project}-${var.environment}-beat"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.beat.arn
-  # Beat is a singleton: at most one instance ever. In blue-green only the
-  # active slot passes 1; the idle slot passes 0 so two schedulers can't both
-  # fire scheduled tasks. Dev (single slot) defaults to 1.
+  # See docs/design-decisions.md#celery-beat-is-a-singleton
   desired_count = var.beat_desired_count
 
   capacity_provider_strategy {
@@ -360,13 +312,9 @@ resource "aws_ecs_service" "beat" {
   }
 
   tags = var.common_tags
-
-  lifecycle {
-    ignore_changes = [task_definition] # Managed by CI/CD
-  }
 }
 
-# ── Auto Scaling (API only) ───────────────────
+# Auto-scaling: API only — worker/beat scale by fixed desired_count.
 resource "aws_appautoscaling_target" "api" {
   max_capacity       = var.api_max_count
   min_capacity       = var.api_desired_count
@@ -392,11 +340,7 @@ resource "aws_appautoscaling_policy" "api_cpu" {
   }
 }
 
-# ────────────────────────────────────────────────────────────
-# APPLICATION LOAD BALANCER (commented out - cost saving)
-# Uncomment to demonstrate ALB knowledge in interviews
-# Cost: ~$16/month for ALB alone
-# ────────────────────────────────────────────────────────────
+# See docs/design-decisions.md#alb-is-commented-out-not-deleted
 # resource "aws_lb" "api" {
 #   name               = "${var.project}-${var.environment}-alb"
 #   internal           = false

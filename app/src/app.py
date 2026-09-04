@@ -5,12 +5,10 @@ from flask import Flask, jsonify
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from sqlalchemy import text
 
-from .config import config
+from .config import config, redact_url
 from .extensions import cors, db, init_celery, init_redis, jwt, limiter, migrate, swagger
 
-# ── Prometheus metrics ────────────────────────
-# Defined at module level so they survive across requests.
-# Exposed at /metrics for Prometheus scraping.
+# Defined at module level so they survive across requests; exposed at /metrics.
 REQUEST_COUNT = Counter("app_requests_total", "Total HTTP requests", ["method", "endpoint", "status"])
 REQUEST_LATENCY = Histogram("app_request_latency_seconds", "HTTP request latency in seconds", ["endpoint"])
 
@@ -20,10 +18,13 @@ def create_app(config_name="default"):
     app = Flask(__name__)
     app.config.from_object(config[config_name])
 
-    # ── Production startup validation ─────────
-    # Fail loudly at startup if required secrets are missing.
-    # Better to crash immediately with a clear message than to start
-    # and fail on the first real request, or worse — use wrong config silently.
+    # Flask's app.logger inherits root's level (WARNING by default), so any
+    # INFO diagnostic emitted before this call is dropped — including the
+    # rate-limiter storage line below. basicConfig must precede it.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    # Collects every missing var before raising, so a fresh deploy reports all
+    # of them at once instead of one restart-fix-restart cycle per variable.
     if config_name == "production":
         missing = []
 
@@ -47,11 +48,22 @@ def create_app(config_name="default"):
                 "Production startup failed. Missing environment variables:\n" + "\n".join(f"  - {v}" for v in missing)
             )
 
-    # ── Extensions ────────────────────────────
     db.init_app(app)
     migrate.init_app(app, db)
     jwt.init_app(app)
     limiter.init_app(app)
+
+    # See docs/design-decisions.md#rate-limiter-storage-diagnostic-is-instrumentation-for-an-open-bug
+    try:
+        storage_backend = type(limiter.storage).__name__
+    except Exception:
+        storage_backend = "unset"
+
+    app.logger.info(
+        "Rate limiter storage: uri=%s backend=%s",
+        redact_url(app.config.get("RATELIMIT_STORAGE_URI")),
+        storage_backend,
+    )
 
     # CORS is scoped to the configured origin allowlist (empty by default).
     # The monitoring console is same-origin via the nginx reverse proxy, so it
@@ -61,7 +73,6 @@ def create_app(config_name="default"):
     init_redis(app)
     init_celery(app)
 
-    # ── JWT blocklist (Redis-backed) ──────────
     @jwt.token_in_blocklist_loader
     def check_if_token_revoked(jwt_header, jwt_payload):
         from .extensions import redis_client as rc
@@ -75,7 +86,6 @@ def create_app(config_name="default"):
             app.logger.exception("Failed to check JWT blocklist")
             return True
 
-    # ── Swagger / API docs ────────────────────
     # Off in production by default — /apidocs advertises every route and schema.
     # Set ENABLE_SWAGGER=true to expose it deliberately (e.g. a staging demo).
     if app.config["ENABLE_SWAGGER"]:
@@ -97,15 +107,10 @@ def create_app(config_name="default"):
         }
         swagger.init_app(app)
 
-    # ── Logging ───────────────────────────────
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-
-    # ── Blueprints ────────────────────────────
     from .api.v1 import api_v1
 
     app.register_blueprint(api_v1, url_prefix="/api/v1")
 
-    # ── Request metrics middleware ────────────
     @app.before_request
     def before_request():
         from flask import request
@@ -126,15 +131,7 @@ def create_app(config_name="default"):
             ).inc()
         return response
 
-    # ── Health check ──────────────────────────
-    # Used by:
-    #   - ECS container health check (restarts unhealthy tasks)
-    #   - Dockerfile HEALTHCHECK instruction
-    #   - Blue-green deployment health polling in deploy.yml
-    # limiter.exempt: the default limits (200/day, 50/hour) would otherwise apply
-    # here. ECS polls /health every 30s (120/hour) and Prometheus scrapes /metrics
-    # every 15s (240/hour) — both blow past 50/hour, and a 429 to the container
-    # health check reads as an unhealthy task, so ECS kills and replaces it.
+    # See docs/design-decisions.md#health-vs-ready
     @app.route("/health")
     @limiter.exempt
     def health():
@@ -178,23 +175,18 @@ def create_app(config_name="default"):
             }
         ), (200 if overall == "healthy" else 503)
 
-    # ── Readiness probe ───────────────────────
-    # Separate from /health — used by load balancers / orchestrators
-    # to know when the container is ready to receive traffic.
+    # See docs/design-decisions.md#health-vs-ready
     @app.route("/ready")
     @limiter.exempt
     def ready():
         return jsonify({"ready": True}), 200
 
-    # ── Prometheus metrics endpoint ───────────
     # Scraped by Prometheus running on the monitoring EC2.
-    # Returns all counters and histograms registered at module level above.
     @app.route("/metrics")
     @limiter.exempt
     def metrics():
         return generate_latest(), 200, {"Content-Type": CONTENT_TYPE_LATEST}
 
-    # ── Root ──────────────────────────────────
     @app.route("/")
     def home():
         return (
@@ -209,7 +201,6 @@ def create_app(config_name="default"):
             200,
         )
 
-    # ── Error handlers ────────────────────────
     @app.errorhandler(404)
     def not_found(error):
         return jsonify({"error": "Not found"}), 404

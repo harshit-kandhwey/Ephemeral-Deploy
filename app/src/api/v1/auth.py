@@ -70,14 +70,12 @@ def register():
     except ValidationError as e:
         return jsonify({"error": e.message}), 400
 
-    # Check if user exists
     if User.query.filter_by(email=data["email"]).first():
         return jsonify({"error": "Email already registered"}), 400
 
     if User.query.filter_by(username=data["username"]).first():
         return jsonify({"error": "Username already taken"}), 400
 
-    # Create user
     user = User(
         email=data["email"],
         username=data["username"],
@@ -88,7 +86,6 @@ def register():
     db.session.add(user)
     db.session.commit()
 
-    # Audit log
     audit = AuditLog(
         user_id=user.id,
         action="created",
@@ -169,11 +166,9 @@ def login():
     if not user.is_active:
         return jsonify({"error": "Account is disabled"}), 403
 
-    # Create tokens
     access_token = create_access_token(identity=str(user.id))
     refresh_token = create_refresh_token(identity=str(user.id))
 
-    # Audit log
     audit = AuditLog(
         user_id=user.id,
         action="login",

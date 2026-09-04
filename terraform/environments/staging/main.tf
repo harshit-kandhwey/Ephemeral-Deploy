@@ -1,13 +1,6 @@
-# ─────────────────────────────────────────────
-# Staging Environment — mirrors prod exactly
-# Branch: staging
-#
-# Purpose: validate prod deployment patterns before
-# promoting changes to main. Same blue-green strategy,
-# same provider pin, same secrets flow as prod.
-#
-# Manual destroy required — no auto-cleanup TTL.
-# ─────────────────────────────────────────────
+# Mirrors prod: same blue-green strategy, provider pin, and secrets flow, so
+# staging validates prod deployment patterns before they reach main. Manual
+# destroy required — no auto-cleanup TTL.
 
 terraform {
   required_version = ">= 1.7.0"
@@ -46,16 +39,9 @@ locals {
 
   active_slot = var.deployment_slot # "slot1" or "slot2"
 
-  # Capacity for the NON-active slot. Blue-green needs the previous slot to keep
-  # serving until the new slot is verified healthy, otherwise a single apply
-  # scales the old slot to 0 while the new one is still inside its startPeriod —
-  # an outage window with no slot serving. The deploy apply passes true (overlap);
-  # the reclaim apply (cleanup.yml, after the drain delay) passes false to
-  # actually scale the drained slot down.
-  #
-  # API and worker only. Beat is a SINGLETON — two Beat containers fire every
-  # scheduled task twice, and the overlap window is 2h (staging) / 24h (prod),
-  # so beat_desired_count stays tied to the active slot alone.
+  # Capacity for the NON-active slot — API/worker only, never beat. See
+  # docs/design-decisions.md#the-old-slot-stays-at-capacity-through-the-apply
+  # and #celery-beat-is-a-singleton.
   inactive_slot_count = var.keep_previous_slot_running ? 1 : 0
 
   common_tags = {
@@ -67,11 +53,8 @@ locals {
   }
 }
 
-# ══════════════════════════════════════════════
-# SECRETS — SSM → Secrets Manager → ECS injection
-# Same flow as prod. Bootstrap must be run for staging
+# Same secrets flow as prod (see CLAUDE.md). Bootstrap must run for staging
 # before first deploy: ./scripts/bootstrap.sh --env staging
-# ══════════════════════════════════════════════
 
 data "aws_ssm_parameter" "db_master_username" {
   name            = "/${local.project}/${local.environment}/db/master_username"
@@ -144,13 +127,7 @@ resource "aws_secretsmanager_secret_version" "init" {
   })
 }
 
-# ── Seed user passwords ───────────────────────────────────────
-# Strong, unique-per-environment passwords for the demo seed users, injected
-# into the worker init task via a SEPARATE secret from the DB master credentials
-# so a demo login can be delegated without exposing DB_MASTER_PASSWORD
-# (GetSecretValue cannot be scoped to a single JSON key). Replaces the hard-coded
-# "ChangeMe-*" fallbacks in init_db.py (visible in the public repo). Retrieve
-# them from Secrets Manager (seed-secrets) to sign in as a seed user.
+# See docs/design-decisions.md#seed-passwords-are-a-separate-secret-from-db-credentials
 resource "random_password" "seed_admin" {
   length           = 24
   special          = true
@@ -186,9 +163,6 @@ resource "aws_secretsmanager_secret_version" "seed" {
   })
 }
 
-# ══════════════════════════════════════════════
-# INFRASTRUCTURE MODULES
-# ══════════════════════════════════════════════
 
 module "iam" {
   source = "../../modules/iam"
@@ -266,9 +240,6 @@ module "elasticache" {
   common_tags              = local.common_tags
 }
 
-# ══════════════════════════════════════════════
-# BLUE-GREEN ECS DEPLOYMENT — same as prod
-# ══════════════════════════════════════════════
 
 module "ecs_slot1" {
   source = "../../modules/ecs"
@@ -366,19 +337,10 @@ module "monitoring" {
   alert_email  = var.alert_email
 }
 
-resource "aws_ssm_parameter" "active_slot" {
-  name  = "/${local.project}/${local.environment}/deployment/active_slot"
-  type  = "String"
-  value = local.active_slot
+# See docs/design-decisions.md#deployment-ssm-parameters-are-workflow-owned
+# — active_slot/generation/prev_*_image are intentionally not Terraform
+# resources.
 
-  tags = local.common_tags
-
-  lifecycle {
-    ignore_changes = [value]
-  }
-}
-
-# ── Outputs ───────────────────────────────────────────────────────────────────
 output "app_secret_arn" {
   value = aws_secretsmanager_secret.app.arn
 }

@@ -1,13 +1,5 @@
-# ─────────────────────────────────────────────
-# Production Environment
-# Branch: main
-#
-# Blue-Green deployment strategy:
-#   - Two ECS service sets (blue + green) can coexist
-#   - New deployment goes to inactive slot
-#   - After 24h health check, old slot is destroyed
-#   - Manual destroy required (no auto-cleanup)
-# ─────────────────────────────────────────────
+# Branch: main. Blue-green (see docs/design-decisions.md#slot-model); 24h
+# drain before the old slot is reclaimed. Manual destroy required.
 
 terraform {
   required_version = ">= 1.7.0"
@@ -44,20 +36,11 @@ locals {
   environment = "prod"
   project     = "nexusdeploy"
 
-  # Blue-green: determine active slot from variable
-  # deploy.yml sets this based on what's currently running
-  active_slot = var.deployment_slot # "slot1" or "slot2"
+  active_slot = var.deployment_slot # "slot1" or "slot2"; deploy.yml sets this
 
-  # Capacity for the NON-active slot. Blue-green needs the previous slot to keep
-  # serving until the new slot is verified healthy, otherwise a single apply
-  # scales the old slot to 0 while the new one is still inside its startPeriod —
-  # an outage window with no slot serving. The deploy apply passes true (overlap);
-  # the reclaim apply (cleanup.yml, after the drain delay) passes false to
-  # actually scale the drained slot down.
-  #
-  # API and worker only. Beat is a SINGLETON — two Beat containers fire every
-  # scheduled task twice, and the overlap window is 2h (staging) / 24h (prod),
-  # so beat_desired_count stays tied to the active slot alone.
+  # Capacity for the NON-active slot — API/worker only, never beat. See
+  # docs/design-decisions.md#the-old-slot-stays-at-capacity-through-the-apply
+  # and #celery-beat-is-a-singleton.
   inactive_slot_count = var.keep_previous_slot_running ? 1 : 0
 
   common_tags = {
@@ -66,25 +49,11 @@ locals {
     ManagedBy   = "terraform"
     GitCommit   = var.git_commit
     Owner       = "devops-team"
-    # No TTL tag in prod - manual destroy only
   }
 }
 
-# ══════════════════════════════════════════════
-# SECRETS — All from SSM, zero hardcoding
-#
-# Flow:
-#   1. bootstrap.sh writes secrets to SSM Parameter Store
-#   2. Terraform reads them via data sources (never stored in .tf or .tfvars)
-#   3. Terraform builds Secrets Manager secret from SSM values
-#   4. ECS injects Secrets Manager values as env vars at container launch
-#   5. App code reads standard env vars — has no knowledge of AWS
-#
-# DB has two users:
-#   master_user  → RDS superuser (only used by Terraform / init scripts)
-#   app_user     → Limited-privilege user the Flask app connects as
-#                  Created by the entrypoint-worker.sh on first boot
-# ══════════════════════════════════════════════
+# Zero hardcoded credentials — see CLAUDE.md "Secrets flow" and
+# "Database initialisation". Read from SSM below, never stored in .tf/.tfvars.
 
 data "aws_ssm_parameter" "db_master_username" {
   name            = "/${local.project}/${local.environment}/db/master_username"
@@ -117,7 +86,6 @@ data "aws_ssm_parameter" "jwt_secret_key" {
 }
 
 
-# ── Secrets Manager (ECS runtime injection) ──
 resource "aws_secretsmanager_secret" "app" {
   name                    = "${local.project}/${local.environment}/app-secrets"
   description             = "Runtime secrets injected by ECS at container launch"
@@ -128,7 +96,6 @@ resource "aws_secretsmanager_secret" "app" {
 resource "aws_secretsmanager_secret_version" "app" {
   secret_id = aws_secretsmanager_secret.app.id
 
-  # All values sourced from SSM - zero hardcoding
   # DB_MASTER_USER/PASSWORD intentionally excluded — injected only into the
   # worker init task via a separate init-secrets secret (see below).
   secret_string = jsonencode({
@@ -145,10 +112,6 @@ resource "aws_secretsmanager_secret_version" "app" {
   })
 }
 
-# ── Init secrets (DB master credentials for worker startup only) ─
-# Scoped narrowly: injected only into the worker task definition so
-# entrypoint-worker.sh can run init_db at startup. The API task
-# never receives these credentials.
 resource "aws_secretsmanager_secret" "init" {
   name                    = "${local.project}/${local.environment}/init-secrets"
   description             = "DB master credentials for worker DB initialisation only"
@@ -165,13 +128,7 @@ resource "aws_secretsmanager_secret_version" "init" {
   })
 }
 
-# ── Seed user passwords ───────────────────────────────────────
-# Strong, unique-per-environment passwords for the demo seed users, injected
-# into the worker init task via a SEPARATE secret from the DB master credentials
-# so a demo login can be delegated without exposing DB_MASTER_PASSWORD
-# (GetSecretValue cannot be scoped to a single JSON key). Replaces the hard-coded
-# "ChangeMe-*" fallbacks in init_db.py (visible in the public repo). Retrieve
-# them from Secrets Manager (seed-secrets) to sign in as a seed user.
+# See docs/design-decisions.md#seed-passwords-are-a-separate-secret-from-db-credentials
 resource "random_password" "seed_admin" {
   length           = 24
   special          = true
@@ -207,9 +164,6 @@ resource "aws_secretsmanager_secret_version" "seed" {
   })
 }
 
-# ══════════════════════════════════════════════
-# INFRASTRUCTURE MODULES
-# ══════════════════════════════════════════════
 
 module "iam" {
   source = "../../modules/iam"
@@ -287,24 +241,9 @@ module "elasticache" {
   common_tags              = local.common_tags
 }
 
-# ══════════════════════════════════════════════
-# BLUE-GREEN ECS DEPLOYMENT
-#
-# How it works (slots are named slot1/slot2; the strategy is blue-green):
-#   1. First deploy: slot = "slot1", only the slot1 ECS services run
-#   2. Next deploy:  slot = "slot2"
-#      - slot2 services launch with the new image (new tasks start)
-#      - Both slots run simultaneously for 24 hours
-#      - deploy.yml polls slot2 health for 24h, then drains slot1
-#   3. If slot2 fails health checks → deploy.yml reverts slot to "slot1"
-#
-# Terraform manages both slots. Once drained, the inactive one has
-# desired_count=0 so it costs nothing while standing by. During a deploy
-# it is held at capacity (keep_previous_slot_running) so it keeps serving
-# until the new slot is verified healthy.
-# ══════════════════════════════════════════════
 
-# ── Blue slot ─────────────────────────────────
+# See docs/design-decisions.md#slot-model. Terraform manages both slots;
+# once drained, the inactive one costs nothing at desired_count=0.
 module "ecs_slot1" {
   source = "../../modules/ecs"
 
@@ -325,7 +264,6 @@ module "ecs_slot1" {
   seed_secrets_arn              = aws_secretsmanager_secret.seed.arn
   log_retention_days            = 14
 
-  # slot1 is active when deployment_slot = "slot1", else it's being drained
   api_desired_count    = local.active_slot == "slot1" ? 1 : local.inactive_slot_count
   worker_desired_count = local.active_slot == "slot1" ? 1 : local.inactive_slot_count
   beat_desired_count   = local.active_slot == "slot1" ? 1 : 0
@@ -344,7 +282,6 @@ module "ecs_slot1" {
   ]
 }
 
-# ── Green slot ────────────────────────────────
 module "ecs_slot2" {
   source = "../../modules/ecs"
 
@@ -365,7 +302,6 @@ module "ecs_slot2" {
   seed_secrets_arn              = aws_secretsmanager_secret.seed.arn
   log_retention_days            = 14
 
-  # slot2 is active when deployment_slot = "slot2"
   api_desired_count    = local.active_slot == "slot2" ? 1 : local.inactive_slot_count
   worker_desired_count = local.active_slot == "slot2" ? 1 : local.inactive_slot_count
   beat_desired_count   = local.active_slot == "slot2" ? 1 : 0
@@ -384,7 +320,6 @@ module "ecs_slot2" {
   ]
 }
 
-# ── Monitoring ────────────────────────────────
 module "monitoring" {
   source = "../../modules/monitoring"
 
@@ -405,21 +340,10 @@ module "monitoring" {
   alert_email  = var.alert_email
 }
 
-# ── SSM: Store active slot for next deployment ─
-# deploy.yml reads this to know which slot is currently active
-resource "aws_ssm_parameter" "active_slot" {
-  name  = "/${local.project}/${local.environment}/deployment/active_slot"
-  type  = "String"
-  value = local.active_slot
+# See docs/design-decisions.md#deployment-ssm-parameters-are-workflow-owned
+# — active_slot/generation/prev_*_image are intentionally not Terraform
+# resources.
 
-  tags = local.common_tags
-
-  lifecycle {
-    ignore_changes = [value] # deploy.yml manages this value, not Terraform
-  }
-}
-
-# ── Outputs ───────────────────────────────────────────────────────────────────
 output "app_secret_arn" {
   description = "ARN of the app secrets in Secrets Manager"
   value       = aws_secretsmanager_secret.app.arn

@@ -1,34 +1,18 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# imports.tf — Adopt bootstrap-created resources into Terraform state
-#
-# The GitHub OIDC provider and deploy IAM role are owned by bootstrap.sh.
-# Bootstrap is the source of truth for their permissions — Terraform imports
-# them into state so it can reference them, but never modifies them.
-#
-# lifecycle { ignore_changes = all } in modules/iam/main.tf ensures Terraform
-# will never overwrite what bootstrap created, even if the config differs.
-#
-# How it works (Terraform 1.5+):
-#   First apply  → imports existing resource into state, no changes made
-#   Subsequent   → resource already in state, import block silently ignored
-#
-# NOTE: import block `id` values must be literal strings — expressions are
-# not supported. Account ID 415838720130 is hardcoded intentionally.
-# ─────────────────────────────────────────────────────────────────────────────
+# Adopts bootstrap-created resources into Terraform state. See
+# docs/design-decisions.md#bootstrap-owns-the-deploy-role-identity. Terraform
+# import block `id` values must be literal strings, not expressions — the
+# account ID below is hardcoded for that reason, not by oversight.
 
-# GitHub OIDC provider — owned by bootstrap.sh, never modified by Terraform
 import {
   to = module.iam.aws_iam_openid_connect_provider.github[0]
   id = "arn:aws:iam::415838720130:oidc-provider/token.actions.githubusercontent.com"
 }
 
-# GitHub Actions deploy IAM role — owned by bootstrap.sh
 import {
   to = module.iam.aws_iam_role.github_actions_deploy
   id = "nexusdeploy-github-actions-deploy"
 }
 
-# Inline policies — split into two to stay under 10240 char limit per policy
 import {
   to = module.iam.aws_iam_role_policy.github_actions_deploy
   id = "nexusdeploy-github-actions-deploy:nexusdeploy-github-actions-deploy-1"
@@ -40,9 +24,7 @@ import {
 }
 
 
-# ECR repositories and lifecycle policies are managed by the ecr-provision job.
-# Import blocks are NOT used for ECR because:
-#   - If repos missing → ecr-provision creates them via terraform apply -target=module.ecr,
-#     and an import block for a non-existent repo would fail that very apply
-#   - If repos exist but state was wiped → the tolerant adopt() step in deploy.yml
-#     (terraform import || true) brings them back into state before the full apply
+# ECR is deliberately NOT imported here: a missing repo would fail this
+# import outright, whereas ecr-provision's own `terraform apply
+# -target=module.ecr` creates it; deploy.yml's tolerant `adopt()` (import ||
+# true) handles the case where the repo exists but state was wiped.
