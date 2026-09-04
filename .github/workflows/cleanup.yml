@@ -413,9 +413,19 @@ jobs:
     steps:
       - name: Carry environment configuration to the reclaim job
         id: envvars
+        # Must go through env:, not raw ${{ }} inside the echo string: GitHub
+        # substitutes ${{ }} as literal text before bash parses the line, so a
+        # value containing its own quotes (MONITORING_ALLOWED_CIDR is a JSON
+        # array, e.g. ["1.2.3.0/24"]) collides with the echo argument's own
+        # quoting and bash silently eats the inner quotes — corrupting it to
+        # [1.2.3.0/24], which is not valid JSON. $VAR expansion inside a
+        # double-quoted bash string does not have this problem.
+        env:
+          MONITORING_ALLOWED_CIDR: ${{ vars.MONITORING_ALLOWED_CIDR }}
+          ALERT_EMAIL: ${{ vars.ALERT_EMAIL }}
         run: |
-          echo "monitoring_allowed_cidr=${{ vars.MONITORING_ALLOWED_CIDR }}" >> $GITHUB_OUTPUT
-          echo "alert_email=${{ vars.ALERT_EMAIL }}" >> $GITHUB_OUTPUT
+          echo "monitoring_allowed_cidr=$MONITORING_ALLOWED_CIDR" >> $GITHUB_OUTPUT
+          echo "alert_email=$ALERT_EMAIL" >> $GITHUB_OUTPUT
           echo "✅ Drain approved for ${{ github.event.inputs.environment }} — handing off to the reclaim job."
 
   drain-reclaim:

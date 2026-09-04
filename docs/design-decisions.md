@@ -35,6 +35,15 @@ the Security tab and should start a conversation instead.
 Consequence to be aware of: a green check does **not** mean a clean scan. Read
 the job log or the Security tab.
 
+**"Validate each environment" is deliberately NOT in this set.** It runs
+`terraform validate` + `terraform plan` per environment — basic
+syntax/semantic correctness, not a security scanner with the CVE-noise
+problem above. A config that doesn't even validate should fail CI outright,
+so this step has no soft-fail flag. (It ran with `continue-on-error: true`
+from the terraform-lint job's introduction until 2026-09-04 — an oversight,
+not a decision; found during a live-deploy audit and fixed. If you're
+tempted to re-add it, this paragraph is why not to.)
+
 ### Grype SARIF categories
 
 Both images are built and scanned, each uploading under its own category
@@ -557,3 +566,66 @@ schedule file there.
 
 Beat also sets `SKIP_INIT_DB=true`. It shares the worker entrypoint, and without
 this both would race to initialise the database.
+
+### Health check verifies the task definition, not just health status
+
+Every service has ECS's own `deployment_circuit_breaker { enable = true,
+rollback = true }`, alongside this workflow's own hand-rolled health-check
++ rollback in `deploy-blue-green.yml`. They can both be watching the same
+deployment at once.
+
+ECS's circuit breaker counts tasks that fail to reach `RUNNING` (default
+threshold: `max(3, 50% of desired count)` — for this repo's desired counts
+of 1, that floors to 3) and, on rollback, silently reverts the SERVICE to
+its previous `COMPLETED` deployment — entirely inside ECS, no Terraform or
+workflow call involved, no external signal beyond an EventBridge event this
+repo doesn't subscribe to. If that fires while the workflow's own 7-minute
+health-check loop is still polling, the loop would see the OLD (already
+healthy) revision's tasks — matching running count, passing container
+health — and had no way to tell that apart from the NEW revision actually
+having become healthy. It would report `health_ok=true` and promote a slot
+that's silently still running the old image.
+
+Fix: the health check now also compares every running task's
+`taskDefinitionArn` (captured right after the apply, before either rollback
+mechanism can act) against the expected new revision, for API and both
+sidecars. A self-reverted service fails this even with perfect counts and
+health status.
+
+Circuit breaker stays enabled rather than disabled to resolve the overlap —
+it is Amazon's own fast, independent detector for "tasks can't even start,"
+and losing that isn't free just because this workflow's own check now
+closes the promotion-side gap. The two mechanisms can still both act on the
+same failed deployment; that's fine, since only what actually happens to be
+live when the workflow's own check runs determines whether promotion fires.
+
+### GitHub vars containing quotes must cross $GITHUB_OUTPUT via env:, not raw ${{ }}
+
+`echo "key=${{ vars.SOMETHING }}" >> $GITHUB_OUTPUT` looks safe and usually
+is — until the var's own value contains a `"`. GitHub substitutes `${{ }}`
+as literal text before bash ever parses the line, so `${{ vars.X }}`
+expanding to `["1.2.3.0/24"]` turns the line into
+`echo "key=["1.2.3.0/24"]" >> $GITHUB_OUTPUT` — three bash string tokens
+concatenated with no space, and the inner `"` characters are consumed as
+(unintended) quote delimiters rather than literal characters. The value
+that lands in `$GITHUB_OUTPUT` silently loses its inner quotes:
+`key=[1.2.3.0/24]` — not valid JSON.
+
+`MONITORING_ALLOWED_CIDR` is stored as a JSON array (`["223.181.119.0/24"]`)
+specifically so a plain-CIDR value and an already-JSON value can share one
+normalization check downstream (`!= \[*`, wrap if not already bracketed).
+`cleanup.yml`'s `drain-approve` → `drain-reclaim` relay hit exactly this:
+the corrupted value still started with `[`, so the downstream wrap was
+skipped, and Terraform got `[223.181.119.0/24]` as a bare, unquoted,
+unparseable value. First real drain-reclaim ever run (2026-09-04) hit it
+immediately — the old slot's apply errored before touching desired_count,
+leaving it stuck at full capacity alongside the new slot: real duplicated
+spend until caught.
+
+Fix: pass the value through `env:` (an actual environment variable, not a
+re-parsed shell token) and reference it as `$VAR` inside the echo string —
+`$VAR` expansion inside double quotes does not re-parse the value's own
+quote characters as syntax. `deploy-blue-green.yml`'s direct
+`TF_VAR_monitoring_allowed_cidr: ${{ vars.MONITORING_ALLOWED_CIDR }}` reads
+were never affected — that's a step-level `env:` mapping already, not a
+value built into a bash command string via `echo`.

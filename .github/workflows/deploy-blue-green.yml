@@ -361,9 +361,35 @@ jobs:
           terraform apply -input=false -var-file=terraform.tfvars -auto-approve
         continue-on-error: true
 
+      # ECS's own deployment_circuit_breaker (rollback=true) can silently revert
+      # a service to its PREVIOUS task definition mid-poll if enough tasks fail
+      # to reach RUNNING — done entirely inside ECS, no Terraform/workflow call
+      # involved. The health check below only checked running-count + container
+      # health, so a self-reverted (old, known-good) service would read as
+      # healthy and get promoted — a false-positive shipping the OLD image.
+      # See docs/design-decisions.md#health-check-verifies-the-task-definition-not-just-health-status
+      - name: Capture expected task definitions
+        id: expected_td
+        if: steps.tf_apply.outcome == 'success'
+        run: |
+          NEW_SLOT="${{ steps.slot.outputs.new_slot }}"
+          CLUSTER="nexusdeploy-${{ inputs.environment }}-$NEW_SLOT"
+          for svc in api worker beat; do
+            TD=$(aws ecs describe-services \
+              --cluster $CLUSTER --services "nexusdeploy-${{ inputs.environment }}-$NEW_SLOT-$svc" \
+              --region ${{ env.AWS_REGION }} \
+              --query 'services[0].taskDefinition' --output text)
+            echo "${svc}_td=$TD" >> $GITHUB_OUTPUT
+            echo "Expected $svc task definition: $TD"
+          done
+
       - name: Health check new slot
         id: health
         if: steps.tf_apply.outcome == 'success'
+        env:
+          API_TD_EXPECTED: ${{ steps.expected_td.outputs.api_td }}
+          WORKER_TD_EXPECTED: ${{ steps.expected_td.outputs.worker_td }}
+          BEAT_TD_EXPECTED: ${{ steps.expected_td.outputs.beat_td }}
         run: |
           NEW_SLOT="${{ steps.slot.outputs.new_slot }}"
           CLUSTER="nexusdeploy-${{ inputs.environment }}-$NEW_SLOT"
@@ -388,7 +414,12 @@ jobs:
 
             # Container-level health, not just RUNNING — a task counts as RUNNING
             # throughout its startPeriod, before /health has passed even once.
+            # Also verify taskDefinitionArn == what we expect: ECS's own
+            # circuit-breaker rollback (see above) can revert the SERVICE to
+            # the previous, already-healthy revision mid-poll — matching
+            # counts/health alone would then false-positive as "new slot ok".
             HEALTH="none"
+            API_TD_MATCH=false
             if [[ "$RUNNING" =~ ^[0-9]+$ && "$RUNNING" == "$DESIRED" && "$RUNNING" != "0" ]]; then
               ARNS=$(aws ecs list-tasks \
                 --cluster $CLUSTER --service-name $SERVICE --desired-status RUNNING \
@@ -399,35 +430,49 @@ jobs:
                   --cluster $CLUSTER --tasks $ARNS \
                   --region ${{ env.AWS_REGION }} \
                   --query 'tasks[].healthStatus' --output text 2>/dev/null || echo "none")
+                TASK_TDS=$(aws ecs describe-tasks \
+                  --cluster $CLUSTER --tasks $ARNS \
+                  --region ${{ env.AWS_REGION }} \
+                  --query 'tasks[].taskDefinitionArn' --output text 2>/dev/null || echo "")
+                # Every running task must be on the expected revision — a mix
+                # (or all-old) means ECS reverted this service on its own.
+                API_TD_MATCH=true
+                for td in $TASK_TDS; do
+                  [[ "$td" != "$API_TD_EXPECTED" ]] && API_TD_MATCH=false
+                done
               fi
             fi
 
             # Worker and beat define no container health check, so they're gated
             # on runningCount == desiredCount instead — checking the API alone
-            # would promote a slot whose worker or beat is crash-looping.
+            # would promote a slot whose worker or beat is crash-looping. Same
+            # task-definition check as API, for the same circuit-breaker reason.
             SIDECARS_OK=true
             SIDECAR_STATUS=""
             for svc in worker beat; do
-              read -r S_RUN S_DES < <(aws ecs describe-services \
+              read -r S_RUN S_DES S_TD < <(aws ecs describe-services \
                 --cluster $CLUSTER --services "nexusdeploy-${{ inputs.environment }}-$NEW_SLOT-$svc" \
                 --region ${{ env.AWS_REGION }} \
-                --query 'services[0].[runningCount,desiredCount]' --output text 2>/dev/null || echo "0 1")
+                --query 'services[0].[runningCount,desiredCount,taskDefinition]' --output text 2>/dev/null || echo "0 1 none")
               SIDECAR_STATUS="$SIDECAR_STATUS $svc=${S_RUN:-0}/${S_DES:-1}"
-              if [[ ! "$S_RUN" =~ ^[0-9]+$ || "$S_RUN" != "$S_DES" || "$S_RUN" == "0" ]]; then
+              EXPECTED_VAR="$(echo $svc | tr '[:lower:]' '[:upper:]')_TD_EXPECTED"
+              if [[ ! "$S_RUN" =~ ^[0-9]+$ || "$S_RUN" != "$S_DES" || "$S_RUN" == "0" \
+                    || "$S_TD" != "${!EXPECTED_VAR}" ]]; then
                 SIDECARS_OK=false
               fi
             done
 
-            echo "  api: $RUNNING/$DESIRED health=$HEALTH |$SIDECAR_STATUS (${ELAPSED}s elapsed)"
+            echo "  api: $RUNNING/$DESIRED health=$HEALTH td_match=$API_TD_MATCH |$SIDECAR_STATUS (${ELAPSED}s elapsed)"
 
-            # Healthy only when the API counts match AND every API task is
-            # HEALTHY (no UNHEALTHY, no still-starting UNKNOWN) AND worker/beat
-            # have reached their desired counts.
+            # Healthy only when the API counts match, every API task is HEALTHY
+            # (no UNHEALTHY, no still-starting UNKNOWN) AND on the expected
+            # revision, AND worker/beat are at desired count on their expected
+            # revision too.
             if [[ "$RUNNING" =~ ^[0-9]+$ && "$RUNNING" == "$DESIRED" && "$RUNNING" != "0" \
                   && "$HEALTH" != "none" && "$HEALTH" != *UNHEALTHY* && "$HEALTH" != *UNKNOWN* \
-                  && "$SIDECARS_OK" == "true" ]]; then
+                  && "$API_TD_MATCH" == "true" && "$SIDECARS_OK" == "true" ]]; then
               echo "health_ok=true" >> $GITHUB_OUTPUT
-              echo "✅ New slot is healthy (API tasks HEALTHY, worker+beat at desired count)!"
+              echo "✅ New slot is healthy (API tasks HEALTHY, worker+beat at desired count, all on expected revision)!"
               exit 0
             fi
 

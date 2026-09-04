@@ -370,8 +370,10 @@ jobs:
           #              in via variables from the environment root, across a
           #              module boundary Checkov does not follow.
 
+      # Not continue-on-error: unlike tflint/checkov above (deliberately
+      # advisory — see docs/design-decisions.md#non-blocking-security-scanners),
+      # a config that doesn't even validate/plan should fail the build.
       - name: Validate each environment
-        continue-on-error: true
         env:
           TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/tf-plugin-cache
           # Placeholders so plan can evaluate templatefile() and the other
@@ -391,6 +393,9 @@ jobs:
             terraform validate
             # Catches templatefile() and function errors validate misses;
             # -backend=false means no AWS calls.
+            # grep's own "no matching line" exit (1) must not be mistaken for a
+            # plan failure — check terraform plan's real exit code via
+            # PIPESTATUS[0], not the piped compound's, which is grep's/`true`'s.
             terraform plan -refresh=false -input=false \
               -var-file=terraform.tfvars \
               -var="aws_region=us-east-1" \
@@ -398,6 +403,11 @@ jobs:
               -var="app_s3_bucket=nexusdeploy-attachments-${env}" \
               -var="db_name=nexusdeploy" \
               2>&1 | grep -E "^Error:|^Warning:|Plan:|will be created|will be destroyed" || true
+            PLAN_EXIT=${PIPESTATUS[0]}
+            if [[ "$PLAN_EXIT" != "0" ]]; then
+              echo "::error::terraform plan failed for $env (exit $PLAN_EXIT)"
+              exit 1
+            fi
             cd ../../..
           done
 
