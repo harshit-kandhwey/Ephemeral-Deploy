@@ -331,6 +331,11 @@ jobs:
           TF_VAR_git_commit: ${{ github.sha }}
           # The NEW slot becomes active in this apply
           TF_VAR_deployment_slot: ${{ steps.slot.outputs.new_slot }}
+          # Hold Beat on the OLD slot through this apply — it only cuts over
+          # once promoted, in the step below. Empty on a first deploy (no
+          # old slot to hold it on), so it defaults to the new slot
+          # immediately. See docs/design-decisions.md#celery-beat-is-a-singleton.
+          TF_VAR_beat_slot: ${{ steps.slot.outputs.current_slot != 'none' && steps.slot.outputs.current_slot || '' }}
           # See docs/design-decisions.md#the-old-slot-stays-at-capacity-through-the-apply
           # cleanup.yml applies with `false` once the drain delay expires.
           TF_VAR_keep_previous_slot_running: ${{ steps.slot.outputs.current_slot != 'none' }}
@@ -461,7 +466,12 @@ jobs:
                 --query 'services[0].[runningCount,desiredCount,taskDefinition]' --output text 2>/dev/null || echo "0 1 none")
               SIDECAR_STATUS="$SIDECAR_STATUS $svc=${S_RUN:-0}/${S_DES:-1}"
               EXPECTED_VAR="$(echo $svc | tr '[:lower:]' '[:upper:]')_TD_EXPECTED"
-              if [[ ! "$S_RUN" =~ ^[0-9]+$ || "$S_RUN" != "$S_DES" || "$S_RUN" == "0" \
+              if [[ "$svc" == "beat" && "${{ steps.slot.outputs.current_slot }}" != "none" ]]; then
+                # Beat is intentionally held at 0 on the candidate until the
+                # promotion-time cutover below — confirm no drift, not
+                # RUN==DES. See docs/design-decisions.md#celery-beat-is-a-singleton.
+                [[ "$S_DES" != "0" ]] && SIDECARS_OK=false
+              elif [[ ! "$S_RUN" =~ ^[0-9]+$ || "$S_RUN" != "$S_DES" || "$S_RUN" == "0" \
                     || "$S_TD" != "${!EXPECTED_VAR}" ]]; then
                 SIDECARS_OK=false
               fi
@@ -577,6 +587,42 @@ jobs:
             --name "/nexusdeploy/${{ inputs.environment }}/deployment/prev_worker_image" \
             --value "${{ inputs.worker_image }}" \
             --type String --overwrite --region ${{ env.AWS_REGION }}
+
+      # Beat only ever cuts over once we're this close to promoting — a slot
+      # that failed health check (or, on staging, init_db) never runs it.
+      # See docs/design-decisions.md#celery-beat-is-a-singleton.
+      - name: Terraform Apply → cut Beat to new slot
+        id: beat_cutover
+        if: steps.gate.outputs.promote == 'true' && steps.slot.outputs.current_slot != 'none'
+        continue-on-error: true
+        timeout-minutes: 10
+        working-directory: terraform/environments/${{ inputs.environment }}
+        env:
+          # Full var set, matching the candidate-creation apply above — a
+          # second `terraform apply` re-evaluates the whole config, so any
+          # var left unset here falls back to its variables.tf default (e.g.
+          # previous_api_image → "placeholder") and would apply that drift.
+          TF_VAR_api_image: ${{ inputs.api_image }}
+          TF_VAR_worker_image: ${{ inputs.worker_image }}
+          TF_VAR_git_commit: ${{ github.sha }}
+          TF_VAR_deployment_slot: ${{ steps.slot.outputs.new_slot }}
+          # The only value that actually differs from the apply above.
+          TF_VAR_beat_slot: ${{ steps.slot.outputs.new_slot }}
+          TF_VAR_keep_previous_slot_running: "true"
+          TF_VAR_previous_api_image: ${{ steps.prev_images.outputs.api }}
+          TF_VAR_previous_worker_image: ${{ steps.prev_images.outputs.worker }}
+          TF_VAR_monitoring_allowed_cidr: ${{ vars.MONITORING_ALLOWED_CIDR }}
+          TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+        run: |
+          if [[ "${TF_VAR_monitoring_allowed_cidr}" != \[* ]]; then
+            export TF_VAR_monitoring_allowed_cidr='["'"${TF_VAR_monitoring_allowed_cidr}"'"]'
+          fi
+          # -target keeps this apply scoped to just Beat's two service
+          # resources — precedented in this repo (cleanup.yml, deploy.yml).
+          terraform apply -input=false -var-file=terraform.tfvars -auto-approve \
+            -target=module.ecs_slot1.aws_ecs_service.beat \
+            -target=module.ecs_slot2.aws_ecs_service.beat
+          echo "✅ Beat cut over to ${{ steps.slot.outputs.new_slot }}"
 
       - name: Promote new slot (update SSM active_slot)
         if: steps.gate.outputs.promote == 'true'
@@ -734,6 +780,9 @@ jobs:
             echo "| Active slot   | ${{ steps.slot.outputs.new_slot }} ✅ |" >> $GITHUB_STEP_SUMMARY
             echo "| Image         | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
             echo "| Health gate   | API HEALTHY + worker/beat at desired count |" >> $GITHUB_STEP_SUMMARY
+            if [[ "${{ steps.slot.outputs.current_slot }}" != "none" ]]; then
+              echo "| Beat cutover  | ${{ steps.beat_cutover.outcome }} |" >> $GITHUB_STEP_SUMMARY
+            fi
           else
             # The heading has to agree with the table under it. "Rolled Back" is
             # only true when a rollback both applied AND had somewhere to roll

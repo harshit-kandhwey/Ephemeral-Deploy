@@ -39,6 +39,13 @@ locals {
 
   active_slot = var.deployment_slot # "slot1" or "slot2"
 
+  # Beat's cutover is decoupled from active_slot so a candidate slot only
+  # ever runs Beat once promoted — see
+  # docs/design-decisions.md#celery-beat-is-a-singleton. Empty beat_slot
+  # (the default) tracks active_slot: immediate cutover, which is exactly
+  # what a first deploy (no previous slot to hold Beat back on) wants.
+  beat_active_slot = var.beat_slot != "" ? var.beat_slot : local.active_slot
+
   # Capacity for the NON-active slot — API/worker only, never beat. See
   # docs/design-decisions.md#the-old-slot-stays-at-capacity-through-the-apply
   # and #celery-beat-is-a-singleton.
@@ -263,7 +270,7 @@ module "ecs_slot1" {
 
   api_desired_count    = local.active_slot == "slot1" ? 1 : local.inactive_slot_count
   worker_desired_count = local.active_slot == "slot1" ? 1 : local.inactive_slot_count
-  beat_desired_count   = local.active_slot == "slot1" ? 1 : 0
+  beat_desired_count   = local.beat_active_slot == "slot1" ? 1 : 0
   api_cpu              = 256
   api_memory           = 512
   worker_cpu           = 256
@@ -301,7 +308,7 @@ module "ecs_slot2" {
 
   api_desired_count    = local.active_slot == "slot2" ? 1 : local.inactive_slot_count
   worker_desired_count = local.active_slot == "slot2" ? 1 : local.inactive_slot_count
-  beat_desired_count   = local.active_slot == "slot2" ? 1 : 0
+  beat_desired_count   = local.beat_active_slot == "slot2" ? 1 : 0
   api_cpu              = 256
   api_memory           = 512
   worker_cpu           = 256

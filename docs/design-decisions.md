@@ -573,8 +573,19 @@ non-prod environment.
 ### Celery Beat is a singleton
 
 Beat always runs at `desired_count = 1`. Two Beat instances fire every scheduled
-task twice. This holds across a blue-green overlap as well: during a rotation the
-candidate slot's Beat starts only as the old slot's Beat is scaled to zero.
+task twice.
+
+This holds across a blue-green overlap too, but not via the same apply that
+stands up the candidate slot. `beat_slot`
+(`terraform/environments/{staging,prod}/main.tf`) decouples Beat's cutover
+from `deployment_slot`: the candidate-creation apply holds Beat on the OLD
+slot, and only a second, narrow apply — gated on the same
+`steps.gate.outputs.promote` condition as `active_slot`, see
+#promotion-order — cuts it to the new slot, in `deploy-blue-green.yml`. A
+slot that fails its health check, or (staging) its `init_db` run, never runs
+Beat at all. On a first-ever deploy `beat_slot` is left unset and defaults to
+`active_slot`, so Beat starts with everything else in that single apply —
+there's no previous slot to hold it back from.
 
 Beat writes its schedule database to `/tmp` rather than the working directory.
 `COPY --chown` sets ownership on the copied *contents*, not on the directory
@@ -665,3 +676,32 @@ sees it, so `${{ }}` there is a real (if empty and invalid) expression
 attempt, not inert text. Describe the mechanism in words instead (as this
 section does) — `.md` files like this one are never parsed by GitHub
 Actions, so the literal syntax is safe to show here.
+
+### Worker queue-sharing during drain is a known, deliberate gap
+
+RDS and ElastiCache are declared once per environment, not once per slot
+(`terraform/modules/rds`, `terraform/modules/elasticache`, both wired into
+both `ecs_slot1`/`ecs_slot2` via the same `depends_on` and the same
+Secrets Manager secret) — so both slots' workers share one Postgres and one
+Redis. `keep_previous_slot_running` correctly keeps the old slot's worker up
+throughout the candidate's health check *and* the whole drain window (1h
+staging, up to 24h prod, see #the-old-slot-stays-at-capacity-through-the-apply)
+— by design, so the old slot keeps serving while the new one proves itself.
+But `app/src/extensions.py`'s `init_celery()` sets no `task_default_queue`/
+`task_queues`, and no task anywhere sets a per-task `queue=` — there is
+exactly one implicit default Celery queue, shared by both slots' workers,
+for the entire overlap.
+
+This means an old-version and new-version worker can consume from the same
+queue at once for up to the full drain window — a real version-skew risk if
+a task's payload shape ever changes between the two versions. Not fixed
+here: a real fix needs three coordinated pieces, not one — per-slot queue
+names, producer-side routing to whichever queue the *currently active* slot
+actually reads (nontrivial: the producer doesn't inherently know which slot
+is "current" at enqueue time), and swapping the drain's time-based gate for
+a queue-depth-based one so the old worker's queue is confirmed drained
+before capacity is reclaimed. Left as a named, deliberate boundary rather
+than an unrecorded gap — this project's ALB is disabled (see the ALB note
+in `terraform/modules/ecs/`), so no live client traffic is actually
+load-balanced across slots today, which keeps real-world urgency low
+without making the architectural gap not worth fixing eventually.

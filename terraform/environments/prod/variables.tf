@@ -68,6 +68,17 @@ variable "keep_previous_slot_running" {
   default     = false
 }
 
+variable "beat_slot" {
+  description = "Slot Celery Beat should run on. Empty (default) tracks deployment_slot — Beat cuts over in the same apply as API/worker, which is what a first-ever deploy (no previous slot to hold it back) wants. deploy-blue-green.yml sets this explicitly on a rotation deploy: it holds Beat on the OLD slot during the candidate-creation apply, then a second, narrow apply cuts it to the new slot only once promoted. See docs/design-decisions.md#celery-beat-is-a-singleton."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = contains(["", "slot1", "slot2"], var.beat_slot)
+    error_message = "beat_slot must be \"\", \"slot1\", or \"slot2\"."
+  }
+}
+
 variable "previous_api_image" {
   description = "Previous API image — kept on the inactive slot"
   type        = string
