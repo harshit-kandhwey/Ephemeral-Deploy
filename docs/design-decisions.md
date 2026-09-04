@@ -487,6 +487,48 @@ native blue-green primitive — the two mechanisms would be redundant.
 health and what blue-green promotion polls. `/ready` always returns 200 and is
 for load balancers gating traffic.
 
+Both are exempt from the default rate limit (200/day, 50/hour), and the
+exemption is load-bearing, not defensive: ECS polls `/health` every 30s
+(120/hour) and Prometheus scrapes `/metrics` every 15s (240/hour), both well
+past 50/hour. A 429 on the container health check reads to ECS as an
+unhealthy task, so an un-exempted limiter would get the task killed and
+replaced by its own health check.
+
+### Rate-limiter storage diagnostic is instrumentation for an open bug
+
+`create_app` logs `Rate limiter storage: uri=<redacted> backend=<class>`
+right after `limiter.init_app`, to answer a question ECS Exec being disabled
+otherwise blocks: staging containers have logged flask-limiter's "using the
+in-memory storage" warning even though `RATELIMIT_STORAGE_URI` resolves to a
+real Redis URL — a case a local repro of `create_app("production")` has
+never reproduced. In-memory storage means limits are per-Gunicorn-worker and
+reset on restart, so the documented global limit silently isn't in force.
+`backend=unset` in the logs would confirm it.
+
+`limiter.storage` is a property guarded by `assert self._storage`, so it
+raises `AssertionError`, not `AttributeError`, when storage is unset (the
+normal state when rate limiting is disabled, as `TestingConfig` does) —
+`getattr(..., None)` does not protect against an assertion, only a bare
+`try`/`except` does. This distinction has broken 42 tests once already.
+
+### Seeding fails closed outside local development
+
+`seed_sample_data` refuses to run against a deployed database using default
+`"ChangeMe-*"` passwords: outside `ENV == "development"`, every one of
+`SEED_ADMIN_PASSWORD`/`SEED_MANAGER_PASSWORD`/`SEED_DEV_PASSWORD` must be
+present (injected from the `seed-secrets` Secrets Manager secret via the
+worker task definition) or the function raises rather than falling back to
+the hardcoded values that are visible in this public repo.
+
+The guard checks `!= "development"`, not `== "production"`. In practice
+`ENV` is only ever `"development"` (local and deployed dev) or
+`"production"` (deployed staging and prod — see `create_app`, which accepts
+no other value), so the two checks are currently equivalent. `!=
+"development"` is the more robust expression of intent: it stays correct
+even if that environment-name mapping changes, where `== "production"`
+would silently start accepting default credentials in a new non-dev,
+non-prod environment.
+
 ### Celery Beat is a singleton
 
 Beat always runs at `desired_count = 1`. Two Beat instances fire every scheduled

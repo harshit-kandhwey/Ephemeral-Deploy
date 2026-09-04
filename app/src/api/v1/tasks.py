@@ -61,11 +61,10 @@ def get_tasks():
     if error_response:
         return error_response
 
-    # Base query
     query = Task.query
 
-    # Filters. The id filters are coerced with type=int: passing the raw string
-    # through to the query sends a non-numeric value to an integer column, which
+    # The id filters are coerced with type=int: passing the raw string through
+    # to the query sends a non-numeric value to an integer column, which
     # Postgres rejects with a DataError — a 500 for what is really a bad request.
     if request.args.get("status"):
         query = query.filter_by(status=request.args.get("status"))
@@ -85,12 +84,10 @@ def get_tasks():
             return jsonify({"error": "assignee_id must be an integer"}), 400
         query = query.filter_by(assignee_id=assignee_id)
 
-    # If not admin, only show tasks from user's team projects
     if user.role != "admin":
         team_project_ids = [p.id for p in user.team.projects] if user.team else []
         query = query.filter(Task.project_id.in_(team_project_ids))
 
-    # Pagination
     page = max(request.args.get("page", 1, type=int) or 1, 1)
     per_page = max(1, min(request.args.get("per_page", 20, type=int) or 20, 100))
 
@@ -224,7 +221,6 @@ def create_task():
     db.session.add(task)
     db.session.commit()
 
-    # Audit log
     audit = AuditLog(
         user_id=user_id,
         action="created",
@@ -236,7 +232,6 @@ def create_task():
     db.session.add(audit)
     db.session.commit()
 
-    # Send notification (async)
     if task.assignee_id:
         from ...tasks.email_tasks import send_task_assignment_email
 
@@ -336,7 +331,6 @@ def update_task(task_id):
         task.assignee_id = data["assignee_id"]
         changes["assignee_id"] = {"old": old_assignee, "new": data["assignee_id"]}
 
-        # Notify new assignee
         if data["assignee_id"] and data["assignee_id"] != old_assignee:
             from ...tasks.email_tasks import send_task_assignment_email
 
@@ -344,7 +338,6 @@ def update_task(task_id):
 
     db.session.commit()
 
-    # Audit log
     audit = AuditLog(
         user_id=user_id,
         action="updated",

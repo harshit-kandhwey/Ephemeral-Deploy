@@ -98,7 +98,6 @@ def create_app_user():
         conn = _get_master_conn()
         cursor = conn.cursor()
 
-        # Check if user already exists
         cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (app_user,))
         if cursor.fetchone():
             print(f'✓ App DB user "{app_user}" already exists')
@@ -114,8 +113,7 @@ def create_app_user():
             )
             print(f'✓ App DB user "{app_user}" created')
 
-        # Grant privileges on the database and all tables.
-        # All identifiers (dbname, app_user) go through sql.Identifier.
+        # All identifiers (dbname, app_user) go through sql.Identifier below.
         parsed = urlparse(os.environ["DATABASE_URL"])
         dbname = parsed.path.lstrip("/").split("?")[0]  # strip ?sslmode=require if present
 
@@ -123,7 +121,6 @@ def create_app_user():
             sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(sql.Identifier(dbname), sql.Identifier(app_user))
         )
 
-        # Grant usage on the public schema and all tables within it
         cursor.execute(sql.SQL("GRANT USAGE, CREATE ON SCHEMA public TO {}").format(sql.Identifier(app_user)))
         cursor.execute(
             sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE " "ON ALL TABLES IN SCHEMA public TO {}").format(
@@ -196,25 +193,13 @@ def seed_sample_data(app):
         return
 
     with app.app_context():
-        # Only seed if the database is empty
         if User.query.count() > 0:
             print("⏭  Skipping seed: database already has users")
             return
 
         print("🌱 Seeding sample data...")
 
-        # Seed passwords are injected from Secrets Manager (seed-secrets) by the
-        # worker task definition — generated per-environment by Terraform. The
-        # "ChangeMe-*" values below are obvious dev-only fallbacks for local
-        # docker-compose; they are visible in this public repo, so any deployed
-        # environment must never fall back to them.
-        #
-        # The guard keys off "not local development" rather than == "production":
-        # ENV is only ever "development" (local + deployed dev) or "production"
-        # (deployed staging + prod) — the ECS task defs map every non-dev
-        # environment to "production", and create_app() accepts no other value —
-        # but gating on != "development" is the robust expression of intent and
-        # cannot be bypassed if that mapping ever changes.
+        # See docs/design-decisions.md#seeding-fails-closed-outside-local-development
         seed_env_keys = ("SEED_ADMIN_PASSWORD", "SEED_MANAGER_PASSWORD", "SEED_DEV_PASSWORD")
         if env != "development":
             missing = [k for k in seed_env_keys if not os.environ.get(k)]
@@ -316,7 +301,7 @@ def seed_sample_data(app):
         print("=" * 60)
         print("\n  Users created: admin, manager, developer1, developer2")
         # Passwords are never logged. In deployed environments they come from
-        # Secrets Manager (init-secrets); for local docker-compose they are the
+        # Secrets Manager (seed-secrets); for local docker-compose they are the
         # SEED_*_PASSWORD env vars, or the documented dev defaults if unset.
         print("  Login: POST /api/v1/auth/login")
         print("=" * 60 + "\n")
@@ -331,16 +316,13 @@ def init_database():
     print(f"  NexusDeploy DB Init  |  ENV={env}")
     print(f'{"=" * 60}\n')
 
-    # Step 1: Create app DB user (skipped locally if creds not set)
     print("── Step 1/3: App DB user ─────────────────────────────")
     create_app_user()
 
-    # Step 2: Create schema
     print("\n── Step 2/3: Schema ──────────────────────────────────")
     app = create_app(env)
     create_schema(app)
 
-    # Step 3: Seed sample data (skipped in prod unless SEED_DB=true)
     print("\n── Step 3/3: Sample data ─────────────────────────────")
     seed_sample_data(app)
 

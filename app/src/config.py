@@ -166,13 +166,10 @@ class ProductionConfig(Config):
     # every route and schema to anyone who can reach the API.
     ENABLE_SWAGGER = _env_flag("ENABLE_SWAGGER", default=False)
 
-    # All three values below deliberately use .get() with no fallback so they
-    # resolve to None when the env var is absent. They are NOT fail-fast here
-    # by design — the validation block in app.py's create_app() is the single
-    # authoritative place that checks for missing values and raises a
-    # RuntimeError with a clear message listing every missing variable at once.
-    # Using os.environ['KEY'] here would raise a bare KeyError at import time
-    # with no context, before the logger is even configured.
+    # .get() with no fallback, not os.environ['KEY']: the latter raises a bare
+    # KeyError at import time, before the logger is even configured, instead
+    # of resolving to None and letting create_app()'s validation block name
+    # every missing variable at once.
     SECRET_KEY = os.environ.get("SECRET_KEY")  # validated in app.py
     JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY") or os.environ.get(  # validated in app.py
         "SECRET_KEY"
