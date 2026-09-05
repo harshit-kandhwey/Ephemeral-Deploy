@@ -339,7 +339,7 @@ resource "aws_iam_role_policy" "ecs_execution_secrets" {
 }
 
 # Separate role for the worker task definition, with init_secrets_arn added
-# so entrypoint-worker.sh can run init_db at startup — keeping it separate
+# so entrypoint_worker.py can run init_db at startup — keeping it separate
 # means a task-def change can't accidentally grant the API container access
 # to master DB credentials.
 resource "aws_iam_role" "ecs_execution_worker" {

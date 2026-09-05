@@ -1,6 +1,11 @@
 # ── Stage 1: builder ─────────────────────────────────────────────────────────
 # Identical to the API builder — same requirements.txt, so the layer cache is
 # shared between the two images when they are built in the same run.
+#
+# --target=/opt/deps, not a venv — see the API Dockerfile's builder-stage
+# comment: a copied venv's console scripts and bin/python* symlinks are
+# pointed at this stage's absolute python path, which doesn't exist in the
+# distroless runtime stage. See docs/design-decisions.md#distroless-runtime-images.
 FROM python:3.11-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -8,43 +13,45 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir --target=/opt/deps -r requirements.txt
 
 
 # ── Stage 2: runtime ─────────────────────────────────────────────────────────
-FROM python:3.11-slim
+# Distroless, not python:3.11-slim — see
+# docs/design-decisions.md#distroless-runtime-images. No curl and no shell
+# to debug with via ECS Exec any more; `execute-command` with "python3"
+# drops into a REPL instead. The build toolchain and postgresql-client were
+# already gone here: entrypoint_worker.py runs `python -m src.init_db`,
+# never psql, so nothing needs a database CLI.
+FROM gcr.io/distroless/python3-debian12:nonroot
 
-# curl is kept for debugging inside an ECS Exec session. The build toolchain and
-# postgresql-client are gone: entrypoint-worker.sh runs `python -m src.init_db`,
-# never psql, so nothing here needs a database CLI.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN useradd -m -u 1000 celeryuser
-
-COPY --from=builder /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH" \
+COPY --from=builder /opt/deps /opt/deps
+ENV PYTHONPATH=/opt/deps \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY --chown=celeryuser:celeryuser . /app/
+# nonroot base already runs as uid 65532 — no separate useradd/USER step.
+COPY --chown=65532:65532 . /app/
 
 # Entrypoint lives outside /app so it is not shadowed by the source copy.
-COPY entrypoint-worker.sh /entrypoint-worker.sh
-RUN chmod +x /entrypoint-worker.sh
-
-USER celeryuser
+# No chmod +x / shebang needed: it's never exec'd directly (no shell to
+# resolve a shebang anyway), only ever passed as a script argument to the
+# base image's own python3 entrypoint — see CMD below.
+COPY --chown=65532:65532 entrypoint_worker.py /entrypoint_worker.py
 
 # ── Entry point explanation ───────────────────────────────────────────────────
-# entrypoint-worker.sh runs init_db before starting Celery.
+# No ENTRYPOINT override: the distroless base's own
+# ENTRYPOINT ["/usr/bin/python3.11"] is kept. CMD's first element is the
+# entrypoint script (a plain argument to python3, not an executed file), and
+# entrypoint_worker.py's SKIP_INIT_DB / DB init logic below launches Celery
+# via `python3 -m celery ...` for the same shebang-avoidance reason.
+#
+# entrypoint_worker.py runs init_db before starting Celery (Python, not bash —
+# the distroless image has no shell to run a .sh script in).
 # This ensures NexusAppUser and schema exist on every deploy
 # without requiring a separate pipeline step. Idempotent.
 #
@@ -54,8 +61,11 @@ USER celeryuser
 #
 # --concurrency 2           → 2 worker processes per container. Matches the
 #                             256 CPU / 512 MB Fargate task size.
+#
+# beat's ECS task definition overrides this CMD with its own
+# ["/entrypoint_worker.py", "celery", ..., "beat", ...] — same convention,
+# see terraform/modules/ecs/main.tf and docker-compose.yml.
 # ─────────────────────────────────────────────────────────────────────────────
-ENTRYPOINT ["/entrypoint-worker.sh"]
-CMD ["celery", "-A", "src.celery_worker:celery", "worker", \
+CMD ["/entrypoint_worker.py", "celery", "-A", "src.celery_worker:celery", "worker", \
     "--loglevel=info", \
     "--concurrency=2"]

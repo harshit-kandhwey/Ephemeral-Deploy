@@ -94,6 +94,57 @@ Every consumer downstream (`deploy-blue-green.yml`, the `prev_api_image`/
 already treated this value as an opaque string, so this was a
 source-of-truth change only — no other file needed to change.
 
+### Distroless runtime images
+
+Both `app/Dockerfile` and `app/Dockerfile.worker`'s runtime stage moved from
+`python:3.11-slim` to `gcr.io/distroless/python3-debian12:nonroot` — no
+shell, no package manager, no coreutils; only the Python interpreter and
+glibc. Verified locally (built and ran all three images — api, worker, beat
+— against real postgres/redis containers, 2026-09-05) rather than assumed,
+because this class of change breaks in ways that only show up at runtime,
+not at build time. Two real breaks found and fixed along the way:
+
+1. **A copied venv's console scripts don't survive the base-image switch.**
+   `python -m venv` bakes the BUILDER stage's absolute python path into
+   `bin/python`'s symlink target and every console script's shebang
+   (`bin/gunicorn`, `bin/celery`). Copying `/opt/venv` into a distroless
+   stage keeps those pointing at a path (`/usr/local/bin/python`) that
+   doesn't exist there — `exec` fails with "no such file or directory" even
+   though the file is present, because the interpreter behind its shebang
+   isn't. Fixed by installing with `pip install --target=/opt/deps` instead
+   of a venv (no interpreter-relative indirection — just importable
+   packages on `PYTHONPATH`), and invoking everything as `python3 -m
+   <module>` instead of a console-script path. This also means the
+   distroless base's own default `ENTRYPOINT ["/usr/bin/python3.11"]` is
+   kept rather than reset — every CMD/`command` override here is a list of
+   *arguments to that entrypoint* (a script path, then its own args), not a
+   standalone program name. `entrypoint_worker.py` is passed this way too;
+   it isn't executable and has no meaningful shebang of its own for the
+   same reason (no shell/`env` to resolve one via PATH).
+
+2. **A builder/runtime Python patch mismatch broke a version-gated import.**
+   `redis-py`'s `asyncio/connection.py` picks `async_timeout` vs stdlib
+   `asyncio.timeout` based on `sys.version_info` at **runtime**, but pip's
+   `python_full_version < "3.11.3"` marker for the `async-timeout`
+   dependency is evaluated at **build time**, against the builder image's
+   Python. The builder (`python:3.11-slim`, a floating tag) resolved to
+   3.11.15 here; the distroless runtime is pinned to 3.11.2. Marker said
+   "runtime will be >= 3.11.3, skip installing this" — wrong, because the
+   two stages don't share a Python. Fixed by adding `async-timeout` to
+   `requirements.txt` unconditionally (harmless dead weight on a runtime
+   that doesn't need it). The general hazard outlives this one instance:
+   **any package with a version-gated import is a latent break waiting for
+   the day the builder and runtime base images' Python patch versions drift
+   apart** — worth remembering before adding a new dependency, not just
+   fixed once here.
+
+Consequences accepted, not fixed: ECS Exec (not built yet — [[work-plan]]
+D3/D5) drops into a `python3` REPL instead of a shell once it exists, since
+there's nothing else in the image to exec into. `docker-compose.yml`'s
+`beat` service and the ECS module's `aws_ecs_task_definition.beat` both had
+their command override updated to route through `/entrypoint_worker.py`
+first, for the same ENTRYPOINT-is-python3 reason as above.
+
 **"Validate each environment" is deliberately NOT in this set.** It runs
 `terraform validate` + `terraform plan` per environment — basic
 syntax/semantic correctness, not a security scanner with the CVE-noise

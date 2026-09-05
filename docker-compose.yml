@@ -48,7 +48,9 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      # No curl in the distroless runtime image — see
+      # docs/design-decisions.md#distroless-runtime-images.
+      test: ["CMD", "python3", "/app/healthcheck.py"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -81,7 +83,10 @@ services:
     build:
       context: ./app
       dockerfile: Dockerfile.worker
-    command: celery -A src.celery_worker:celery beat --loglevel=info
+    # /entrypoint_worker.py first, not a bare celery command — the image's
+    # ENTRYPOINT is the distroless base's own python3, so this whole line is
+    # arguments to it. See docs/design-decisions.md#distroless-runtime-images.
+    command: /entrypoint_worker.py celery -A src.celery_worker:celery beat --loglevel=info
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/nexusdeploy
       - REDIS_URL=redis://redis:6379/0
