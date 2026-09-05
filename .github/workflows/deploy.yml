@@ -111,32 +111,34 @@ jobs:
       - name: Get current image URIs (infra-only deploy)
         id: current_images
         # Runs only when unchanged with images already in ECR (guaranteed by the
-        # detect step); fetches the most recent tag for Terraform to reuse.
+        # detect step); resolves the most recently pushed image's DIGEST, not
+        # its tag — see docs/design-decisions.md#deploy-by-digest-not-by-tag.
         if: steps.changed.outputs.app_changed == 'false'
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           REGISTRY="$ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
           ENV="${{ github.event.inputs.environment }}"
 
-          API_TAGS=$(aws ecr describe-images \
+          API_DIGEST=$(aws ecr describe-images \
             --repository-name "nexusdeploy-api-$ENV" \
             --region ${{ env.AWS_REGION }} \
-            --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags' \
-            --output text 2>/dev/null || echo "latest")
-          API_IMAGE=$(echo "$API_TAGS" | tr $'\t' $'\n' | grep -v '^latest$' | head -1)
-          API_IMAGE="${API_IMAGE:-latest}"
+            --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageDigest' \
+            --output text 2>/dev/null || echo "")
 
-          WORKER_TAGS=$(aws ecr describe-images \
+          WORKER_DIGEST=$(aws ecr describe-images \
             --repository-name "nexusdeploy-worker-$ENV" \
             --region ${{ env.AWS_REGION }} \
-            --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags' \
-            --output text 2>/dev/null || echo "latest")
-          WORKER_IMAGE=$(echo "$WORKER_TAGS" | tr $'\t' $'\n' | grep -v '^latest$' | head -1)
-          WORKER_IMAGE="${WORKER_IMAGE:-latest}"
+            --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageDigest' \
+            --output text 2>/dev/null || echo "")
 
-          echo "api_image=$REGISTRY/nexusdeploy-api-$ENV:$API_IMAGE"       >> $GITHUB_OUTPUT
-          echo "worker_image=$REGISTRY/nexusdeploy-worker-$ENV:$WORKER_IMAGE" >> $GITHUB_OUTPUT
-          echo "ℹ️  Using existing images: api=$API_IMAGE worker=$WORKER_IMAGE"
+          if [[ -z "$API_DIGEST" || "$API_DIGEST" == "None" || -z "$WORKER_DIGEST" || "$WORKER_DIGEST" == "None" ]]; then
+            echo "::error::Could not resolve a current image digest for $ENV (api='$API_DIGEST', worker='$WORKER_DIGEST') despite app_changed=false. ECR should already have at least one image per the earlier IMAGE_COUNT check."
+            exit 1
+          fi
+
+          echo "api_image=$REGISTRY/nexusdeploy-api-$ENV@$API_DIGEST"       >> $GITHUB_OUTPUT
+          echo "worker_image=$REGISTRY/nexusdeploy-worker-$ENV@$WORKER_DIGEST" >> $GITHUB_OUTPUT
+          echo "ℹ️  Using existing images: api=$API_DIGEST worker=$WORKER_DIGEST"
 
   # Runs in parallel with the image build; push-image waits on this completing.
   ecr-provision:
@@ -328,8 +330,24 @@ jobs:
             --tag $REGISTRY/nexusdeploy-worker-$ENV:latest \
             --push ./app
 
-          echo "api_image=$REGISTRY/nexusdeploy-api-$ENV:$TAG"       >> $GITHUB_OUTPUT
-          echo "worker_image=$REGISTRY/nexusdeploy-worker-$ENV:$TAG" >> $GITHUB_OUTPUT
+          # Terraform gets the immutable digest, not the $TAG/`:latest` tags
+          # above — a tag can be silently overwritten by a later push (e.g. a
+          # manual re-run for the same commit); the digest this run just
+          # produced cannot be. Tags stay for humans browsing ECR.
+          # See docs/design-decisions.md#deploy-by-digest-not-by-tag.
+          API_DIGEST=$(aws ecr describe-images \
+            --repository-name "nexusdeploy-api-$ENV" \
+            --image-ids imageTag=$TAG \
+            --region ${{ env.AWS_REGION }} \
+            --query 'imageDetails[0].imageDigest' --output text)
+          WORKER_DIGEST=$(aws ecr describe-images \
+            --repository-name "nexusdeploy-worker-$ENV" \
+            --image-ids imageTag=$TAG \
+            --region ${{ env.AWS_REGION }} \
+            --query 'imageDetails[0].imageDigest' --output text)
+
+          echo "api_image=$REGISTRY/nexusdeploy-api-$ENV@$API_DIGEST"       >> $GITHUB_OUTPUT
+          echo "worker_image=$REGISTRY/nexusdeploy-worker-$ENV@$WORKER_DIGEST" >> $GITHUB_OUTPUT
 
   # dev is single-slot: apply, then schedule its 30-minute TTL cleanup.
   deploy-dev:

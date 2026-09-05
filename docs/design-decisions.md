@@ -71,6 +71,29 @@ read. That specific claim is untested against a populated state, since
 nothing was deployed at the time this was written — recheck the first time
 it runs for real.
 
+### Deploy-by-digest, not by tag
+
+`push-image` (`deploy.yml`) still tags images `:$TAG` (the commit SHA) and
+`:latest` for humans browsing ECR, but the `api_image`/`worker_image`
+outputs Terraform actually receives are `repo@sha256:...` digest
+references, resolved right after the push via `aws ecr describe-images
+--image-ids imageTag=$TAG`. A tag is a mutable pointer — a re-run of this
+workflow for the same commit rebuilds and re-pushes the same `:$TAG`,
+which can legitimately produce different bytes (a base image moved under
+it) without the tag string changing at all. The digest this run resolved
+is exactly the bytes that were built, scanned, and about to be deployed;
+nothing after this point can silently swap them out from under it. Same
+change applied to the "infra-only deploy" path (`current_images` in the
+`setup` job) — it now resolves the most recently pushed image's digest
+directly rather than reconstructing a tag string and filtering out
+`latest`, which was needed only because tag names are ambiguous and isn't
+needed at all once digest is the thing being resolved.
+
+Every consumer downstream (`deploy-blue-green.yml`, the `prev_api_image`/
+`prev_worker_image` SSM parameters, the ECS module's `image = var.api_image`)
+already treated this value as an opaque string, so this was a
+source-of-truth change only — no other file needed to change.
+
 **"Validate each environment" is deliberately NOT in this set.** It runs
 `terraform validate` + `terraform plan` per environment — basic
 syntax/semantic correctness, not a security scanner with the CVE-noise
