@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from .config import config, redact_url
 from .extensions import cors, db, init_celery, init_redis, jwt, limiter, migrate, swagger
+from .otel import instrument, setup_tracing
 
 # Defined at module level so they survive across requests; exposed at /metrics.
 REQUEST_COUNT = Counter("app_requests_total", "Total HTTP requests", ["method", "endpoint", "status"])
@@ -47,6 +48,11 @@ def create_app(config_name="default"):
             raise RuntimeError(
                 "Production startup failed. Missing environment variables:\n" + "\n".join(f"  - {v}" for v in missing)
             )
+
+    # Before db.init_app(): SQLAlchemy instrumentation patches engine
+    # creation itself, so it must run before Flask-SQLAlchemy creates one.
+    setup_tracing()
+    instrument(app)
 
     db.init_app(app)
     migrate.init_app(app, db)

@@ -266,12 +266,15 @@ module "ecs" {
   api_desired_count             = 1
   worker_desired_count          = 1
   common_tags                   = local.common_tags
+  # See docs/design-decisions.md#self-hosted-tracing-otel-collector--jaeger-not-x-ray
+  otel_exporter_endpoint = "http://${module.monitoring.monitoring_private_ip}:4318"
 
   depends_on = [
     aws_secretsmanager_secret_version.app,
     aws_secretsmanager_secret_version.init,
     module.rds,
     module.elasticache,
+    module.monitoring,
   ]
 }
 

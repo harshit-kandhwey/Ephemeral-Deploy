@@ -23,6 +23,7 @@ locals {
     { name = "ENV", value = var.environment == "dev" ? "development" : "production" },
     { name = "FLASK_DEBUG", value = "false" },
     { name = "SQLALCHEMY_ECHO", value = "false" },
+    { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = var.otel_exporter_endpoint },
   ]
 }
 
@@ -91,7 +92,8 @@ resource "aws_ecs_task_definition" "api" {
       ]
 
       environment = concat(local.app_environment, [
-        { name = "VERSION", value = var.git_commit }
+        { name = "VERSION", value = var.git_commit },
+        { name = "OTEL_SERVICE_NAME", value = "${var.project}-${var.environment}-api" }
       ])
 
       secrets = [
@@ -145,7 +147,8 @@ resource "aws_ecs_task_definition" "worker" {
       essential = true
 
       environment = concat(local.app_environment, [
-        { name = "VERSION", value = var.git_commit }
+        { name = "VERSION", value = var.git_commit },
+        { name = "OTEL_SERVICE_NAME", value = "${var.project}-${var.environment}-worker" }
       ])
 
       secrets = [
@@ -202,7 +205,8 @@ resource "aws_ecs_task_definition" "beat" {
       command = ["/entrypoint_worker.py", "celery", "-A", "src.celery_worker:celery", "beat", "--loglevel=info", "--schedule=/tmp/celerybeat-schedule"]
 
       environment = concat(local.app_environment, [
-        { name = "SKIP_INIT_DB", value = "true" }
+        { name = "SKIP_INIT_DB", value = "true" },
+        { name = "OTEL_SERVICE_NAME", value = "${var.project}-${var.environment}-beat" }
       ])
 
       # Beat boots the same Flask app as the worker, so it needs the full

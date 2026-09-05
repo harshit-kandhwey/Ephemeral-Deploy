@@ -696,6 +696,83 @@ The ECS service's `deployment_controller` is `type = "ECS"`, not
 level described in [Slot model](#slot-model), not via ECS/CodeDeploy's own
 native blue-green primitive — the two mechanisms would be redundant.
 
+### Self-hosted tracing: OTel Collector + Jaeger, not X-Ray
+
+Distributed tracing runs on the existing monitoring EC2 (`terraform/modules/monitoring`)
+instead of AWS X-Ray — [[aws-budget-constraint]] rules out a per-trace-billed
+AWS service, and the monitoring box already exists and is already paid for.
+Jaeger v2 (not the old v1 "all-in-one") is used because v2 **is** an OTel
+Collector distribution with Jaeger's storage/query/UI built in — it speaks
+OTLP natively, no separate collector needed. Verified locally end-to-end
+before any of this was deployed (2026-09-05): a real Flask app, instrumented
+exactly as shipped, sending real spans over OTLP/HTTP to a real Jaeger v2
+container, queried back via its API — `GET /health` → `connect` →
+`SELECT nexusdeploy` → `PING`, correctly nested.
+
+**Config is deliberately minimal** (`files/jaeger-config.yaml`): a single
+in-memory trace store (`max_traces: 10000`, bounding worst-case RAM), no
+adaptive/remote sampling, no AI/MCP UI assistant, no pprof/zpages — every
+extension is memory this t3.micro doesn't have to spare, already sharing 1GiB
+with Prometheus, Grafana, node_exporter and YACE. Traces don't survive an
+instance restart; that's an accepted trade for zero EBS/DB cost on a tool
+whose job is live debugging, not an audit trail.
+
+**Only OTLP/HTTP (port 4318) is exposed, not gRPC (4317)** — avoids
+`grpcio`'s native C-extension in the app image, one more thing that could hit
+the same builder/runtime version-skew class of bug documented in
+[Distroless runtime images](#distroless-runtime-images). The Jaeger UI
+(16686) is gated behind `monitoring_allowed_cidr`, the same allowlist as
+Grafana/Prometheus — not open to the VPC.
+
+**Security groups**: `api`'s existing blanket VPC-internal egress rule
+already covers reaching the collector; `worker` needed a new, narrowly-scoped
+egress rule (`aws_security_group_rule.worker_to_monitoring_otlp`) since it
+has no such blanket rule. Both are one-directional — nothing needs to reach
+*into* the app tasks for this.
+
+**A new real dependency**: each `module.ecs`/`ecs_slot1`/`ecs_slot2` call now
+passes `otel_exporter_endpoint = "http://${module.monitoring.monitoring_private_ip}:4318"`,
+so ECS task definitions now depend on the monitoring EC2 instance existing
+first. Previously monitoring and ECS provisioned in parallel (monitoring's
+`ecs_cluster_names` input is a constructed string, not a module output,
+specifically to avoid the reverse dependency). This one is unavoidable in
+that direction — the endpoint really does need a real IP — but it only
+delays *task definition creation*, not application readiness; Terraform
+doesn't wait for the EC2 instance's user_data to finish, only for the
+instance to exist.
+
+**Monitoring's user_data was refactored while this was built**: every
+install step (node_exporter, Prometheus, YACE, Jaeger, Grafana, the nginx
+frontend, the ECS-discovery cron script) moved out of the inline
+`monitoring-userdata.sh.tpl` into standalone scripts under
+`files/scripts/`, uploaded to S3 and fetched+run at boot — the same
+"config lives in S3" pattern already used for `prometheus.yml` and friends,
+now extended to the install logic itself. Only what genuinely can't be
+S3-fetched stays inline: apt packages, the AWS CLI install (needed before
+any S3 fetch can happen at all), and the Grafana password fetch from SSM.
+Shared values (project/environment/region/bucket/cluster names/the Grafana
+password) pass to every fetched script via one root-owned (chmod 600)
+env file, `/etc/nexusdeploy-monitoring.env`, sourced at the top of each —
+replacing Terraform's `$${...}`-escaped template interpolation, which only
+applied to the one file actually passed through `templatefile()`. Net
+effect: the orchestrator shrank from over 16KB raw to under 10KB, with room
+to add more install steps later without approaching the limit again.
+
+### `worker` and `api` gained a new health-of-observability concern
+
+`app/src/otel.py`'s `setup_tracing()`/`instrument()` are the one thing that
+runs identically in `create_app()` regardless of which of the three services
+(api/worker/beat) is booting — all three already share that factory. Kept
+strictly opt-in on `OTEL_EXPORTER_OTLP_ENDPOINT` being non-empty: local dev
+and tests never set it, so this is a genuine no-op there, not a
+network call that silently times out. SQLAlchemy instrumentation runs
+*before* `db.init_app(app)` deliberately — it patches engine creation
+itself, so it has to exist before Flask-SQLAlchemy creates one. Celery
+instrumentation is unconditional across all three services rather than
+worker/beat-only: producer-side spans on `api` are what let a trace started
+by an HTTP request continue into whichever worker later processes the task
+it enqueued.
+
 ---
 
 ## Application

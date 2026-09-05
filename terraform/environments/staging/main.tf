@@ -280,12 +280,15 @@ module "ecs_slot1" {
   worker_memory        = 512
 
   common_tags = merge(local.common_tags, { Slot = "slot1" })
+  # See docs/design-decisions.md#self-hosted-tracing-otel-collector--jaeger-not-x-ray
+  otel_exporter_endpoint = "http://${module.monitoring.monitoring_private_ip}:4318"
 
   depends_on = [
     aws_secretsmanager_secret_version.app,
     aws_secretsmanager_secret_version.init,
     module.rds,
     module.elasticache,
+    module.monitoring,
   ]
 }
 
@@ -318,12 +321,15 @@ module "ecs_slot2" {
   worker_memory        = 512
 
   common_tags = merge(local.common_tags, { Slot = "slot2" })
+  # See docs/design-decisions.md#self-hosted-tracing-otel-collector--jaeger-not-x-ray
+  otel_exporter_endpoint = "http://${module.monitoring.monitoring_private_ip}:4318"
 
   depends_on = [
     aws_secretsmanager_secret_version.app,
     aws_secretsmanager_secret_version.init,
     module.rds,
     module.elasticache,
+    module.monitoring,
   ]
 }
 

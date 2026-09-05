@@ -1,0 +1,51 @@
+# Minimal Jaeger v2 config (OTel Collector pipeline, not v1's old
+# "all-in-one" flags) — deliberately excludes adaptive/remote sampling,
+# the AI/MCP UI assistant, and pprof/zpages. See
+# docs/design-decisions.md#self-hosted-tracing-otel-collector--jaeger-not-x-ray.
+service:
+  extensions: [jaeger_storage, jaeger_query, healthcheckv2]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [jaeger_storage_exporter]
+  telemetry:
+    resource:
+      service.name: jaeger
+    logs:
+      level: info
+
+extensions:
+  healthcheckv2:
+    use_v2: true
+    http:
+
+  jaeger_query:
+    storage:
+      traces: main_store
+    http:
+      endpoint: 0.0.0.0:16686
+
+  # In-memory only: traces don't survive a restart, and there's no EBS/DB
+  # cost. max_traces bounds worst-case RAM on a 1GiB instance already
+  # shared with Prometheus/Grafana/node_exporter/YACE.
+  jaeger_storage:
+    backends:
+      main_store:
+        memory:
+          max_traces: 10000
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+
+exporters:
+  jaeger_storage_exporter:
+    trace_storage: main_store

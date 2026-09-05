@@ -25,10 +25,19 @@ locals {
   static_config_files = {
     "prometheus.yml"             = "${path.module}/files/prometheus.yml"
     "cloudwatch-exporter.yml"    = "${path.module}/files/cloudwatch-exporter.yml"
+    "jaeger-config.yaml"         = "${path.module}/files/jaeger-config.yaml"
     "grafana-dashboards.yml"     = "${path.module}/files/grafana-dashboards.yml"
     "nexusdeploy-dashboard.json" = "${path.module}/files/nexusdeploy-dashboard.json"
     # Static frontend console served by nginx (reverse-proxies /api to ECS tasks)
     "frontend-index.html" = "${path.module}/files/frontend/index.html"
+  }
+
+  # Install scripts fetched and run by monitoring-userdata.sh.tpl. Kept as
+  # separate S3-hosted files, not inlined into user_data, so the orchestrator
+  # stays well under user_data's 16KB (gzipped) limit.
+  install_scripts = {
+    for f in fileset("${path.module}/files/scripts", "*.sh") :
+    f => "${path.module}/files/scripts/${f}"
   }
 
   # Rendered config files using templatefile() — region injected at deploy time
@@ -57,6 +66,16 @@ resource "aws_s3_object" "monitoring_configs_rendered" {
   key     = "${local.config_prefix}/${each.key}"
   content = each.value
   etag    = md5(each.value)
+  tags    = var.common_tags
+}
+
+resource "aws_s3_object" "monitoring_install_scripts" {
+  for_each = local.install_scripts
+
+  bucket  = var.state_bucket
+  key     = "${local.config_prefix}/scripts/${each.key}"
+  content = file(each.value)
+  etag    = filemd5(each.value)
   tags    = var.common_tags
 }
 
@@ -216,6 +235,7 @@ resource "aws_instance" "monitoring" {
   depends_on = [
     aws_s3_object.monitoring_configs_static,
     aws_s3_object.monitoring_configs_rendered,
+    aws_s3_object.monitoring_install_scripts,
   ]
 
   tags = merge(var.common_tags, {

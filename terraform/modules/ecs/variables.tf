@@ -29,6 +29,12 @@ variable "git_commit" {
   default     = "unknown"
 }
 
+variable "otel_exporter_endpoint" {
+  description = "OTLP/HTTP endpoint (http://<monitoring private IP>:4318) for trace export. Empty disables tracing — the app's OTel setup treats an unset OTEL_EXPORTER_OTLP_ENDPOINT as opt-out, not an error."
+  type        = string
+  default     = ""
+}
+
 
 variable "private_app_subnet_ids" {
   description = "Private subnet IDs for ECS task network placement"

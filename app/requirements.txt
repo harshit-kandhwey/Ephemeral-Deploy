@@ -18,6 +18,15 @@ redis==8.1.0
 async-timeout>=4.0.3
 celery==5.6.3
 
+# Tracing — opt-in via OTEL_EXPORTER_OTLP_ENDPOINT, see src/otel.py
+opentelemetry-api==1.44.0
+opentelemetry-sdk==1.44.0
+opentelemetry-exporter-otlp-proto-http==1.44.0
+opentelemetry-instrumentation-flask==0.65b0
+opentelemetry-instrumentation-sqlalchemy==0.65b0
+opentelemetry-instrumentation-redis==0.65b0
+opentelemetry-instrumentation-celery==0.65b0
+
 # AWS — keep boto3 and botocore on the same version: boto3 X.Y.Z requires
 # botocore >=X.Y.Z,<X.(Y+1).0, so bumping one without the other is
 # unresolvable for pip (this is what broke the dependabot boto3 PR)

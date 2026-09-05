@@ -217,6 +217,25 @@ resource "aws_security_group" "monitoring" {
     cidr_blocks = [var.vpc_cidr]
   }
 
+  # Jaeger UI - same allowlist as Grafana/Prometheus, not open to the VPC.
+  ingress {
+    description = "Jaeger UI"
+    from_port   = 16686
+    to_port     = 16686
+    protocol    = "tcp"
+    cidr_blocks = var.monitoring_allowed_cidr
+  }
+
+  # OTLP/HTTP traces from ECS tasks - see
+  # docs/design-decisions.md#self-hosted-tracing-otel-collector--jaeger-not-x-ray.
+  ingress {
+    description     = "OTLP/HTTP traces from API and worker tasks"
+    from_port       = 4318
+    to_port         = 4318
+    protocol        = "tcp"
+    security_groups = [aws_security_group.api.id, aws_security_group.worker.id]
+  }
+
   egress {
     description = "All outbound"
     from_port   = 0
@@ -228,4 +247,19 @@ resource "aws_security_group" "monitoring" {
   tags = merge(var.common_tags, {
     Name = "${var.project}-${var.environment}-monitoring-sg"
   })
+}
+
+# worker has no general VPC-internal egress rule (unlike api's blanket -1
+# rule, which already covers this) — a separate resource because it targets
+# aws_security_group.monitoring, itself conditional on monitoring_enabled.
+resource "aws_security_group_rule" "worker_to_monitoring_otlp" {
+  count = var.monitoring_enabled ? 1 : 0
+
+  description              = "OTLP/HTTP traces to the monitoring instance Jaeger collector"
+  type                     = "egress"
+  from_port                = 4318
+  to_port                  = 4318
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.worker.id
+  source_security_group_id = aws_security_group.monitoring[0].id
 }
