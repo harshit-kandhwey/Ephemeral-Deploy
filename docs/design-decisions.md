@@ -47,6 +47,30 @@ A real secret has no "wait for an upstream fix" case the way a base-image CVE
 does — it's actionable the moment it's found (rotate it) — so this one fails
 the build and gates `ci-summary` like `workflow-lint` does.
 
+### Drift detection needs an explicit liveness gate
+
+`drift-detect.yml` runs `terraform plan -refresh-only` on a schedule against
+all three environments. Verified live 2026-09-05: run this against an
+environment with an empty or absent state (the normal condition here — dev
+auto-destroys in 30min, staging/prod are torn down manually) and it does
+**not** cleanly report "no drift" — it hard-errors, e.g.
+`module.vpc.public_subnet_ids[0]` is an invalid index because the list is
+empty. `-refresh-only` still evaluates the whole config graph, index
+expressions included, even though it only ever diffs state-vs-live-read. So
+each environment is gated on `terraform state list | wc -l` first, and skips
+cleanly at 0 — checking is only meaningful once something is actually
+deployed.
+
+The job intentionally omits `environment:` (which would otherwise trip
+prod's required-reviewer gate on a read-only job) and passes placeholder
+values for `api_image`/`worker_image`/etc., same as `ci.yml`'s
+terraform-lint validate step — safe here because `-refresh-only` never
+proposes a change driven by a config/var difference (an add, delete, or
+replace), only real drift between last-recorded state and a fresh live
+read. That specific claim is untested against a populated state, since
+nothing was deployed at the time this was written — recheck the first time
+it runs for real.
+
 **"Validate each environment" is deliberately NOT in this set.** It runs
 `terraform validate` + `terraform plan` per environment — basic
 syntax/semantic correctness, not a security scanner with the CVE-noise

@@ -1,0 +1,122 @@
+name: Scheduled Drift Detection
+
+# Catches infrastructure that changed outside Terraform (a console edit, a
+# manual `aws` CLI call) — read-only, no cost beyond free API calls. See
+# docs/design-decisions.md#drift-detection-needs-an-explicit-liveness-gate
+# for why every environment is gated on "does state actually have resources"
+# before planning.
+on:
+  schedule:
+    - cron: "0 13 * * *" # daily, ~1pm UTC — arbitrary, off-peak
+  workflow_dispatch: # manual run, e.g. right after a real deploy
+
+env:
+  AWS_REGION: us-east-1
+
+permissions:
+  contents: read
+
+jobs:
+  drift-check:
+    name: Drift Check (${{ matrix.environment }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [dev, staging, prod]
+    # No `environment:` field here, deliberately: this job only ever reads
+    # (terraform plan -refresh-only, never apply), so it must not trip prod's
+    # required-reviewer gate — that gate exists to stop an accidental real
+    # deploy, not a read. AWS_DEPLOY_ROLE_ARN is a repo-level secret, so it's
+    # readable here without one.
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: 1.7.0
+
+      - name: Terraform init (real backend)
+        working-directory: terraform/environments/${{ matrix.environment }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=nexusdeploy-terraform-state" \
+            -backend-config="key=${{ matrix.environment }}/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=nexusdeploy-terraform-locks" \
+            -backend-config="encrypt=true"
+
+      - name: Check the environment actually has deployed resources
+        id: liveness
+        working-directory: terraform/environments/${{ matrix.environment }}
+        run: |
+          # dev auto-destroys in 30min; staging/prod are manually destroyed —
+          # most of the time there is nothing here to check. A torn-down
+          # environment's state is either the empty object or (dev, after
+          # cleanup.yml's S3 state wipe) absent entirely — `state list` exits
+          # non-zero for the latter, hence the 2>/dev/null.
+          COUNT=$(terraform state list 2>/dev/null | wc -l)
+          echo "resource_count=$COUNT"
+          if [[ "$COUNT" -eq 0 ]]; then
+            echo "live=false" >> $GITHUB_OUTPUT
+          else
+            echo "live=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Skip — not currently deployed
+        if: steps.liveness.outputs.live == 'false'
+        run: |
+          echo "⏭️  ${{ matrix.environment }}: 0 resources in state — not deployed right now, nothing to check." | tee -a $GITHUB_STEP_SUMMARY
+
+      - name: Plan (refresh-only) — report drift
+        id: drift
+        if: steps.liveness.outputs.live == 'true'
+        working-directory: terraform/environments/${{ matrix.environment }}
+        env:
+          # Placeholder values, same pattern as ci.yml's terraform-lint
+          # validate step — safe here for a stronger reason than there:
+          # -refresh-only never proposes a change driven by config/var input
+          # (an add, delete, or replace); it only reports the delta between
+          # the last-recorded state and a fresh read of real infrastructure.
+          # A "wrong" image/CIDR value below cannot manufacture a false
+          # drift positive. Unset vars for dev-only/staging-prod-only
+          # variables are silently ignored (same as ci.yml's validate step).
+          TF_VAR_api_image: "placeholder"
+          TF_VAR_worker_image: "placeholder"
+          TF_VAR_git_commit: "drift-check"
+          TF_VAR_previous_api_image: "placeholder"
+          TF_VAR_previous_worker_image: "placeholder"
+          TF_VAR_deployment_slot: "slot1"
+          TF_VAR_keep_previous_slot_running: "false"
+          TF_VAR_beat_slot: ""
+          TF_VAR_monitoring_allowed_cidr: "[]"
+          TF_VAR_alert_email: ""
+        run: |
+          terraform plan -refresh-only -input=false -detailed-exitcode \
+            -var-file=terraform.tfvars \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -var="tf_state_bucket=nexusdeploy-terraform-state" \
+            -var="app_s3_bucket=nexusdeploy-attachments-${{ matrix.environment }}" \
+            -var="db_name=nexusdeploy" \
+            2>&1 | tee /tmp/plan-${{ matrix.environment }}.log
+          EXIT=${PIPESTATUS[0]}
+          if [[ "$EXIT" -eq 2 ]]; then
+            echo "⚠️ Drift detected in ${{ matrix.environment }} — see the plan output above." | tee -a $GITHUB_STEP_SUMMARY
+            exit 1
+          elif [[ "$EXIT" -ne 0 ]]; then
+            echo "❌ Drift check errored for ${{ matrix.environment }} (exit $EXIT) — not necessarily drift, could be a transient API error. See the log above." | tee -a $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          echo "✅ No drift detected in ${{ matrix.environment }}." | tee -a $GITHUB_STEP_SUMMARY
