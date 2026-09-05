@@ -333,6 +333,32 @@ jobs:
           fi
           echo "✅ No risky GH-expression-into-echo-string patterns found"
 
+  # Scans the full commit history for hardcoded secrets. Always runs, no path
+  # gating — a leaked credential can land in any file type. Deliberately
+  # blocking, unlike the CVE/IaC scanners in docs/design-decisions.md
+  # #non-blocking-security-scanners: those are soft-fail because a CVE is
+  # often not actionable in the moment and a hard gate just trains people to
+  # bypass it. A real secret is immediately actionable (rotate it) and has no
+  # "wait for an upstream fix" case, so it fails the build.
+  secrets-scan:
+    name: Secret Scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0 # full history — gitleaks scans commits, not just the working tree
+
+      - name: Install gitleaks
+        run: |
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz
+          sudo tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: Run gitleaks
+        run: gitleaks detect --source . --redact --verbose
+
   # Formats, lints and validates the terraform tree. Parallel with the app jobs.
   terraform-lint:
     name: Terraform Validate & Lint
@@ -447,7 +473,7 @@ jobs:
     name: CI Summary
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [detect-changes, lint, test, docker-build, terraform-lint, workflow-lint]
+    needs: [detect-changes, lint, test, docker-build, terraform-lint, workflow-lint, secrets-scan]
     # !cancelled() rather than always(): a run cancelled by cancel-in-progress
     # must not count its cancelled jobs as passed and deploy a stale commit.
     if: ${{ !cancelled() }}
@@ -482,9 +508,14 @@ jobs:
             fi
           fi
 
-          # workflow-lint has no path gating — always check it.
+          # workflow-lint and secrets-scan have no path gating — always check them.
           if [[ "${{ needs.workflow-lint.result }}" == "failure" ]]; then
             echo "❌ Workflow quoting safety check failed — deploy will not run"
+            FAILED=true
+          fi
+
+          if [[ "${{ needs.secrets-scan.result }}" == "failure" ]]; then
+            echo "❌ Secret scan found a leaked credential — deploy will not run"
             FAILED=true
           fi
 
@@ -496,6 +527,7 @@ jobs:
           echo "   App jobs:   ${{ needs.lint.result }} / ${{ needs.test.result }} / ${{ needs.docker-build.result }}"
           echo "   Infra jobs: ${{ needs.terraform-lint.result }}"
           echo "   Workflow quoting check: ${{ needs.workflow-lint.result }}"
+          echo "   Secret scan: ${{ needs.secrets-scan.result }}"
 
       - name: Trigger deploy pipeline
         # Dependency bumps run CI but never deploy. The guard covers all three

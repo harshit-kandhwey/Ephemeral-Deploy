@@ -35,6 +35,18 @@ the Security tab and should start a conversation instead.
 Consequence to be aware of: a green check does **not** mean a clean scan. Read
 the job log or the Security tab.
 
+### Secret scanning is the one blocking scanner
+
+`secrets-scan` (gitleaks, `ci.yml`) is deliberately **not** on the soft-fail
+list above. It runs the CLI directly (a pinned release tarball, no third-party
+Action) against full commit history, no path gating — a credential can land
+in any file type, and this repo has no GitHub org, so the `gitleaks-action`
+wrapper's license requirement (org use only) doesn't apply either way; the
+direct-CLI approach just sidesteps the question rather than relying on that.
+A real secret has no "wait for an upstream fix" case the way a base-image CVE
+does — it's actionable the moment it's found (rotate it) — so this one fails
+the build and gates `ci-summary` like `workflow-lint` does.
+
 **"Validate each environment" is deliberately NOT in this set.** It runs
 `terraform validate` + `terraform plan` per environment — basic
 syntax/semantic correctness, not a security scanner with the CVE-noise
