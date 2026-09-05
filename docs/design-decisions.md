@@ -590,9 +590,11 @@ routes over the AWS backbone instead of the endpoint ENIs).
 
 `single_az_endpoints` puts every interface endpoint's ENIs in one AZ instead
 of one-per-AZ, halving the per-ENI-per-AZ charge — a deliberate non-HA
-trade-off for dev only, where workloads in the other AZ share that one ENI's
-failure domain. staging/prod leave it `false` (AWS recommends ≥2 AZs for
-endpoint HA).
+trade-off, originally dev-only. Staging set it `true` too from 2026-09-05
+onward, under [[aws-budget-constraint]] — a deliberate, asked-for exception
+to otherwise mirroring prod (endpoint cross-AZ HA has little value for a
+short-lived, manually-verified environment). Prod keeps it `false` (AWS
+recommends ≥2 AZs for endpoint HA).
 
 ### Bootstrap owns the deploy role identity
 

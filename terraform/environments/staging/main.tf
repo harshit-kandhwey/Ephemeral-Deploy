@@ -190,11 +190,14 @@ module "iam" {
 module "vpc" {
   source = "../../modules/vpc"
 
-  project               = local.project
-  environment           = local.environment
-  vpc_cidr              = var.vpc_cidr
-  availability_zones    = var.availability_zones
-  enable_nat_gateway    = false
+  project            = local.project
+  environment        = local.environment
+  vpc_cidr           = var.vpc_cidr
+  availability_zones = var.availability_zones
+  enable_nat_gateway = false
+  # Deliberate prod-parity exception under the AWS budget cap — see
+  # docs/design-decisions.md#vpc-interface-endpoints-replace-nat-for-ecs-fargate.
+  single_az_endpoints   = true
   flow_log_role_arn     = module.iam.vpc_flow_log_role_arn
   flow_log_traffic_type = "ALL" # Full visibility — matches prod
   log_retention_days    = 14

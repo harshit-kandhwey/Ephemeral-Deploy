@@ -25,7 +25,7 @@ variable "enable_nat_gateway" {
 }
 
 variable "single_az_endpoints" {
-  description = "Place interface VPC endpoints in a single AZ instead of one ENI per AZ. Interface endpoints bill per-ENI-per-AZ (~$0.01/hr each), so this halves endpoint hours — appropriate for disposable dev where cross-AZ endpoint HA has no value. Keep false (one ENI per AZ) for staging/prod parity."
+  description = "Place interface VPC endpoints in a single AZ instead of one ENI per AZ. Interface endpoints bill per-ENI-per-AZ (~$0.01/hr each), so this halves endpoint hours — appropriate where cross-AZ endpoint HA has no value: dev (disposable) and, under a hard AWS budget cap, staging too (a deliberate, documented exception to otherwise mirroring prod — see docs/design-decisions.md#vpc-interface-endpoints-replace-nat-for-ecs-fargate). Keep false (one ENI per AZ) for prod."
   type        = bool
   default     = false
 }
