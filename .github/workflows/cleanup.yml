@@ -55,21 +55,28 @@ env:
 
 jobs:
   destroy:
-    name: Destroy ${{ github.event.inputs.environment || 'dev' }}
+    name: Destroy ${{ matrix.environment }}
     # Sleeps up to delay_minutes (30 on the dev TTL path) before destroying,
     # so the cap must cover the sleep plus the destroy.
     timeout-minutes: 90
     runs-on: ubuntu-latest
-    # Scheduled runs are always dev destroy. Manual runs skip destroy for drain_old_slot.
+    # Scheduled runs sweep dev AND staging (nightly safety net for anything
+    # left running — never prod, that stays manual-only). Manual runs still
+    # target exactly the one environment chosen, and skip destroy entirely
+    # for drain_old_slot.
     if: github.event_name == 'schedule' || github.event.inputs.action != 'drain_old_slot'
-    environment: ${{ github.event.inputs.environment || 'dev' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: ${{ github.event_name == 'schedule' && fromJson('["dev","staging"]') || fromJson(format('["{0}"]', github.event.inputs.environment || 'dev')) }}
+    environment: ${{ matrix.environment }}
 
     permissions:
       id-token: write
       contents: read
 
     env:
-      TF_ENV: ${{ github.event.inputs.environment || 'dev' }}
+      TF_ENV: ${{ matrix.environment }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

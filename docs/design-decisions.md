@@ -181,6 +181,36 @@ used — cosign's own CLI flags it as deprecated in favor of SBOM
 attestations, which is what `cosign attest --type spdxjson` above already
 does.
 
+### Staging joined dev in the nightly teardown sweep
+
+`cleanup.yml`'s `destroy` job was single-environment (`github.event.inputs
+.environment || 'dev'` — a scheduled run has no `inputs`, so this always
+meant dev). It's now a `matrix.environment` job: a `schedule` trigger
+expands to `["dev","staging"]`, a manual dispatch still expands to exactly
+the one environment chosen. Prod is never in the scheduled set — its
+teardown stays manual-dispatch-only and gated behind the `prod`
+environment's required reviewer, per #prod-teardown-is-gated-not-forbidden
+and CLAUDE.md's "prod teardown is not symmetric with dev/staging" note.
+
+This is a policy change, not just plumbing: staging was "manual destroy"
+(see the branch → environment table), meaning nothing tore it down on its
+own. [[aws-budget-constraint]] already establishes that staging should
+never be left up for an extended, unsupervised period anyway ("no 'leave it
+up to poke around' sessions") — this closes the gap between that stated
+policy and what actually enforces it, the same way dev's existing nightly
+sweep is a safety net for a forgotten 30-minute-TTL cleanup that didn't
+fire, not the primary mechanism. Concretely: staging left running past
+midnight UTC is now torn down by the next day regardless of why the
+`drain_minutes=0` verification pattern wasn't followed for it.
+
+The destroy logic itself needed no per-environment changes — the same job
+body was already exercised for staging via manual dispatch (this session's
+own B6 teardown verification used exactly this path), including the
+`deployment/*` SSM param cleanup, which is already conditioned on
+`env.TF_ENV == "staging" || "prod"`. Validated with `actionlint` (not just
+YAML parsing — it understands GitHub Actions expression/matrix semantics
+specifically), clean across every workflow file touched this session.
+
 **"Validate each environment" is deliberately NOT in this set.** It runs
 `terraform validate` + `terraform plan` per environment — basic
 syntax/semantic correctness, not a security scanner with the CVE-noise
