@@ -114,9 +114,7 @@ resource "aws_ecs_task_definition" "api" {
         }
       }
 
-      # CMD (exec-form), not CMD-SHELL: the distroless runtime image has no
-      # shell for CMD-SHELL to run in, and no curl either — /app/healthcheck.py
-      # is a small Python probe instead. See
+      # CMD, not CMD-SHELL: no shell in the distroless image. See
       # docs/design-decisions.md#distroless-runtime-images.
       healthCheck = {
         command     = ["CMD", "python3", "/app/healthcheck.py"]
@@ -198,11 +196,9 @@ resource "aws_ecs_task_definition" "beat" {
       image     = var.worker_image
       essential = true
       # See docs/design-decisions.md#celery-beat-is-a-singleton
-      # /entrypoint_worker.py, not a bare "celery" argv[0]: the image's
-      # ENTRYPOINT is the distroless base's own python3.11, so this whole
-      # array is arguments to it — the entrypoint script must run first
-      # (it checks SKIP_INIT_DB, set true above) before it execs celery
-      # itself. See docs/design-decisions.md#distroless-runtime-images.
+      # /entrypoint_worker.py first, not bare "celery" — ENTRYPOINT is
+      # python3.11 here, so this array is its arguments. See
+      # docs/design-decisions.md#distroless-runtime-images.
       command = ["/entrypoint_worker.py", "celery", "-A", "src.celery_worker:celery", "beat", "--loglevel=info", "--schedule=/tmp/celerybeat-schedule"]
 
       environment = concat(local.app_environment, [

@@ -1,10 +1,7 @@
 name: Scheduled Drift Detection
 
-# Catches infrastructure that changed outside Terraform (a console edit, a
-# manual `aws` CLI call) — read-only, no cost beyond free API calls. See
-# docs/design-decisions.md#drift-detection-needs-an-explicit-liveness-gate
-# for why every environment is gated on "does state actually have resources"
-# before planning.
+# Catches infrastructure that changed outside Terraform. Read-only, free.
+# See docs/design-decisions.md#drift-detection-needs-an-explicit-liveness-gate.
 on:
   schedule:
     - cron: "0 13 * * *" # daily, ~1pm UTC — arbitrary, off-peak
@@ -25,11 +22,8 @@ jobs:
       fail-fast: false
       matrix:
         environment: [dev, staging, prod]
-    # No `environment:` field here, deliberately: this job only ever reads
-    # (terraform plan -refresh-only, never apply), so it must not trip prod's
-    # required-reviewer gate — that gate exists to stop an accidental real
-    # deploy, not a read. AWS_DEPLOY_ROLE_ARN is a repo-level secret, so it's
-    # readable here without one.
+    # No `environment:` here — read-only, must not trip prod's deploy
+    # reviewer gate. AWS_DEPLOY_ROLE_ARN is a repo-level secret regardless.
     permissions:
       id-token: write
       contents: read
@@ -62,11 +56,8 @@ jobs:
         id: liveness
         working-directory: terraform/environments/${{ matrix.environment }}
         run: |
-          # dev auto-destroys in 30min; staging/prod are manually destroyed —
-          # most of the time there is nothing here to check. A torn-down
-          # environment's state is either the empty object or (dev, after
-          # cleanup.yml's S3 state wipe) absent entirely — `state list` exits
-          # non-zero for the latter, hence the 2>/dev/null.
+          # Torn-down state is empty or (dev) absent entirely — state list
+          # exits non-zero for the latter, hence 2>/dev/null.
           COUNT=$(terraform state list 2>/dev/null | wc -l)
           echo "resource_count=$COUNT"
           if [[ "$COUNT" -eq 0 ]]; then
@@ -85,14 +76,9 @@ jobs:
         if: steps.liveness.outputs.live == 'true'
         working-directory: terraform/environments/${{ matrix.environment }}
         env:
-          # Placeholder values, same pattern as ci.yml's terraform-lint
-          # validate step — safe here for a stronger reason than there:
-          # -refresh-only never proposes a change driven by config/var input
-          # (an add, delete, or replace); it only reports the delta between
-          # the last-recorded state and a fresh read of real infrastructure.
-          # A "wrong" image/CIDR value below cannot manufacture a false
-          # drift positive. Unset vars for dev-only/staging-prod-only
-          # variables are silently ignored (same as ci.yml's validate step).
+          # Placeholder values — safe because -refresh-only never proposes a
+          # config-driven change, only real drift. See
+          # docs/design-decisions.md#drift-detection-needs-an-explicit-liveness-gate.
           TF_VAR_api_image: "placeholder"
           TF_VAR_worker_image: "placeholder"
           TF_VAR_git_commit: "drift-check"

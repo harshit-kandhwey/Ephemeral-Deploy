@@ -12,16 +12,9 @@ alembic==1.19.1
 
 # Redis & Celery
 redis==8.1.0
-# redis-py's asyncio/connection.py picks async_timeout vs stdlib
-# asyncio.timeout based on sys.version_info AT RUNTIME (>= 3.11.3 uses
-# stdlib), but pip's own `python_full_version < "3.11.3"` marker for this
-# dependency is evaluated AT BUILD TIME, against the builder image's Python.
-# Our builder (python:3.11-slim) and runtime (distroless, pinned to an older
-# 3.11.2) images can disagree on that boundary — verified 2026-09-05: the
-# builder here is 3.11.15, so pip skips this as unneeded, then the
-# distroless runtime's 3.11.2 unconditionally imports it and crashes.
-# Installing it unconditionally (unused when the runtime IS >= 3.11.3) is
-# the fix. See docs/design-decisions.md#distroless-runtime-images.
+# Needed by redis-py's asyncio module on the distroless runtime's older
+# Python patch — pip's build-time marker for this misjudges it. See
+# docs/design-decisions.md#distroless-runtime-images.
 async-timeout>=4.0.3
 celery==5.6.3
 

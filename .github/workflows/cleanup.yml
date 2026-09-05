@@ -60,10 +60,8 @@ jobs:
     # so the cap must cover the sleep plus the destroy.
     timeout-minutes: 90
     runs-on: ubuntu-latest
-    # Scheduled runs sweep dev AND staging (nightly safety net for anything
-    # left running — never prod, that stays manual-only). Manual runs still
-    # target exactly the one environment chosen, and skip destroy entirely
-    # for drain_old_slot.
+    # Scheduled runs sweep dev+staging, never prod. See
+    # docs/design-decisions.md#staging-joined-dev-in-the-nightly-teardown-sweep.
     if: github.event_name == 'schedule' || github.event.inputs.action != 'drain_old_slot'
     strategy:
       fail-fast: false

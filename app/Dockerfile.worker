@@ -1,11 +1,7 @@
 # ── Stage 1: builder ─────────────────────────────────────────────────────────
-# Identical to the API builder — same requirements.txt, so the layer cache is
-# shared between the two images when they are built in the same run.
-#
-# --target=/opt/deps, not a venv — see the API Dockerfile's builder-stage
-# comment: a copied venv's console scripts and bin/python* symlinks are
-# pointed at this stage's absolute python path, which doesn't exist in the
-# distroless runtime stage. See docs/design-decisions.md#distroless-runtime-images.
+# Identical to the API builder — same requirements.txt (shared layer cache)
+# and same --target=/opt/deps, not a venv, reasoning. See
+# docs/design-decisions.md#distroless-runtime-images.
 FROM python:3.11-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -19,12 +15,9 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 
 # ── Stage 2: runtime ─────────────────────────────────────────────────────────
-# Distroless, not python:3.11-slim — see
-# docs/design-decisions.md#distroless-runtime-images. No curl and no shell
-# to debug with via ECS Exec any more; `execute-command` with "python3"
-# drops into a REPL instead. The build toolchain and postgresql-client were
-# already gone here: entrypoint_worker.py runs `python -m src.init_db`,
-# never psql, so nothing needs a database CLI.
+# Distroless, not python:3.11-slim — no curl, no shell (ECS Exec drops into
+# a python3 REPL instead once it exists). See
+# docs/design-decisions.md#distroless-runtime-images.
 FROM gcr.io/distroless/python3-debian12:nonroot
 
 COPY --from=builder /opt/deps /opt/deps
@@ -38,20 +31,15 @@ WORKDIR /app
 COPY --chown=65532:65532 . /app/
 
 # Entrypoint lives outside /app so it is not shadowed by the source copy.
-# No chmod +x / shebang needed: it's never exec'd directly (no shell to
-# resolve a shebang anyway), only ever passed as a script argument to the
-# base image's own python3 entrypoint — see CMD below.
+# Not exec'd directly (no shell to resolve a shebang) — passed as a script
+# argument to the base image's own python3 entrypoint, see CMD below.
 COPY --chown=65532:65532 entrypoint_worker.py /entrypoint_worker.py
 
 # ── Entry point explanation ───────────────────────────────────────────────────
-# No ENTRYPOINT override: the distroless base's own
-# ENTRYPOINT ["/usr/bin/python3.11"] is kept. CMD's first element is the
-# entrypoint script (a plain argument to python3, not an executed file), and
-# entrypoint_worker.py's SKIP_INIT_DB / DB init logic below launches Celery
-# via `python3 -m celery ...` for the same shebang-avoidance reason.
+# No ENTRYPOINT override — distroless's own python3.11 is kept, and CMD's
+# elements are its arguments. See docs/design-decisions.md#distroless-runtime-images.
 #
-# entrypoint_worker.py runs init_db before starting Celery (Python, not bash —
-# the distroless image has no shell to run a .sh script in).
+# entrypoint_worker.py runs init_db before starting Celery.
 # This ensures NexusAppUser and schema exist on every deploy
 # without requiring a separate pipeline step. Idempotent.
 #
@@ -62,9 +50,8 @@ COPY --chown=65532:65532 entrypoint_worker.py /entrypoint_worker.py
 # --concurrency 2           → 2 worker processes per container. Matches the
 #                             256 CPU / 512 MB Fargate task size.
 #
-# beat's ECS task definition overrides this CMD with its own
-# ["/entrypoint_worker.py", "celery", ..., "beat", ...] — same convention,
-# see terraform/modules/ecs/main.tf and docker-compose.yml.
+# beat's ECS task definition overrides this CMD with its own beat command,
+# same entrypoint_worker.py-first convention — see terraform/modules/ecs.
 # ─────────────────────────────────────────────────────────────────────────────
 CMD ["/entrypoint_worker.py", "celery", "-A", "src.celery_worker:celery", "worker", \
     "--loglevel=info", \

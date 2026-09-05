@@ -330,11 +330,8 @@ jobs:
             --tag $REGISTRY/nexusdeploy-worker-$ENV:latest \
             --push ./app
 
-          # Terraform gets the immutable digest, not the $TAG/`:latest` tags
-          # above — a tag can be silently overwritten by a later push (e.g. a
-          # manual re-run for the same commit); the digest this run just
-          # produced cannot be. Tags stay for humans browsing ECR.
-          # See docs/design-decisions.md#deploy-by-digest-not-by-tag.
+          # Terraform gets the immutable digest, not the mutable $TAG/latest
+          # tags above. See docs/design-decisions.md#deploy-by-digest-not-by-tag.
           API_DIGEST=$(aws ecr describe-images \
             --repository-name "nexusdeploy-api-$ENV" \
             --image-ids imageTag=$TAG \
@@ -361,16 +358,8 @@ jobs:
           sudo tar -xzf /tmp/syft.tar.gz -C /usr/local/bin syft
           syft version
 
-      # Keyless: no key material anywhere. cosign gets a short-lived cert from
-      # Fulcio using this job's own GitHub Actions OIDC token (id-token: write
-      # above), and records the signature in Rekor's public transparency log
-      # — both free, no AWS resource involved. Signs/attests by DIGEST (the
-      # value push-image's outputs actually carry, not the mutable :$TAG), so
-      # this is provably about the exact bytes just pushed. Verified locally
-      # against a real (non-keyless, key-based) registry+sign+attest+verify
-      # round trip before wiring this in — the keyless OIDC handshake itself
-      # can only be proven inside real GitHub Actions, not locally.
-      # See docs/design-decisions.md#image-signing-and-sboms.
+      # Keyless (no key material anywhere), signs/attests by digest not the
+      # mutable tag. See docs/design-decisions.md#image-signing-and-sboms.
       - name: Sign images and attach SBOMs
         env:
           REGISTRY: ${{ steps.ecr-login.outputs.registry }}
@@ -384,10 +373,8 @@ jobs:
           syft "$API_REF" -o spdx-json > sbom-api.json
           syft "$WORKER_REF" -o spdx-json > sbom-worker.json
 
-          # A real SBOM predicate (~100-200KB here) took noticeably longer
-          # to upload than a trivial test payload when this was verified
-          # locally — comfortably inside this step's default job timeout,
-          # but worth knowing if this step is ever the one that's slow.
+          # A real SBOM uploads slower than a trivial payload — see
+          # docs/design-decisions.md#image-signing-and-sboms if this is slow.
           cosign attest --yes --predicate sbom-api.json --type spdxjson "$API_REF"
           cosign attest --yes --predicate sbom-worker.json --type spdxjson "$WORKER_REF"
 

@@ -333,13 +333,9 @@ jobs:
           fi
           echo "✅ No risky GH-expression-into-echo-string patterns found"
 
-  # Scans the full commit history for hardcoded secrets. Always runs, no path
-  # gating — a leaked credential can land in any file type. Deliberately
-  # blocking, unlike the CVE/IaC scanners in docs/design-decisions.md
-  # #non-blocking-security-scanners: those are soft-fail because a CVE is
-  # often not actionable in the moment and a hard gate just trains people to
-  # bypass it. A real secret is immediately actionable (rotate it) and has no
-  # "wait for an upstream fix" case, so it fails the build.
+  # Scans full commit history for hardcoded secrets. Deliberately blocking,
+  # unlike the soft-fail CVE/IaC scanners below — see
+  # docs/design-decisions.md#secret-scanning-is-the-one-blocking-scanner.
   secrets-scan:
     name: Secret Scan (gitleaks)
     runs-on: ubuntu-latest
