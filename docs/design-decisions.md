@@ -145,6 +145,42 @@ there's nothing else in the image to exec into. `docker-compose.yml`'s
 their command override updated to route through `/entrypoint_worker.py`
 first, for the same ENTRYPOINT-is-python3 reason as above.
 
+### Image signing and SBOMs
+
+`push-image` (`deploy.yml`) signs both images with cosign and attaches an
+SBOM, right after resolving their digests (see
+#deploy-by-digest-not-by-tag — signing targets the digest, not the mutable
+tag). Keyless: no key material anywhere in this repo or its secrets. cosign
+gets a short-lived certificate from Fulcio using the job's own GitHub
+Actions OIDC token (`id-token: write`, already needed for ECR auth), and
+records the signature in Rekor's public transparency log — both free, no
+AWS resource, no ongoing cost. The `~$1/mo` alternative would be a
+KMS-backed key instead of keyless; not used here.
+
+Verified locally before wiring this in (2026-09-05): a full sign → generate
+SBOM (syft) → attest → verify-attestation round trip against a real
+(ephemeral, local, non-ECR) registry, using a locally generated key pair —
+key-based rather than keyless, since keyless needs a real CI-issued OIDC
+token that only exists inside an actual GitHub Actions run. The keyless
+handshake itself is the one part of this that can only be proven by
+watching it actually happen on a real deploy.
+
+One real finding from that local test: a small dummy `cosign attest`
+predicate uploads in seconds, but the first attempt at attesting a full,
+real SBOM (~185KB, spdx-json) appeared to hang past a 120s window with a
+large volume of repeated output. A second attempt, with a longer timeout,
+completed cleanly in a few seconds — almost certainly one-time TUF
+trust-root initialization compounding with the larger upload on that first
+run, not a hard payload-size limit. Documented rather than silently
+retried-around, in case the first real deploy's `Sign images and attach
+SBOMs` step runs unusually long — that would be why, and it's expected to
+be fast on every run after the first.
+
+`cosign attach sbom` (a separate, older subcommand) was deliberately not
+used — cosign's own CLI flags it as deprecated in favor of SBOM
+attestations, which is what `cosign attest --type spdxjson` above already
+does.
+
 **"Validate each environment" is deliberately NOT in this set.** It runs
 `terraform validate` + `terraform plan` per environment — basic
 syntax/semantic correctness, not a security scanner with the CVE-noise
