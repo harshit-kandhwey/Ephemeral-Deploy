@@ -18,3 +18,12 @@ profile = "black"
 line_length = 120
 known_first_party = ["src"]
 skip = ["migrations", "__pycache__", ".venv", "venv"]
+
+[tool.coverage.run]
+# Thin entry points with no logic beyond calling the already-covered
+# create_app() — see docs/design-decisions.md#coverage-omit-list-is-a-reachability-boundary.
+omit = [
+    "src/run.py",
+    "src/wsgi.py",
+    "src/celery_worker.py",
+]

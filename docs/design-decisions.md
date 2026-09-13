@@ -825,6 +825,59 @@ even if that environment-name mapping changes, where `== "production"`
 would silently start accepting default credentials in a new non-dev,
 non-prod environment.
 
+### Coverage omit list is a reachability boundary, not gaming
+
+`run.py`/`wsgi.py`/`celery_worker.py` are omitted from `--cov=src`
+(`pyproject.toml`'s `[tool.coverage.run]`) because each only calls
+`create_app()` (or, for `celery_worker.py`, also `app.app_context().push()`)
+with no branchable logic of its own — `create_app()` itself stays fully
+measured via every other test in the suite. This is the internal tier of a
+tiered-reachability policy: waivable in bulk because it's exercised
+transitively through an already-covered caller, not because it's untested
+in principle. `cache_service.py`/`s3_service.py`, despite having zero real
+callers in `src/` today (only `src/services/__init__.py`'s own re-export
+references them — pre-emptive coverage, not a sign they're wired in), are
+**not** on this list — they carry real branching/error-handling logic of
+their own and are covered directly (`tests/test_cache_service.py`/
+`tests/test_s3_service.py`).
+
+Real coverage with the omit list applied is 90% (`cd app && pytest tests/
+--cov=src --cov-report=term-missing`), well above `ci.yml`'s
+`--cov-fail-under=85` — a regression backstop with real margin, not a
+number chased for its own sake. The previous floor (`60`) had drifted 10+
+points stale below actual coverage before this pass, exactly the
+percentage-target failure mode a tiered/reachability-based gate avoids.
+
+A real "test at the wrong seam" trap surfaced while writing
+`test_cache_service.py`: `cache_service.py` does a *module-level*
+`from ..extensions import redis_client`, binding its own private copy of
+whatever `src.extensions.redis_client` was at `cache_service`'s own import
+time (`None`, since nothing imports `src.services` before a test does).
+`init_extensions` reassigns `src.extensions.redis_client` later via
+`global redis_client` — reassigning the *module attribute* never touches
+`cache_service`'s already-bound copy. `patch("src.extensions.redis_client",
+...)` — the pattern `tests/test_health.py` uses successfully, because
+`app.py`'s health check re-imports `redis_client` *inside* the function
+body on every call — silently does nothing here: a sloppy assertion can
+still "pass," but only because the mock was never actually consulted.
+Every `cache_service` test patches `src.services.cache_service.redis_client`
+instead; verified by deliberately patching the wrong target first and
+confirming the test passes for the wrong reason before locking in the
+right one.
+
+**Mutation testing** (ad hoc, not CI — per the cross-project engineering
+resources' guidance to scope it small and run it by hand): `init_db.py`'s
+fail-closed seeding guard above is the single highest-value target found —
+a silently weakened check there means a real deployment seeds default
+credentials. Not added to `app/requirements.txt` (that file ships in the
+production Docker images; a mutation tool has no business there):
+
+```bash
+pip install mutmut==<pin at time of use>
+cd app && mutmut run --paths-to-mutate=src/init_db.py --runner="pytest tests/test_init_db.py"
+mutmut results   # review survivors by hand
+```
+
 ### Celery Beat is a singleton
 
 Beat always runs at `desired_count = 1`. Two Beat instances fire every scheduled
