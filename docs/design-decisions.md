@@ -608,6 +608,26 @@ role's real policy exceeds the 10,240-char aggregate inline-policy limit
 split across two resources; Terraform's copy is a placeholder so it has
 something to track in state.
 
+### Two unrelated SSM namespaces under `/nexusdeploy/<env>/`
+
+Easy to confuse, worth keeping separate explicitly. `bootstrap.sh` owns
+`{db,app,monitoring}/*` (master/app DB credentials, Flask secret/JWT keys,
+the Grafana password) — Terraform only ever reads these; bootstrap
+create-once-skips-if-exists, never overwrites a live secret.
+
+`deployment/{active_slot,generation,prev_api_image,prev_worker_image}` are
+entirely different: workflow-owned, not a Terraform resource at all (as
+of commit `8f9d7ab` — `active_slot` used to be, with
+`ignore_changes=[value]`, deliberately removed so `terraform destroy` can
+never touch any of the four). `cleanup.yml` explicitly `aws ssm
+delete-parameter`s all four on a successful teardown — verified working
+end-to-end against live AWS (a real teardown, twice, back-to-back, both
+clean). This matters if it ever regresses:
+`deploy-blue-green.yml` only falls back to the `placeholder` image when
+`prev_*_image` is **absent** — a stale leftover value would make a fresh
+deploy seed the idle slot with a stale image instead of the documented
+first-deploy path.
+
 ### Deploy role cannot modify its own permissions
 
 The deploy role's policy grants it `iam:PutRolePolicy` and other role-write
@@ -790,16 +810,23 @@ past 50/hour. A 429 on the container health check reads to ECS as an
 unhealthy task, so an un-exempted limiter would get the task killed and
 replaced by its own health check.
 
-### Rate-limiter storage diagnostic is instrumentation for an open bug
+### Rate-limiter storage diagnostic — closed, kept as a regression guard
 
 `create_app` logs `Rate limiter storage: uri=<redacted> backend=<class>`
-right after `limiter.init_app`, to answer a question ECS Exec being disabled
-otherwise blocks: staging containers have logged flask-limiter's "using the
-in-memory storage" warning even though `RATELIMIT_STORAGE_URI` resolves to a
-real Redis URL — a case a local repro of `create_app("production")` has
-never reproduced. In-memory storage means limits are per-Gunicorn-worker and
-reset on restart, so the documented global limit silently isn't in force.
-`backend=unset` in the logs would confirm it.
+right after `limiter.init_app`, added to answer a question ECS Exec being
+disabled otherwise blocks: staging containers once logged flask-limiter's
+"using the in-memory storage" warning even though `RATELIMIT_STORAGE_URI`
+resolved to a real Redis URL — a case a local repro of
+`create_app("production")` never reproduced. In-memory storage means
+limits are per-Gunicorn-worker and reset on restart, so the documented
+global limit would silently not be in force. **Resolved**: a redeploy
+logged `backend=RedisStorage` cleanly in both api and worker containers
+with no warning, and it hasn't recurred. The diagnostic line stays in
+place as a standing regression guard — re-open the investigation only if
+`backend=unset`/the in-memory warning shows up again, and get
+`RATELIMIT_STORAGE_URI`'s actual runtime value from the container at that
+point (ECS Exec being disabled is what made this hard to debug directly
+the first time).
 
 `limiter.storage` is a property guarded by `assert self._storage`, so it
 raises `AssertionError`, not `AttributeError`, when storage is unset (the
