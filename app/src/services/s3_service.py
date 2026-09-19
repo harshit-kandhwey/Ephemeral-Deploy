@@ -32,6 +32,8 @@ class S3Service:
             return True, s3_key
 
         except ClientError as e:
+            # a failed upload is reported to the caller as a normal (False, msg)
+            # result, not a 500 — the caller decides whether to retry or surface it
             current_app.logger.error(f"S3 upload error: {e}")
             return False, str(e)
 
@@ -45,6 +47,8 @@ class S3Service:
             )
             return url
         except ClientError as e:
+            # a missing/inaccessible object degrades to "no link" for the
+            # caller, not a 500 — presigned URLs are best-effort convenience
             current_app.logger.error(f"Presigned URL error: {e}")
             return None
 
@@ -54,5 +58,7 @@ class S3Service:
             self.s3_client.delete_object(Bucket=self.bucket, Key=s3_key)
             return True
         except ClientError as e:
+            # an already-gone/inaccessible object degrades to "not deleted"
+            # for the caller, not a 500 — deletion here is best-effort cleanup
             current_app.logger.error(f"S3 delete error: {e}")
             return False

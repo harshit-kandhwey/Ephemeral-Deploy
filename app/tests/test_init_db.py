@@ -37,6 +37,17 @@ def test_get_master_conn_raises_without_master_credentials(monkeypatch):
         _get_master_conn()
 
 
+def test_get_master_conn_raises_with_only_one_master_credential_set(monkeypatch):
+    """Mutmut-caught gap: the fail-closed check is `not user or not password`,
+    not `and` — a partial credential pair (one env var set, the other absent)
+    must still raise, not silently proceed with a None value."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@host:5432/db")
+    monkeypatch.setenv("DB_MASTER_USER", "master")
+    monkeypatch.delenv("DB_MASTER_PASSWORD", raising=False)
+    with pytest.raises(RuntimeError, match="DB_MASTER_USER"):
+        _get_master_conn()
+
+
 def _mock_cursor(role_exists):
     cursor = MagicMock()
     cursor.fetchone.return_value = (1,) if role_exists else None

@@ -219,7 +219,7 @@ def create_task():
     )
 
     db.session.add(task)
-    db.session.commit()
+    db.session.flush()  # assigns task.id without committing
 
     audit = AuditLog(
         user_id=user_id,
@@ -336,7 +336,7 @@ def update_task(task_id):
 
             send_task_assignment_email.delay(task.id, data["assignee_id"])
 
-    db.session.commit()
+    db.session.flush()  # persist changes without committing
 
     audit = AuditLog(
         user_id=user_id,

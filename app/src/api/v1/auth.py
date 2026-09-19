@@ -10,6 +10,7 @@ from flask_jwt_extended import (
     get_jwt_identity,
     jwt_required,
 )
+from sqlalchemy.exc import IntegrityError
 
 from ...extensions import db, limiter, redis_client
 from ...models.audit_log import AuditLog
@@ -84,7 +85,11 @@ def register():
     user.set_password(data["password"])
 
     db.session.add(user)
-    db.session.commit()
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({"error": "Email or username already registered"}), 409
 
     audit = AuditLog(
         user_id=user.id,

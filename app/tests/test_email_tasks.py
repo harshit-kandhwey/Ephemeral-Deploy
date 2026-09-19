@@ -110,7 +110,7 @@ def test_send_daily_digest_only_counts_active_users(app, caplog):
         with caplog.at_level(logging.INFO):
             result = send_daily_digest()
 
-        assert result == "Digest sent to 1 users"
+        assert result == "Digest logged for 1 users (no email provider configured)"
         assert f"user_id={inactive_user.id}" not in caplog.text
 
 
@@ -139,4 +139,4 @@ def test_send_daily_digest_counts_only_non_done_tasks_per_user(app, caplog):
 
 def test_send_daily_digest_zero_users_returns_zero_count(app):
     with app.app_context():
-        assert send_daily_digest() == "Digest sent to 0 users"
+        assert send_daily_digest() == "Digest logged for 0 users (no email provider configured)"

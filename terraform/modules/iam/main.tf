@@ -114,19 +114,6 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
         ]
         Resource = [for repo in var.ecr_repository_names : "arn:aws:ecr:*:*:repository/${var.project}-${repo}"]
       },
-      # ECS - deploy services
-      {
-        Sid    = "ECSAccess"
-        Effect = "Allow"
-        Action = [
-          "ecs:RegisterTaskDefinition",
-          "ecs:UpdateService",
-          "ecs:DescribeServices",
-          "ecs:DescribeTaskDefinition",
-          "ecs:ListTaskDefinitions"
-        ]
-        Resource = "*"
-      },
       # Terraform state backend
       {
         Sid    = "TerraformStateS3"

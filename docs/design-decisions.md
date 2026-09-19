@@ -897,13 +897,35 @@ resources' guidance to scope it small and run it by hand): `init_db.py`'s
 fail-closed seeding guard above is the single highest-value target found —
 a silently weakened check there means a real deployment seeds default
 credentials. Not added to `app/requirements.txt` (that file ships in the
-production Docker images; a mutation tool has no business there):
+production Docker images; a mutation tool has no business there). Run
+inside a disposable container (mutmut's classic engine mutates the target
+file in place, then reverts it — never point it at a bind-mounted working
+tree, only a container-internal copy):
 
 ```bash
-pip install mutmut==<pin at time of use>
+pip install mutmut==2.4.5   # matches the --paths-to-mutate/--runner CLI below;
+                             # mutmut 3.x replaced these with a pyproject.toml config
 cd app && mutmut run --paths-to-mutate=src/init_db.py --runner="pytest tests/test_init_db.py"
 mutmut results   # review survivors by hand
 ```
+
+**Run 2026-09-19, 179 mutants generated, 12 killed, 2 survived, 165
+untested/skipped** (mutants outside the lines `test_init_db.py` actually
+exercises — expected for a file-scoped run against one test file). The two
+survivors:
+
+- A string-literal mutation of the `DATABASE_URL` missing-env-var error
+  message — benign. No test asserts the exact message text, only that
+  `RuntimeError` is raised; the behavior itself is unchanged.
+- **A real gap, fixed**: `_get_master_conn`'s guard
+  `if not master_user or not master_password` survived being mutated to
+  `and`. The existing test only covered "both credentials missing" — a
+  partial pair (one of `DB_MASTER_USER`/`DB_MASTER_PASSWORD` set, the other
+  absent) would silently pass the guard under the mutant and proceed with a
+  `None` value. Added
+  `test_get_master_conn_raises_with_only_one_master_credential_set`
+  (`app/tests/test_init_db.py`), plant-confirmed red against the mutant,
+  green against the real `or`.
 
 ### Celery Beat is a singleton
 
@@ -1040,3 +1062,68 @@ than an unrecorded gap — this project's ALB is disabled (see the ALB note
 in `terraform/modules/ecs/`), so no live client traffic is actually
 load-balanced across slots today, which keeps real-world urgency low
 without making the architectural gap not worth fixing eventually.
+
+### Celery task idempotency is deferred, not designed in yet
+
+`create_task`, `update_task`, and `create_comment` dispatch
+`send_task_assignment_email.delay(...)`/`send_comment_notification.delay(...)`
+with no idempotency key, and Celery's broker guarantees at-least-once
+delivery — a broker-level redelivery (worker crash mid-task, visibility
+timeout, restart during a blue-green drain) can run the same task twice.
+
+Deliberately not fixed today: every task in `app/src/tasks/email_tasks.py`
+is currently log-only (see
+`#rate-limiter-storage-diagnostic--closed-kept-as-a-regression-guard`'s
+neighbor section on the email stubs below) — a duplicate run produces one
+extra log line, not a duplicate real-world side effect. That safety margin
+is temporary, not structural: the moment a real email provider is wired in,
+the same duplicate-delivery path becomes a real duplicate-send risk with no
+code change needed to trigger it, since the `.delay()` call sites don't
+change, only what's inside the task. Tracked here explicitly so wiring in a
+provider without also adding an idempotency key (e.g. a dedupe key derived
+from `(task_id, assignee_id)` or `(comment_id, user_id)`, checked via
+`CacheService`/a dedicated Redis set before sending) is a visible regression
+against a documented decision, not a silent gap.
+
+### Email tasks are stubs, not a wired-up provider
+
+`app/src/tasks/email_tasks.py`'s three tasks only log — no SMTP/SES/SendGrid
+call exists anywhere in `src/`. Log lines and return values are worded
+`[EMAIL-STUB]`/`[DIGEST-STUB]`/"logged" rather than "sent", deliberately: a
+return value or log grep that says "sent" is a plausible-wrong-answer risk
+the moment anything downstream (a test, a dashboard, an on-call runbook)
+treats it as delivery evidence. Wiring in a real provider should update
+this wording at the same time, not leave "sent" retroactively true only by
+coincidence of timing.
+
+### Deliberately deferred: fuzz/property-based testing on `validation.py`'s parsers
+
+`utils/validation.py`'s `parse_datetime`/`parse_int` are covered by
+example-based unit tests (malformed strings, boundary values, the
+`bool`-is-an-`int`-subclass trap) but not by property-based/fuzz testing
+(e.g. Hypothesis). This is a real gap against
+`coding-standards.md`/`engineering-practices.md` §30's risk-based testing
+guidance, not an oversight — recorded explicitly rather than left
+unstated. Reasoning: both parsers are pure, small, and fail closed today
+(a parse failure raises `ValidationError`, caught and turned into a 400 —
+never silently coerced into a wrong-but-plausible value), so the blast
+radius of an untested edge case is a validation-error response, not
+corrupted data or an auth bypass. Revisit if either parser's fail-closed
+behavior ever changes, or if a caller starts trusting a parsed value
+without the current error handling around it.
+
+### The coverage omit list's tier is self-declared, not derived from a call graph
+
+`engineering-practices.md` §8 asks for a covered/omitted split "derived
+from the actual call graph," but `pyproject.toml`'s `[tool.coverage.run]`
+omit list (`run.py`/`wsgi.py`/`celery_worker.py`) is a hand-maintained list
+with a stated rationale (see
+`#coverage-omit-list-is-a-reachability-boundary` above), not the output of
+call-graph tooling. Deliberate, not an oversight: this is a small,
+single-package Flask app where the omitted files' full call graph (three
+files, each just calling the already-exhaustively-tested `create_app()`)
+is verifiable by reading them, and the tooling investment to derive it
+mechanically (e.g. a coverage-aware static analyzer wired into CI) isn't
+justified at this codebase's size. Revisit if the omit list ever grows
+past a handful of genuinely-trivial entry points, where "verifiable by
+reading them" stops being a credible substitute for real tooling.

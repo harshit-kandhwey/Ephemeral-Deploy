@@ -902,7 +902,7 @@ SLOT=$(aws ssm get-parameter --name "/nexusdeploy/$ENV/deployment/active_slot" \
 docker-compose up -d          # Start postgres + redis + api + worker + beat + redis-commander
 docker-compose down -v        # Stop and remove volumes
 (cd app && pytest tests/ -v --cov=src --cov-report=term-missing)                        # Tests
-(cd app && flake8 src/ --max-line-length=120 && black --check src/ && bandit -r src/ -ll -x src/tests/)   # Lint
+(cd app && flake8 src/ --max-line-length=120 && black --check src/ && bandit -r src/ -ll)   # Lint
 
 # ── Docker (normally CI's job) ────────────────────────
 docker build -t nexusdeploy-api:local    -f app/Dockerfile app/

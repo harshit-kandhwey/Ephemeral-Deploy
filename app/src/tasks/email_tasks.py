@@ -16,9 +16,12 @@ def send_task_assignment_email(task_id, user_id):
         current_app.logger.warning(f"send_task_assignment_email: task {task_id} or user {user_id} not found")
         return
 
+    # No real email provider is wired in yet — this only logs. Wording is
+    # deliberately "logged", not "sent", so the return value can never be
+    # mistaken for delivery evidence once a real provider lands.
     # Log user_id instead of email — PII compliance (GDPR/CCPA)
-    current_app.logger.info(f"[EMAIL] Task '{task.title}' assigned to user_id={user.id}")
-    return f"Email sent to user_id={user.id}"
+    current_app.logger.info(f"[EMAIL-STUB] Task '{task.title}' assignment logged for user_id={user.id}")
+    return f"Assignment notification logged for user_id={user.id} (no email provider configured)"
 
 
 @celery.task(name="tasks.send_comment_notification")
@@ -31,24 +34,28 @@ def send_comment_notification(comment_id, user_id):
         current_app.logger.warning(f"send_comment_notification: comment {comment_id} or user {user_id} not found")
         return
 
+    # No real email provider is wired in yet — this only logs, see the
+    # matching comment in send_task_assignment_email above.
     # Log user_id instead of email — PII compliance (GDPR/CCPA)
-    current_app.logger.info(f"[EMAIL] New comment on task {comment.task_id} for user_id={user.id}")
-    return f"Notification sent to user_id={user.id}"
+    current_app.logger.info(f"[EMAIL-STUB] New comment on task {comment.task_id} logged for user_id={user.id}")
+    return f"Comment notification logged for user_id={user.id} (no email provider configured)"
 
 
 @celery.task(name="tasks.send_daily_digest")
 def send_daily_digest():
-    """Send daily digest of tasks to all users"""
+    """Log daily digest of tasks for all users (no real email provider wired in yet)"""
     users = db.session.execute(db.select(User).filter_by(is_active=True)).scalars().all()
 
-    for user in users:
-        pending_tasks = db.session.execute(
-            db.select(db.func.count(Task.id)).where(
-                Task.assignee_id == user.id,
-                Task.status != "done",
-            )
-        ).scalar()
-        # Log user_id instead of email — PII compliance (GDPR/CCPA)
-        current_app.logger.info(f"[DIGEST] user_id={user.id}: {pending_tasks} pending tasks")
+    # One grouped query instead of one COUNT per user (was a textbook N+1).
+    pending_counts = dict(
+        db.session.execute(
+            db.select(Task.assignee_id, db.func.count(Task.id)).where(Task.status != "done").group_by(Task.assignee_id)
+        ).all()
+    )
 
-    return f"Digest sent to {len(users)} users"
+    for user in users:
+        pending_tasks = pending_counts.get(user.id, 0)
+        # Log user_id instead of email — PII compliance (GDPR/CCPA)
+        current_app.logger.info(f"[DIGEST-STUB] user_id={user.id}: {pending_tasks} pending tasks")
+
+    return f"Digest logged for {len(users)} users (no email provider configured)"

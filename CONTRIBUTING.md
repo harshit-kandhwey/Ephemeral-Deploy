@@ -37,7 +37,7 @@ Tests use in-memory SQLite and Redis DB 15 — no external services needed.
 ### Linting
 
 ```bash
-(cd app && flake8 src/ --max-line-length=120 && black --check src/ && bandit -r src/ -ll -x src/tests/)
+(cd app && flake8 src/ --max-line-length=120 && black --check src/ && bandit -r src/ -ll)
 (cd app && black .)   # auto-format
 (cd app && isort .)   # sort imports
 ```

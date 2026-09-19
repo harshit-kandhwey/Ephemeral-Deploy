@@ -30,7 +30,7 @@
 
 ## Checklist
 
-- [ ] Lint passes locally (`cd app && flake8 src/ --max-line-length=120 && black --check src/ && bandit -r src/ -ll -x src/tests/`)
+- [ ] Lint passes locally (`cd app && flake8 src/ --max-line-length=120 && black --check src/ && bandit -r src/ -ll`)
 - [ ] No hardcoded secrets, credentials, or environment-specific values in code
 - [ ] Terraform changes: `terraform fmt` applied, `terraform plan` reviewed
 - [ ] New API endpoints have Swagger docstrings

@@ -142,7 +142,10 @@ jobs:
         run: flake8 app/ --max-line-length=120 --exclude=migrations/
 
       - name: Run bandit (security scan)
-        run: bandit -r app/src/ -ll -x app/src/tests/
+        # No -x exclusion needed: tests live at app/tests/, outside the
+        # scanned app/src/ tree entirely — a stale app/src/tests/ exclusion
+        # excluded nothing and was silently dead.
+        run: bandit -r app/src/ -ll
         continue-on-error: true
 
       - name: Run pip-audit (dependency vulnerability scan)

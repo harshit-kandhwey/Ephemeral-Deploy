@@ -13,6 +13,7 @@ class CacheService:
             value = redis_client.get(key)
             return json.loads(value) if value else None
         except Exception as e:
+            # cache is best-effort; a Redis blip must never fail the request
             current_app.logger.error(f"Cache get error: {e}")
             return None
 
@@ -23,6 +24,7 @@ class CacheService:
             redis_client.setex(key, expiration, json.dumps(value))
             return True
         except Exception as e:
+            # cache is best-effort; a Redis blip must never fail the request
             current_app.logger.error(f"Cache set error: {e}")
             return False
 
@@ -33,6 +35,7 @@ class CacheService:
             redis_client.delete(key)
             return True
         except Exception as e:
+            # cache is best-effort; a Redis blip must never fail the request
             current_app.logger.error(f"Cache delete error: {e}")
             return False
 
@@ -45,5 +48,6 @@ class CacheService:
                 redis_client.delete(*keys)
             return True
         except Exception as e:
+            # cache is best-effort; a Redis blip must never fail the request
             current_app.logger.error(f"Cache invalidate error: {e}")
             return False
