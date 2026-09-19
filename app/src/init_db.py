@@ -2,9 +2,12 @@
 Database initialisation script
 ================================
 Handles two responsibilities:
-  1. Schema creation   — db.create_all() is idempotent: creates tables that
-                         don't exist, leaves existing tables and data untouched.
-                         Safe to run on every deployment.
+  1. Schema creation   — runs Alembic migrations (app/migrations/) via
+                         flask_migrate.upgrade(), which is idempotent: a
+                         database already at head is a no-op, and unlike
+                         db.create_all() it can actually apply column/type
+                         changes to existing tables, not just create new
+                         ones. Safe to run on every deployment.
 
   2. Sample data seed  — only runs when SEED_DB=true AND the database is empty.
                          Never runs in production unless explicitly forced.
@@ -158,15 +161,18 @@ def create_app_user():
 
 def create_schema(app):
     """
-    Create all tables using SQLAlchemy's metadata.
-    db.create_all() is idempotent — existing tables are not touched,
-    existing data is preserved. Safe for blue-green deployments.
+    Bring the schema to the latest Alembic revision (app/migrations/).
+    flask_migrate.upgrade() is idempotent — a database already at head is a
+    no-op — and, unlike db.create_all(), applies real schema changes
+    (new/altered columns) to existing tables, not just new tables. Safe for
+    blue-green deployments: two slots running upgrade() concurrently against
+    the same database both converge on the same head revision.
     """
-    from .extensions import db
+    from flask_migrate import upgrade
 
     with app.app_context():
-        db.create_all()
-        print("✓ Database schema created / verified (db.create_all)")
+        upgrade()
+        print("✓ Database schema upgraded to latest revision (flask db upgrade)")
 
 
 def seed_sample_data(app):

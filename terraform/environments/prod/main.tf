@@ -106,10 +106,13 @@ resource "aws_secretsmanager_secret_version" "app" {
   # DB_MASTER_USER/PASSWORD intentionally excluded — injected only into the
   # worker init task via a separate init-secrets secret (see below).
   secret_string = jsonencode({
-    DATABASE_URL          = "postgresql://${data.aws_ssm_parameter.db_app_username.value}:${data.aws_ssm_parameter.db_app_password.value}@${module.rds.db_endpoint}/${var.db_name}?sslmode=require"
-    REDIS_URL             = "redis://${module.elasticache.redis_endpoint}:6379/0"
-    CELERY_BROKER_URL     = "redis://${module.elasticache.redis_endpoint}:6379/0"
-    CELERY_RESULT_BACKEND = "redis://${module.elasticache.redis_endpoint}:6379/0"
+    DATABASE_URL = "postgresql://${data.aws_ssm_parameter.db_app_username.value}:${data.aws_ssm_parameter.db_app_password.value}@${module.rds.db_endpoint}/${var.db_name}?sslmode=require"
+    # rediss:// (double-s) — transit encryption + AUTH, not the plain
+    # redis:// this used before. See
+    # docs/design-decisions.md#elasticache-in-transit-encryption-and-auth.
+    REDIS_URL             = "rediss://:${random_password.redis_auth.result}@${module.elasticache.redis_endpoint}:6379/0"
+    CELERY_BROKER_URL     = "rediss://:${random_password.redis_auth.result}@${module.elasticache.redis_endpoint}:6379/0"
+    CELERY_RESULT_BACKEND = "rediss://:${random_password.redis_auth.result}@${module.elasticache.redis_endpoint}:6379/0"
     SECRET_KEY            = data.aws_ssm_parameter.app_secret_key.value
     JWT_SECRET_KEY        = data.aws_ssm_parameter.jwt_secret_key.value
     AWS_REGION            = var.aws_region
@@ -133,6 +136,13 @@ resource "aws_secretsmanager_secret_version" "init" {
     DB_MASTER_USER     = data.aws_ssm_parameter.db_master_username.value
     DB_MASTER_PASSWORD = data.aws_ssm_parameter.db_master_password.value
   })
+}
+
+# See docs/design-decisions.md#elasticache-in-transit-encryption-and-auth
+resource "random_password" "redis_auth" {
+  length           = 24
+  special          = true
+  override_special = "!#$%^&*()-_=+"
 }
 
 # See docs/design-decisions.md#seed-passwords-are-a-separate-secret-from-db-credentials
@@ -245,6 +255,7 @@ module "elasticache" {
   private_cache_subnet_ids = module.vpc.private_cache_subnet_ids
   redis_sg_id              = module.security_groups.redis_sg_id
   node_type                = "cache.t3.micro"
+  redis_auth_token         = random_password.redis_auth.result
   common_tags              = local.common_tags
 }
 

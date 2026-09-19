@@ -394,6 +394,34 @@ resource "aws_iam_role_policy" "ecs_task_s3" {
   })
 }
 
+# ECS Exec (`aws ecs execute-command`) — required on the TASK role, not the
+# execution role: these permissions let the running container's SSM agent
+# open the session channel, they have nothing to do with pulling the image
+# or writing logs (the execution role's job). Standard AWS-documented
+# ECS-Exec policy; Resource = "*" here is the AWS-documented shape for this
+# specific action set (the SSM channel isn't a taggable/ARN-scopable
+# resource), unlike this file's other statements, which scope by ARN
+# wherever the action supports it.
+resource "aws_iam_role_policy" "ecs_task_exec" {
+  name = "${var.project}-${var.environment}-task-exec"
+  role = aws_iam_role.ecs_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid    = "ECSExecSSMChannel"
+      Effect = "Allow"
+      Action = [
+        "ssmmessages:CreateControlChannel",
+        "ssmmessages:CreateDataChannel",
+        "ssmmessages:OpenControlChannel",
+        "ssmmessages:OpenDataChannel"
+      ]
+      Resource = "*"
+    }]
+  })
+}
+
 resource "aws_iam_role" "vpc_flow_log" {
   name = "${var.project}-${var.environment}-vpc-flow-log"
 

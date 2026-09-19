@@ -383,6 +383,72 @@ failed health check. Both fail the same way for the same reason: promoting a
 slot with a broken schema or a service that can't reach its dependencies
 ships a deploy that looks green while serving requests badly.
 
+### Post-promotion smoke test
+
+`Health check new slot` only proves the candidate is alive: container-level
+`HEALTHY` status, which itself is just `/health` (DB + Redis connectivity).
+It cannot catch a broken *route* — a bad migration that leaves the schema
+technically queryable but wrong for a real endpoint, a blueprint that failed
+to register, a rate-limiter misconfiguration — because none of those affect
+`/health`'s own narrow check.
+
+`app/src/smoke_test.py` closes that gap by actually calling
+`POST /api/v1/auth/login` with the seeded admin account and asserting a real
+`access_token` comes back — exercising password verification, JWT signing,
+and the full blueprint/rate-limiter stack in one request. Login has no side
+effect, so it's safe to run on every gated deploy, not just the first.
+
+Runs only when `run_init_db` is true (staging) — prod never seeds through
+this pipeline (seeding fails closed outside `development`, see
+`#seeding-fails-closed-outside-local-development`), so prod has no seeded
+admin account to log in with yet; gating the smoke test on the same input
+that gates seeding keeps the two consistent instead of inventing a second
+"is seeding expected here" condition. Its outcome feeds the same promotion
+gate as `init_db` and health (`steps.smoke_test.outcome != 'failure'`),
+`continue-on-error: true` so a failure surfaces cleanly instead of aborting
+the job mid-step.
+
+Deliberately **not** run via `aws ecs execute-command`: the api/worker
+images are distroless (`#distroless-runtime-images`) — no shell — and
+whether ECS Exec's non-interactive command path behaves correctly against a
+shell-less container isn't something this project has verified against real
+AWS (the AWS CLI's `execute-command` is documented as needing an
+interactive session; how it tokenizes and runs a multi-argument command
+without `/bin/sh` to parse it is genuinely unclear without a live test).
+Instead it runs the same way `init_db` already does — a `run-task` command
+override on the worker task definition — a mechanism this pipeline has
+already proven end-to-end, reusing `SEED_ADMIN_PASSWORD`, which is already
+injected into the worker container from Secrets Manager. The target's
+private IP is resolved runner-side (`list-tasks` → `describe-tasks` for the
+ENI → `describe-network-interfaces` for the IP) since the ALB is disabled
+and nothing outside the VPC can reach a task IP directly; the smoke-test
+task reaches it because the API security group allows ingress on 5000 from
+the whole VPC CIDR, not just a specific security group (see
+`terraform/modules/security-groups`), so no SG change was needed.
+
+### ECS Exec and the distroless no-shell constraint
+
+`enable_execute_command` is now set on the api and worker services
+(`var.enable_execute_command`, default `true`) purely as a general-purpose
+debugging capability — it costs nothing when unused (the SSM channel only
+opens for the duration of an actual `aws ecs execute-command` call, no idle
+agent or per-hour charge) and needs the task role to allow
+`ssmmessages:CreateControlChannel`/`CreateDataChannel`/`OpenControlChannel`/
+`OpenDataChannel` (`terraform/modules/iam`'s `ecs_task_exec` policy — scoped
+to those four actions only; `Resource = "*"` is the AWS-documented shape for
+this specific action set, not a broad grant by choice).
+
+Not used for the post-promotion smoke test above, and not verified against
+real AWS as an interactive debugging tool either — both because the
+api/worker images are distroless (no `/bin/sh`), and `aws ecs
+execute-command` is normally used to drop into a shell. Whether `--command
+"python3 /app/healthcheck.py"` (a direct binary invocation, no shell
+metacharacters) works cleanly against a shell-less container via ECS Exec
+is an open question this project hasn't tested live. Treat this as
+infrastructure worth having enabled, not a proven workflow — the first real
+use should confirm (and document here) whether a non-interactive,
+shell-less exec actually behaves as expected.
+
 ### Fail-closed state reads
 
 Two reads decide destructive behaviour, and both fail closed.
@@ -544,13 +610,46 @@ staging/prod slot carrying real traffic.
 
 ### `init_db` runs as a one-shot, non-blocking task
 
-`init_db.py` creates the least-privilege `nexusapp` DB user and runs
-`db.create_all()`. It runs as a standalone ECS Fargate task — the worker's
-task definition with its command overridden — inside the VPC, so it reaches
-private RDS the same way the app does. It is idempotent, so re-running it on
-every deploy is safe and simpler than tracking whether it already ran.
-`continue-on-error: true` because a failed init shouldn't block a deploy
-whose schema is already in place from a prior run.
+`init_db.py` creates the least-privilege `nexusapp` DB user and brings the
+schema to the latest Alembic revision (`app/migrations/`, see
+`#real-alembic-migrations-replace-db.create_all` below). It runs as a
+standalone ECS Fargate task — the worker's task definition with its command
+overridden — inside the VPC, so it reaches private RDS the same way the app
+does. It is idempotent, so re-running it on every deploy is safe and
+simpler than tracking whether it already ran. `continue-on-error: true`
+because a failed init shouldn't block a deploy whose schema is already in
+place from a prior run.
+
+### Real Alembic migrations replace db.create_all()
+
+`app/migrations/` didn't exist until this pass, despite Flask-Migrate being
+wired into `extensions.py`/`app.py` since the beginning — `init_db.py`'s
+`create_schema()` called `db.create_all()` directly instead. That's a real
+functional gap, not just a missing nicety: `create_all()` only creates
+tables that don't exist yet; it never issues an `ALTER TABLE` for a column
+added to an existing model. Any schema change beyond a brand-new table had
+no deployable upgrade path.
+
+Generated the initial migration by pointing `flask db migrate` at the
+existing models (`flask --app 'src:create_app("development")' db init` /
+`db migrate -m "initial schema"`), then verified it byte-for-byte against
+the models with `flask db check` (`No new upgrade operations detected.`) —
+the migration is not hand-written, it's Alembic's own autogenerate output,
+kept because it matched exactly. `create_schema()` now calls
+`flask_migrate.upgrade()` instead: idempotent (a database already at head
+is a no-op, same safety property `create_all()` had), and it reuses
+`db.engine` directly (`migrations/env.py`'s `get_engine()`) rather than
+opening a second connection — safe for two blue-green slots to run it
+concurrently against the same database, and safe for the in-memory SQLite
+`TestingConfig` uses, since both migration and test queries share the same
+engine/connection.
+
+Going forward, a model change needs `flask db migrate -m "..."` to generate
+the matching revision — a schema change with no corresponding file under
+`app/migrations/versions/` will never reach a deployed database no matter
+how correct the SQLAlchemy model looks locally (SQLite's local dev/test
+paths create tables from the model directly via this same `upgrade()`
+path, so the drift would only show up against real Postgres).
 
 ### Dev health gate covers all three services
 
@@ -666,6 +765,44 @@ sees them. Generated per environment by Terraform (`random_password`,
 stable across applies), replacing the `"ChangeMe-*"` fallback passwords
 `init_db.py` would otherwise use — visible in the public repo, not something
 to actually rely on.
+
+### ElastiCache in-transit encryption and AUTH
+
+Redis moved from a bare `aws_elasticache_cluster` to a single-node
+`aws_elasticache_replication_group` (`num_cache_clusters = 1`,
+`automatic_failover_enabled = false` — same topology and cost as before,
+still one node, no HA charge) because `transit_encryption_enabled` and
+`auth_token` don't exist on `aws_elasticache_cluster` at all — the AWS
+provider only exposes them on a replication group, regardless of node
+count.
+
+`REDIS_URL`/`CELERY_BROKER_URL`/`CELERY_RESULT_BACKEND` all switched from
+`redis://` to `rediss://:<token>@host:port/db` accordingly. No application
+code change was needed: redis-py's `Redis.from_url` (`extensions.py`),
+Kombu's Celery redis transport, and `limits`' Flask-Limiter Redis backend
+all already treat `rediss://` as "connect over TLS" and parse a URL
+password as the `AUTH` argument — the scheme and embedded token alone
+carry the whole change. `config.py`'s `redact_url()` needed no change
+either — it masks whatever `urlparse` finds in `parsed.password`,
+generically, regardless of scheme.
+
+The auth token is generated the same way `SEED_ADMIN_PASSWORD` etc. already
+are (`random_password`, `override_special = "!#$%^&*()-_=+"`) — that
+character set was already chosen to avoid `/`, `"`, `@` and whitespace,
+which happens to be exactly AWS's ElastiCache AUTH token restriction too,
+so the existing pattern was reusable as-is.
+
+No at-rest encryption was added alongside this. This Redis instance holds a
+Celery broker/result backend, rate-limit counters, and short-TTL JWT
+blocklist entries — nothing long-lived or sensitive enough at rest to
+justify the (small) added complexity; transit encryption is the control
+that actually matches this data's risk (credentials/tokens crossing the
+network), not storage.
+
+Verified against real AWS (read-only `terraform plan`, all three
+environments currently have empty state under the budget freeze, so this
+plans as a fresh create everywhere) — not yet verified end-to-end with a
+live apply.
 
 ### Alarm notifications are wired unconditionally
 
@@ -1034,7 +1171,7 @@ attempt, not inert text. Describe the mechanism in words instead (as this
 section does) — `.md` files like this one are never parsed by GitHub
 Actions, so the literal syntax is safe to show here.
 
-### Worker queue-sharing during drain is a known, deliberate gap
+### Per-slot Celery queues close the worker version-skew gap
 
 RDS and ElastiCache are declared once per environment, not once per slot
 (`terraform/modules/rds`, `terraform/modules/elasticache`, both wired into
@@ -1044,24 +1181,59 @@ Redis. `keep_previous_slot_running` correctly keeps the old slot's worker up
 throughout the candidate's health check *and* the whole drain window (1h
 staging, up to 24h prod, see #the-old-slot-stays-at-capacity-through-the-apply)
 — by design, so the old slot keeps serving while the new one proves itself.
-But `app/src/extensions.py`'s `init_celery()` sets no `task_default_queue`/
-`task_queues`, and no task anywhere sets a per-task `queue=` — there is
-exactly one implicit default Celery queue, shared by both slots' workers,
-for the entire overlap.
+This used to mean an old-version and new-version worker consumed from the
+*same* implicit default Celery queue for the entire overlap — a real
+version-skew risk if a task's payload shape ever changed between the two
+versions.
 
-This means an old-version and new-version worker can consume from the same
-queue at once for up to the full drain window — a real version-skew risk if
-a task's payload shape ever changes between the two versions. Not fixed
-here: a real fix needs three coordinated pieces, not one — per-slot queue
-names, producer-side routing to whichever queue the *currently active* slot
-actually reads (nontrivial: the producer doesn't inherently know which slot
-is "current" at enqueue time), and swapping the drain's time-based gate for
-a queue-depth-based one so the old worker's queue is confirmed drained
-before capacity is reclaimed. Left as a named, deliberate boundary rather
-than an unrecorded gap — this project's ALB is disabled (see the ALB note
-in `terraform/modules/ecs/`), so no live client traffic is actually
-load-balanced across slots today, which keeps real-world urgency low
-without making the architectural gap not worth fixing eventually.
+Fixed via a per-slot queue name, not shared routing logic: `var.environment`
+already carries the slot suffix in blue-green environments
+("staging-slot1"/"staging-slot2" — #container-env-strips-the-slot-suffix-and-forces-debug-off),
+so `terraform/modules/ecs/main.tf`'s `app_environment` sets
+`CELERY_TASK_QUEUE = "tasks-${var.environment}"` per slot, and
+`extensions.py::init_celery()` sets `task_default_queue` from it. Every
+`.delay()` call site (`create_task`, `update_task`, `create_comment`)
+needed zero changes: none of them pass `queue=`, so they all route through
+`task_default_queue` automatically — and a Celery worker started with no
+`-Q` flag (this project's worker/beat commands never pass one) consumes
+exactly that same default queue. The earlier plan called producer-side
+routing to "whichever queue the currently active slot reads" nontrivial,
+because a producer can't know which slot is "current" at enqueue time —
+that framing turned out to be the wrong question. The right invariant isn't
+"route to the active slot," it's "route to your own slot": each slot's API
+enqueues to its own queue, and that same slot's worker is the only thing
+that ever reads it, so an old-version producer's task is always handled by
+an old-version worker, and a mismatched payload shape between versions
+never occurs, regardless of which slot happens to be "active" in SSM at any
+given moment. `dev` has no blue-green concept at all, so it gets a fixed
+`tasks-dev` queue — harmless, since there's nothing to isolate it from.
+
+Per-slot isolation raised a **new** risk symmetric with the old one: since
+a slot's queue now has exactly one consumer, reclaiming that slot's
+capacity while its queue still holds tasks orphans them forever — nothing
+else will ever read that queue. `cleanup.yml`'s drain-reclaim job gained a
+`Check old slot's Celery queue is drained` step before the reclaim apply:
+`app/src/queue_depth_check.py` runs as a `run-task` override on the old
+slot's own worker task definition (its own `REDIS_URL` secret and
+`CELERY_TASK_QUEUE` env var are already exactly right, so the override
+needs no extra environment, only the command), and checks `LLEN
+<queue-name>` is zero — verified empirically against a real local Redis
+that Kombu's redis transport stores a queue as a plain Redis list keyed by
+the queue name, with no vhost/exchange prefixing to account for here. Polls
+every 20s for up to 300s (a worker can still be finishing an in-flight
+batch when the drain timer fires) before refusing to reclaim; a queue still
+non-empty after that leaves the old slot at capacity (billed, but nothing
+orphaned) rather than silently losing tasks, and surfaces as `⏸️ Blue-Green
+Drain BLOCKED` in the job summary, distinct from a guard-abort or a failed
+apply.
+
+Not yet verified against real AWS — the elasticache TLS/AUTH change above
+already established that dev/staging/prod all currently have empty state
+under the budget freeze, so this needs a real deploy (and, to actually
+exercise the queue-depth gate meaningfully, a registered periodic or
+manually-triggered task — today's tasks are all fired from user requests,
+so there is nothing to genuinely test the "queue still has items" branch
+with beyond deliberately holding a task in flight).
 
 ### Celery task idempotency is deferred, not designed in yet
 

@@ -553,6 +553,95 @@ jobs:
             exit 1
           fi
 
+      - name: Smoke test new slot (post-seed business-logic check)
+        id: smoke_test
+        # Only where init_db seeds real data (staging) — prod never seeds via
+        # this pipeline (fail-closed by design, see
+        # docs/design-decisions.md#seeding-fails-closed-outside-local-development),
+        # so there's no seeded admin account to log in with there yet. See
+        # docs/design-decisions.md#post-promotion-smoke-test for why this
+        # exists (goes beyond /health) and why it's a run-task, not ECS Exec.
+        if: ${{ inputs.run_init_db && steps.init_db.outcome != 'failure' }}
+        continue-on-error: true
+        working-directory: terraform/environments/${{ inputs.environment }}
+        run: |
+          NEW_SLOT="${{ steps.slot.outputs.new_slot }}"
+          CLUSTER="nexusdeploy-${{ inputs.environment }}-$NEW_SLOT"
+          API_SERVICE="nexusdeploy-${{ inputs.environment }}-$NEW_SLOT-api"
+          SUBNET_ID=$(terraform output -json private_app_subnet_ids 2>/dev/null | python3 -c "import sys,json; ids=json.load(sys.stdin); print(ids[0])" || echo "")
+          SG_ID=$(terraform output -raw worker_sg_id 2>/dev/null | grep -v '│' | tail -1 || echo "")
+
+          if [[ -z "$SUBNET_ID" || -z "$SG_ID" ]]; then
+            echo "::error::Missing Terraform outputs (subnet/sg) — cannot run smoke test."
+            exit 1
+          fi
+
+          API_TASK_ARN=$(aws ecs list-tasks \
+            --cluster "$CLUSTER" --service-name "$API_SERVICE" --desired-status RUNNING \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskArns[0]' --output text)
+
+          if [[ -z "$API_TASK_ARN" || "$API_TASK_ARN" == "None" ]]; then
+            echo "::error::No running API task found on $API_SERVICE — cannot smoke test."
+            exit 1
+          fi
+
+          ENI_ID=$(aws ecs describe-tasks \
+            --cluster "$CLUSTER" --tasks "$API_TASK_ARN" \
+            --region ${{ env.AWS_REGION }} \
+            --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value" --output text)
+
+          # The API SG allows ingress on 5000 from the whole VPC CIDR (ALB is
+          # disabled — see terraform/modules/security-groups), so a worker-SG
+          # task can reach this IP directly with no SG change needed.
+          API_IP=$(aws ec2 describe-network-interfaces \
+            --network-interface-ids "$ENI_ID" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'NetworkInterfaces[0].PrivateIpAddress' --output text)
+
+          if [[ -z "$API_IP" || "$API_IP" == "None" ]]; then
+            echo "::error::Could not resolve the API task's private IP — cannot smoke test."
+            exit 1
+          fi
+
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition "nexusdeploy-${{ inputs.environment }}-$NEW_SLOT-worker" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          # SEED_ADMIN_PASSWORD is already injected into the worker task def
+          # from Secrets Manager (see terraform/modules/ecs/main.tf) — no
+          # need to pass it here.
+          OVERRIDES="{\"containerOverrides\":[{\"name\":\"worker\",\"command\":[\"python\",\"-m\",\"src.smoke_test\"],\"environment\":[{\"name\":\"SMOKE_TEST_TARGET_URL\",\"value\":\"http://$API_IP:5000\"}]}]}"
+
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "$CLUSTER" \
+            --task-definition "$TASK_DEF" \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_ID],securityGroups=[$SG_ID],assignPublicIp=DISABLED}" \
+            --overrides "$OVERRIDES" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'tasks[0].taskArn' --output text)
+
+          echo "Smoke test task ARN: $TASK_ARN"
+          aws ecs wait tasks-stopped \
+            --cluster "$CLUSTER" \
+            --tasks "$TASK_ARN" \
+            --region ${{ env.AWS_REGION }}
+
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster "$CLUSTER" \
+            --tasks "$TASK_ARN" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+
+          if [[ "$EXIT_CODE" == "0" ]]; then
+            echo "✅ Smoke test passed"
+          else
+            echo "::error::Smoke test exited with code: $EXIT_CODE — check /ecs/nexusdeploy/${{ inputs.environment }}-$NEW_SLOT/worker logs."
+            exit 1
+          fi
+
       - name: Evaluate promotion gate
         id: gate
         if: always()
@@ -560,10 +649,11 @@ jobs:
           # Single source of truth for "is this deploy good enough to promote".
           # Every downstream step (promote, image bookkeeping, drain, rollback,
           # job status) keys off this one output so the conditions cannot drift
-          # apart. init_db is 'skipped' when run_init_db is false — only an
-          # actual 'failure' blocks.
+          # apart. init_db/smoke_test are 'skipped' when run_init_db is false —
+          # only an actual 'failure' blocks.
           if [[ "${{ steps.health.outputs.health_ok }}" == "true" \
-                && "${{ steps.init_db.outcome }}" != "failure" ]]; then
+                && "${{ steps.init_db.outcome }}" != "failure" \
+                && "${{ steps.smoke_test.outcome }}" != "failure" ]]; then
             echo "promote=true" >> $GITHUB_OUTPUT
             echo "✅ Promotion gate passed."
           else
@@ -780,6 +870,9 @@ jobs:
             echo "| Active slot   | ${{ steps.slot.outputs.new_slot }} ✅ |" >> $GITHUB_STEP_SUMMARY
             echo "| Image         | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
             echo "| Health gate   | API HEALTHY + worker/beat at desired count |" >> $GITHUB_STEP_SUMMARY
+            if [[ "${{ inputs.run_init_db }}" == "true" ]]; then
+              echo "| Smoke test    | ${{ steps.smoke_test.outcome }} |" >> $GITHUB_STEP_SUMMARY
+            fi
             if [[ "${{ steps.slot.outputs.current_slot }}" != "none" ]]; then
               echo "| Beat cutover  | ${{ steps.beat_cutover.outcome }} |" >> $GITHUB_STEP_SUMMARY
             fi

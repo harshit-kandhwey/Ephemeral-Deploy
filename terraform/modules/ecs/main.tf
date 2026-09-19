@@ -24,6 +24,12 @@ locals {
     { name = "FLASK_DEBUG", value = "false" },
     { name = "SQLALCHEMY_ECHO", value = "false" },
     { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = var.otel_exporter_endpoint },
+    # var.environment already carries the slot suffix in blue-green
+    # environments ("staging-slot1"/"staging-slot2"), so this alone gives
+    # each slot's api/worker/beat containers a distinct Celery queue with no
+    # extra slot-tracking variable needed. See
+    # docs/design-decisions.md#per-slot-celery-queues-close-the-worker-version-skew-gap.
+    { name = "CELERY_TASK_QUEUE", value = "tasks-${var.environment}" },
   ]
 }
 
@@ -241,6 +247,7 @@ resource "aws_ecs_service" "api" {
   desired_count                     = var.api_desired_count
   launch_type                       = null # Use capacity provider
   health_check_grace_period_seconds = 60
+  enable_execute_command            = var.enable_execute_command
 
   capacity_provider_strategy {
     capacity_provider = local.is_production ? "FARGATE" : "FARGATE_SPOT"
@@ -274,10 +281,11 @@ resource "aws_ecs_service" "api" {
 }
 
 resource "aws_ecs_service" "worker" {
-  name            = "${var.project}-${var.environment}-worker"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.worker.arn
-  desired_count   = var.worker_desired_count
+  name                   = "${var.project}-${var.environment}-worker"
+  cluster                = aws_ecs_cluster.main.id
+  task_definition        = aws_ecs_task_definition.worker.arn
+  desired_count          = var.worker_desired_count
+  enable_execute_command = var.enable_execute_command
 
   capacity_provider_strategy {
     capacity_provider = local.is_production ? "FARGATE" : "FARGATE_SPOT"

@@ -42,6 +42,12 @@ def init_celery(app):
         result_serializer="json",
         timezone="UTC",
         enable_utc=True,
+        # Every .delay() call in api/v1/*.py dispatches with no queue= kwarg,
+        # so this one setting routes every producer AND consumer (a worker
+        # with no -Q flag consumes exactly its own task_default_queue) —
+        # no call-site changes needed. See
+        # docs/design-decisions.md#per-slot-celery-queues-close-the-worker-version-skew-gap.
+        task_default_queue=app.config["CELERY_TASK_QUEUE"],
     )
 
     class ContextTask(celery.Task):

@@ -28,3 +28,9 @@ variable "common_tags" {
   description = "Common tags for all resources"
   type        = map(string)
 }
+
+variable "redis_auth_token" {
+  description = "AUTH token for the Redis replication group (enables encrypted, authenticated connections — required by AWS whenever transit_encryption_enabled is true). Generated via random_password at the environment level, same pattern as the SEED_*_PASSWORD values. Must be 16-128 chars and may not contain '/', '\"', '@', or whitespace (AWS-enforced), the same override_special set already used for SEED_*_PASSWORD avoids all of them."
+  type        = string
+  sensitive   = true
+}

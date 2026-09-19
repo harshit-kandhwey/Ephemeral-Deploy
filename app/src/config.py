@@ -84,6 +84,13 @@ class Config:
     CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL") or "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND") or "redis://localhost:6379/0"
 
+    # Per-slot queue name in blue-green environments (terraform sets this to
+    # "tasks-<var.environment>", which already carries the slot suffix) —
+    # "celery" is Celery's own built-in default, used everywhere this isn't
+    # set (local dev, tests, dev environment). See
+    # docs/design-decisions.md#per-slot-celery-queues-close-the-worker-version-skew-gap.
+    CELERY_TASK_QUEUE = os.environ.get("CELERY_TASK_QUEUE") or "celery"
+
     JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY") or os.environ.get("SECRET_KEY")
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=1)
     JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=30)

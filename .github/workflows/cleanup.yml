@@ -588,9 +588,79 @@ jobs:
             -backend-config="encrypt=true" \
             -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
 
+      # Per-slot Celery queues (see
+      # docs/design-decisions.md#per-slot-celery-queues-close-the-worker-version-skew-gap)
+      # mean the old slot's worker is the ONLY consumer of its own queue —
+      # scaling it to 0 with tasks still queued orphans them permanently.
+      # Polls rather than checking once: a worker can still be finishing an
+      # in-flight batch when the drain timer fires.
+      - name: Check old slot's Celery queue is drained
+        id: queue_check
+        if: steps.guard.outputs.proceed == 'true'
+        working-directory: terraform/environments/${{ env.TF_ENV }}
+        run: |
+          OLD_SLOT="${{ github.event.inputs.old_slot }}"
+          ENV="${{ env.TF_ENV }}"
+          CLUSTER="nexusdeploy-${ENV}-$OLD_SLOT"
+          SUBNET_ID=$(terraform output -json private_app_subnet_ids 2>/dev/null | python3 -c "import sys,json; ids=json.load(sys.stdin); print(ids[0])" || echo "")
+          SG_ID=$(terraform output -raw worker_sg_id 2>/dev/null | grep -v '│' | tail -1 || echo "")
+
+          if [[ -z "$SUBNET_ID" || -z "$SG_ID" ]]; then
+            echo "::error::Missing Terraform outputs (subnet/sg) — cannot check queue depth. Refusing to reclaim."
+            exit 1
+          fi
+
+          # The old slot's OWN worker task definition already carries the
+          # right REDIS_URL secret and CELERY_TASK_QUEUE env var for its own
+          # queue — no override needed beyond the command itself.
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition "nexusdeploy-${ENV}-$OLD_SLOT-worker" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          OVERRIDES='{"containerOverrides":[{"name":"worker","command":["python","-m","src.queue_depth_check"]}]}'
+
+          MAX_WAIT=300
+          INTERVAL=20
+          ELAPSED=0
+          DRAINED=false
+
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            TASK_ARN=$(aws ecs run-task \
+              --cluster "$CLUSTER" \
+              --task-definition "$TASK_DEF" \
+              --launch-type FARGATE \
+              --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_ID],securityGroups=[$SG_ID],assignPublicIp=DISABLED}" \
+              --overrides "$OVERRIDES" \
+              --region ${{ env.AWS_REGION }} \
+              --query 'tasks[0].taskArn' --output text)
+
+            aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK_ARN" --region ${{ env.AWS_REGION }}
+
+            EXIT_CODE=$(aws ecs describe-tasks \
+              --cluster "$CLUSTER" --tasks "$TASK_ARN" \
+              --region ${{ env.AWS_REGION }} \
+              --query 'tasks[0].containers[0].exitCode' --output text)
+
+            if [[ "$EXIT_CODE" == "0" ]]; then
+              echo "✅ Old slot's queue is empty — safe to reclaim."
+              DRAINED=true
+              break
+            fi
+
+            echo "⏳ Old slot's queue still has pending tasks (${ELAPSED}s elapsed) — waiting..."
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          if [[ "$DRAINED" != "true" ]]; then
+            echo "::error::Old slot's Celery queue never drained within ${MAX_WAIT}s — refusing to reclaim capacity. Check /ecs/nexusdeploy/${ENV}-$OLD_SLOT/worker logs; the tasks are still queued, not lost, as long as this slot's worker stays up."
+            exit 1
+          fi
+
       - name: Reclaim old slot capacity (terraform apply)
         id: reclaim
-        if: steps.guard.outputs.proceed == 'true'
+        if: steps.guard.outputs.proceed == 'true' && steps.queue_check.outcome == 'success'
         working-directory: terraform/environments/${{ env.TF_ENV }}
         env:
           TF_VAR_deployment_slot: ${{ steps.guard.outputs.active_slot }}
@@ -660,6 +730,9 @@ jobs:
           elif [[ "${{ steps.guard.outputs.proceed }}" != "true" ]]; then
             echo "## 🛑 Blue-Green Drain Aborted (superseded)" >> $GITHUB_STEP_SUMMARY
             echo "The slot was left at capacity on purpose — a newer deploy owns the rotation." >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ steps.queue_check.outcome }}" != "success" ]]; then
+            echo "## ⏸️ Blue-Green Drain BLOCKED (queue not drained)" >> $GITHUB_STEP_SUMMARY
+            echo "\`${{ github.event.inputs.old_slot }}\`'s Celery queue still had pending tasks after ${{ github.event.inputs.old_slot }}'s worker had 300s to finish them — capacity was deliberately left in place rather than orphaning them. Re-run this drain once the queue clears." >> $GITHUB_STEP_SUMMARY
           elif [[ "${{ steps.reclaim.outcome }}" == "success" ]]; then
             echo "## 🔻 Blue-Green Old Slot Drained" >> $GITHUB_STEP_SUMMARY
           else
@@ -675,6 +748,7 @@ jobs:
           echo "| Expected generation | \`${{ github.event.inputs.expected_generation }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Actual generation | \`${{ steps.guard.outputs.generation }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Terraform revision | \`${{ github.event.inputs.terraform_ref || github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Queue drained | \`${{ steps.queue_check.outcome }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Reclaim result | \`${{ steps.reclaim.outcome }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Triggered By | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Reason | ${{ github.event.inputs.reason }} |" >> $GITHUB_STEP_SUMMARY

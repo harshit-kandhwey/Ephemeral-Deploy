@@ -49,6 +49,13 @@ htmlcov/
 *.pyc
 .mypy_cache/
 
+# Local SQLite DB used by DevelopmentConfig's fallback / `flask db migrate`
+# autogenerate — never the real schema source of truth (app/migrations/ is).
+app/dev.db
+dev.db
+instance/
+app/instance/
+
 # OS
 .DS_Store
 Thumbs.db

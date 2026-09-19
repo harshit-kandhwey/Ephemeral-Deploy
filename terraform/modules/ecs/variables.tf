@@ -124,6 +124,12 @@ variable "worker_desired_count" {
   default     = 1
 }
 
+variable "enable_execute_command" {
+  description = "Enable ECS Exec (`aws ecs execute-command`) on the api and worker services — used for ad-hoc debugging and the post-promotion smoke test in deploy-blue-green.yml. Costs nothing when unused (no idle agent, no per-hour charge); the SSM session channel only opens for the duration of an actual exec call. See docs/design-decisions.md#ecs-exec-and-the-distroless-no-shell-constraint."
+  type        = bool
+  default     = true
+}
+
 variable "beat_desired_count" {
   description = "Desired number of running Beat tasks. Must be 0 or 1 (Beat is a singleton). In blue-green, only the active slot runs Beat; the idle slot passes 0 so two schedulers never fire duplicate tasks. Dev (single slot) uses the default of 1."
   type        = number
