@@ -618,7 +618,14 @@ jobs:
             --region ${{ env.AWS_REGION }} \
             --query 'taskDefinition.taskDefinitionArn' --output text)
 
-          OVERRIDES='{"containerOverrides":[{"name":"worker","command":["python","-m","src.queue_depth_check"]}]}'
+          # No leading "python": the image's ENTRYPOINT is already the
+          # interpreter (/usr/bin/python3.11, baked into the distroless
+          # base), so "command" here becomes ITS arguments — a leading
+          # "python" makes it try to open a file literally named "python"
+          # and fail. Verified directly against the real base image before
+          # fixing this (also fixed on init_db/smoke_test's overrides in
+          # deploy-blue-green.yml — same bug, three places).
+          OVERRIDES='{"containerOverrides":[{"name":"worker","command":["-m","src.queue_depth_check"]}]}'
 
           MAX_WAIT=300
           INTERVAL=20

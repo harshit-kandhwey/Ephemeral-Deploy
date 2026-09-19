@@ -100,9 +100,9 @@ resource "aws_secretsmanager_secret_version" "app" {
     # rediss:// (double-s) — transit encryption + AUTH, not the plain
     # redis:// this used before. See
     # docs/design-decisions.md#elasticache-in-transit-encryption-and-auth.
-    REDIS_URL             = "rediss://:${random_password.redis_auth.result}@${module.elasticache.redis_endpoint}:6379/0"
-    CELERY_BROKER_URL     = "rediss://:${random_password.redis_auth.result}@${module.elasticache.redis_endpoint}:6379/0"
-    CELERY_RESULT_BACKEND = "rediss://:${random_password.redis_auth.result}@${module.elasticache.redis_endpoint}:6379/0"
+    REDIS_URL             = "rediss://:${urlencode(random_password.redis_auth.result)}@${module.elasticache.redis_endpoint}:6379/0"
+    CELERY_BROKER_URL     = "rediss://:${urlencode(random_password.redis_auth.result)}@${module.elasticache.redis_endpoint}:6379/0"
+    CELERY_RESULT_BACKEND = "rediss://:${urlencode(random_password.redis_auth.result)}@${module.elasticache.redis_endpoint}:6379/0"
     SECRET_KEY            = data.aws_ssm_parameter.app_secret_key.value
     JWT_SECRET_KEY        = data.aws_ssm_parameter.jwt_secret_key.value
     AWS_REGION            = var.aws_region
@@ -128,11 +128,14 @@ resource "aws_secretsmanager_secret_version" "init" {
   })
 }
 
-# See docs/design-decisions.md#elasticache-in-transit-encryption-and-auth
+# See docs/design-decisions.md#elasticache-in-transit-encryption-and-auth.
+# ElastiCache AUTH tokens allow ONLY these non-alphanumerics (AWS-documented
+# allowlist, not the general SEED_*_PASSWORD denylist used below) — anything
+# outside "!&#$^<>-" is rejected by the API at apply time.
 resource "random_password" "redis_auth" {
   length           = 24
   special          = true
-  override_special = "!#$%^&*()-_=+"
+  override_special = "!&#$^<>-"
 }
 
 # See docs/design-decisions.md#seed-passwords-are-a-separate-secret-from-db-credentials

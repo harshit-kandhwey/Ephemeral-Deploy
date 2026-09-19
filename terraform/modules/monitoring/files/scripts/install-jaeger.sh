@@ -32,6 +32,11 @@ User=jaeger
 ExecStart=/usr/local/bin/jaeger --config=file:/etc/jaeger/config.yaml
 Restart=always
 RestartSec=5
+# In-memory trace storage on a 1GiB host shared with Prometheus/Grafana/
+# node_exporter/YACE — cap Jaeger's own memory so a spike in trace volume
+# gets Jaeger killed and restarted by systemd, not the OOM killer picking
+# an arbitrary sibling service instead.
+MemoryMax=256M
 [Install]
 WantedBy=multi-user.target
 EOF

@@ -70,7 +70,14 @@ echo "✅ Grafana password fetched"
 
 # ── Shared env file for the fetched install scripts ───────────────────────────
 # root-only: carries the Grafana password, same posture as the old
-# systemd-env-override approach it replaces.
+# systemd-env-override approach it replaces. Created with mode 600 up front
+# (install, not cat > then chmod after) so the secret is never briefly
+# world-readable under the default umask. GRAFANA_PASSWORD goes through
+# printf '%q' so install-grafana.sh's later `source` of this file can't
+# re-interpret a $, backtick, quote, or backslash the password happens to
+# contain — a plain unquoted heredoc interpolation writes the value
+# correctly here, but sourcing re-parses it as shell syntax a second time.
+install -m 600 /dev/null /etc/nexusdeploy-monitoring.env
 cat > /etc/nexusdeploy-monitoring.env << EOF
 PROJECT="$PROJECT"
 ENVIRONMENT="$ENVIRONMENT"
@@ -78,9 +85,8 @@ AWS_REGION="$AWS_REGION"
 STATE_BUCKET="$STATE_BUCKET"
 CONFIG_PREFIX="$CONFIG_PREFIX"
 CLUSTERS="$CLUSTERS"
-GRAFANA_PASSWORD="$GRAFANA_PASSWORD"
+GRAFANA_PASSWORD=$(printf '%q' "$GRAFANA_PASSWORD")
 EOF
-chmod 600 /etc/nexusdeploy-monitoring.env
 
 # ── Download configs from S3 ──────────────────────────────────────────────────
 echo "Downloading configs from S3..."

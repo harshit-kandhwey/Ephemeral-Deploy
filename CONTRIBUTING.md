@@ -29,7 +29,7 @@ docker-compose up -d
 ### Running Tests
 
 ```bash
-cd app && pytest tests/ -v --cov=src --cov-report=term-missing
+cd app && pytest tests/ -v --cov=src --cov-report=term-missing --cov-fail-under=85
 ```
 
 Tests use in-memory SQLite and Redis DB 15 — no external services needed.

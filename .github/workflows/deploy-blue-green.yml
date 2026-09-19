@@ -523,7 +523,14 @@ jobs:
             --region ${{ env.AWS_REGION }} \
             --query 'taskDefinition.taskDefinitionArn' --output text)
 
-          OVERRIDES='{"containerOverrides":[{"name":"worker","command":["python","-m","src.init_db"],"environment":[{"name":"ENV","value":"production"},{"name":"SEED_DB","value":"true"}]}]}'
+          # No leading "python": the image's own ENTRYPOINT is already the
+          # interpreter (/usr/bin/python3.11, baked into the distroless base
+          # — see docs/design-decisions.md#distroless-runtime-images), so
+          # "command" here becomes ITS arguments. A leading "python" makes
+          # the interpreter try to open a file literally named "python" as
+          # its script and fail — verified directly against the real base
+          # image locally before fixing this.
+          OVERRIDES='{"containerOverrides":[{"name":"worker","command":["-m","src.init_db"],"environment":[{"name":"ENV","value":"production"},{"name":"SEED_DB","value":"true"}]}]}'
 
           TASK_ARN=$(aws ecs run-task \
             --cluster "$CLUSTER" \
@@ -611,8 +618,9 @@ jobs:
 
           # SEED_ADMIN_PASSWORD is already injected into the worker task def
           # from Secrets Manager (see terraform/modules/ecs/main.tf) — no
-          # need to pass it here.
-          OVERRIDES="{\"containerOverrides\":[{\"name\":\"worker\",\"command\":[\"python\",\"-m\",\"src.smoke_test\"],\"environment\":[{\"name\":\"SMOKE_TEST_TARGET_URL\",\"value\":\"http://$API_IP:5000\"}]}]}"
+          # need to pass it here. No leading "python" in command — see the
+          # matching comment on init_db's override above.
+          OVERRIDES="{\"containerOverrides\":[{\"name\":\"worker\",\"command\":[\"-m\",\"src.smoke_test\"],\"environment\":[{\"name\":\"SMOKE_TEST_TARGET_URL\",\"value\":\"http://$API_IP:5000\"}]}]}"
 
           TASK_ARN=$(aws ecs run-task \
             --cluster "$CLUSTER" \

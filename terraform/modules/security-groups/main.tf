@@ -111,6 +111,24 @@ resource "aws_security_group" "worker" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # OTLP/HTTP traces to the monitoring instance's Jaeger collector — inline,
+  # not a separate aws_security_group_rule, because the AWS provider treats
+  # a security group's inline rule blocks as the complete, authoritative set:
+  # mixing them with a standalone aws_security_group_rule for the SAME group
+  # causes each apply to fight over which one is "correct," and in practice
+  # can revoke the separately-managed rule. VPC-CIDR-scoped instead of
+  # targeting the monitoring SG specifically, matching this SG's other
+  # VPC-internal egress rules above and removing the dependency on
+  # var.monitoring_enabled entirely — the monitoring instance is inside the
+  # VPC either way.
+  egress {
+    description = "OTLP/HTTP traces to the monitoring instance Jaeger collector"
+    from_port   = 4318
+    to_port     = 4318
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
   tags = merge(var.common_tags, {
     Name = "${var.project}-${var.environment}-worker-sg"
   })
@@ -247,19 +265,4 @@ resource "aws_security_group" "monitoring" {
   tags = merge(var.common_tags, {
     Name = "${var.project}-${var.environment}-monitoring-sg"
   })
-}
-
-# worker has no general VPC-internal egress rule (unlike api's blanket -1
-# rule, which already covers this) — a separate resource because it targets
-# aws_security_group.monitoring, itself conditional on monitoring_enabled.
-resource "aws_security_group_rule" "worker_to_monitoring_otlp" {
-  count = var.monitoring_enabled ? 1 : 0
-
-  description              = "OTLP/HTTP traces to the monitoring instance Jaeger collector"
-  type                     = "egress"
-  from_port                = 4318
-  to_port                  = 4318
-  protocol                 = "tcp"
-  security_group_id        = aws_security_group.worker.id
-  source_security_group_id = aws_security_group.monitoring[0].id
 }

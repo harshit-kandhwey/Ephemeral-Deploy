@@ -73,4 +73,5 @@ if nginx -t; then
   echo "✅ Frontend console configured"
 else
   echo "❌ nginx config test failed"
+  exit 1
 fi

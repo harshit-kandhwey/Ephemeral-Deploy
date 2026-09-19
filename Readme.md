@@ -915,7 +915,7 @@ SLOT=$(aws ssm get-parameter --name "/nexusdeploy/$ENV/deployment/active_slot" \
 # ── Local development ─────────────────────────────────
 docker-compose up -d          # Start postgres + redis + api + worker + beat + redis-commander
 docker-compose down -v        # Stop and remove volumes
-(cd app && pytest tests/ -v --cov=src --cov-report=term-missing)                        # Tests
+(cd app && pytest tests/ -v --cov=src --cov-report=term-missing --cov-fail-under=85)     # Tests
 (cd app && flake8 src/ --max-line-length=120 && black --check src/ && bandit -r src/ -ll)   # Lint
 
 # ── Docker (normally CI's job) ────────────────────────
@@ -1024,10 +1024,10 @@ Or open `http://localhost:5000/apidocs` — Swagger UI with the Authorize button
 ### Running tests
 
 ```bash
-cd app && pytest tests/ -v --cov=src --cov-report=term-missing
+cd app && pytest tests/ -v --cov=src --cov-report=term-missing --cov-fail-under=85
 ```
 
-Tests use an in-memory SQLite database and a mocked Redis client — no running services needed. Coverage report is generated at `app/htmlcov/index.html`.
+Tests use an in-memory SQLite database and a mocked Redis client — no running services needed. Coverage report is generated at `app/htmlcov/index.html`. `--cov-fail-under=85` matches CI's gate — a local run without it can pass while CI fails on the same code.
 
 ---
 

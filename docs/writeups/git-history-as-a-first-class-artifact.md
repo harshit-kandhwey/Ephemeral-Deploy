@@ -67,7 +67,15 @@ COMMIT=$(git commit-tree "$TREE" \
   -p refs/remotes/pr/33 \
   -m "archive: preserve pre-squash history")
 git branch -f archive "$COMMIT"
+git push origin archive
 ```
+
+That last line matters: `git branch -f` only moves a *local* ref. The
+branch isn't visible to anyone else, and none of what follows — GitHub
+showing it, `git log` working against it from a fresh clone — is true
+until it's actually pushed. (Rebuilding `archive` after a *later* incident
+pushes with `--force` instead, since at that point it already exists on
+the remote and needs to move.)
 
 `git commit-tree` builds a commit object directly, without touching the
 working tree or performing an actual merge. Given `main`'s current tree and
@@ -78,10 +86,16 @@ every one of the five original PR heads. Git's history is a DAG of parent
 pointers; content and history are genuinely separable, and this is what
 that separability buys you. The result, `archive`, is a branch that looks
 identical to `main` in every diff but, walked with `git log`, exposes all
-58 original commits as real ancestors again. `git merge-base
---is-ancestor` works correctly against it. `git blame` on `archive` shows
-the actual author and date of each original change, not a squash commit's
-synthetic timestamp.
+58 original commits as real ancestors again, and `git merge-base
+--is-ancestor` works correctly against it. What it does *not* restore is
+`git blame` attribution: since `archive`'s tree is identical to its first
+parent's (`main`'s), blame has no diff to walk into the other five parents
+for — every line still resolves to whatever commit last touched it on
+`main` itself (the squash commit, with its synthetic timestamp), exactly
+as it would blaming `main` directly. `archive`'s value is restoring
+reachability for `git log`/ancestry tooling, not line-level attribution;
+for that, the original PR-head commits (still reachable *through*
+`archive`, just not what `blame` picks) are what to look at.
 
 Two details matter for anyone reproducing this pattern:
 
@@ -96,9 +110,13 @@ Two details matter for anyone reproducing this pattern:
 
 `archive` is never rebased, never merged, and never opened as a PR — its
 only job is to exist as a queryable historical record. GitHub reports it as
-"59 commits ahead of main," which is cosmetic (it really is one commit
-ahead — the synthetic one — with a longer parent chain behind it) and
-harmless to ignore.
+"59 commits ahead of main," and that count is real, not an artifact —
+`archive` genuinely has 59 commits (the synthetic one plus the 58 original)
+that are not reachable from `main`. What's cosmetic is something narrower:
+the *content* is identical (zero file diff against `main`) despite that
+59-commit gap, which is exactly the DAG-vs-tree separation this whole
+approach relies on. Worth being precise about the difference — "ahead by
+59" and "no content changes" are both true at once, not in tension.
 
 ## The discipline that came out of it
 

@@ -47,6 +47,33 @@ A real secret has no "wait for an upstream fix" case the way a base-image CVE
 does — it's actionable the moment it's found (rotate it) — so this one fails
 the build and gates `ci-summary` like `workflow-lint` does.
 
+### Bandit scans `app/src/` only, deliberately, not `app/tests/`
+
+`ci.yml`'s bandit step was `bandit -r app/src/ -ll -x app/src/tests/` — a
+dead exclusion flag, since tests live at `app/tests/`, never
+`app/src/tests/`. Fixing the stale path could mean either removing the
+dead flag (scope stays `app/src/` only) or actually including
+`app/tests/` in the scan. Chose the former, deliberately, not by default:
+test fixtures routinely build known-bad states on purpose — hardcoded
+credentials matching a documented default, malformed input crafted to hit
+a specific validation branch — bandit has no way to distinguish
+"intentional test fixture" from "shipped bug," so scanning tests trades a
+small amount of real signal for a larger amount of noise that trains
+reviewers to skim past bandit findings. If `app/tests/` is ever added to
+the scan, expect to also add a project-specific `.bandit`/`# nosec`
+baseline for the intentional cases, not just append the path.
+
+### Local coverage command must mirror CI's `--cov-fail-under`
+
+`pytest-cov`'s CLI flag overrides any config-file value (see
+`.claude/rules/testing.md`), so the flag itself has to be copied wherever
+the test command is documented, not just set once in `ci.yml`. It had
+drifted out of `CONTRIBUTING.md` and two spots in `Readme.md` after the
+60→85 bump (`#coverage-omit-list-is-a-reachability-boundary`) — a
+contributor running the documented local command would see it pass at,
+say, 87%, then watch CI fail the same code if it happened to sit at 84%.
+Fixed to `--cov-fail-under=85` everywhere the command is documented.
+
 ### Drift detection needs an explicit liveness gate
 
 `drift-detect.yml` runs `terraform plan -refresh-only` on a schedule against
@@ -138,12 +165,32 @@ not at build time. Two real breaks found and fixed along the way:
    apart** — worth remembering before adding a new dependency, not just
    fixed once here.
 
-Consequences accepted, not fixed: ECS Exec (not built yet — [[work-plan]]
-D3/D5) drops into a `python3` REPL instead of a shell once it exists, since
-there's nothing else in the image to exec into. `docker-compose.yml`'s
-`beat` service and the ECS module's `aws_ecs_task_definition.beat` both had
-their command override updated to route through `/entrypoint_worker.py`
-first, for the same ENTRYPOINT-is-python3 reason as above.
+Consequences accepted, not fixed: ECS Exec (now built, see
+`#ecs-exec-and-the-distroless-no-shell-constraint`) drops into a `python3`
+REPL instead of a shell, since there's nothing else in the image to exec
+into. `docker-compose.yml`'s `beat` service and the ECS module's
+`aws_ecs_task_definition.beat` both had their command override updated to
+route through `/entrypoint_worker.py` first, for the same
+ENTRYPOINT-is-python3 reason as above.
+
+**The rule stated above was violated three times despite being documented
+here already.** `deploy-blue-green.yml`'s `run-task` overrides for
+`init_db` and `smoke_test`, and `cleanup.yml`'s for `queue_depth_check`,
+all set `"command":["python","-m","src.X"]` — a leading `"python"` that
+this section's own rule says shouldn't be there (the array is arguments to
+the already-`python3` entrypoint, not a standalone command name). Verified
+directly by running the real `gcr.io/distroless/python3-debian12` base
+image locally with that exact override shape:
+`/usr/bin/python3.11: can't open file '//python': No such file or
+directory` — a real, reproducible failure, not a theoretical one. Fixed to
+`["-m","src.X"]` in all three places, matching `beat`'s own
+`/entrypoint_worker.py`-first command, which was already correct. The
+`init_db` override predates this session and had reportedly been
+"verified against real AWS" in an earlier pass — whether that verification
+happened before this exact override string existed, or the failure went
+unnoticed under `continue-on-error`, wasn't established; either way, this
+exact command shape was broken as written and is now fixed and verified
+locally against the real base image, not just reasoned about.
 
 ### Image signing and SBOMs
 
@@ -636,13 +683,15 @@ existing models (`flask --app 'src:create_app("development")' db init` /
 the models with `flask db check` (`No new upgrade operations detected.`) —
 the migration is not hand-written, it's Alembic's own autogenerate output,
 kept because it matched exactly. `create_schema()` now calls
-`flask_migrate.upgrade()` instead: idempotent (a database already at head
-is a no-op, same safety property `create_all()` had), and it reuses
-`db.engine` directly (`migrations/env.py`'s `get_engine()`) rather than
-opening a second connection — safe for two blue-green slots to run it
-concurrently against the same database, and safe for the in-memory SQLite
-`TestingConfig` uses, since both migration and test queries share the same
-engine/connection.
+`flask_migrate.upgrade()` instead: idempotent when run one at a time (a
+database already at head is a no-op, same safety property `create_all()`
+had), and it reuses `db.engine` directly (`migrations/env.py`'s
+`get_engine()`) rather than opening a second connection — which is what
+makes it safe for the in-memory SQLite `TestingConfig` uses, since both
+migration and test queries share the same engine/connection. **Not safe
+against genuinely concurrent callers** — see the concurrency caveat below;
+an earlier version of this note claimed blue-green safety here that
+doesn't actually hold.
 
 Going forward, a model change needs `flask db migrate -m "..."` to generate
 the matching revision — a schema change with no corresponding file under
@@ -650,6 +699,40 @@ the matching revision — a schema change with no corresponding file under
 how correct the SQLAlchemy model looks locally (SQLite's local dev/test
 paths create tables from the model directly via this same `upgrade()`
 path, so the drift would only show up against real Postgres).
+
+**Concurrent `upgrade()` calls are not actually safe, and an earlier draft
+of this note wrongly claimed they were.** `entrypoint_worker.py` runs
+`create_schema()` on every worker container's own startup (not just the
+explicit `init_db` one-shot task) — so if `worker_desired_count` is ever
+raised above 1, or a deploy causes both blue-green slots' workers to
+restart around the same moment, two `upgrade()` calls can race against the
+same database. Alembic does not take an advisory lock around `upgrade()`
+by default; two concurrent callers can both read the same current revision
+and attempt the same `CREATE TABLE`/`ALTER TABLE`, and one loses with a
+duplicate-object error. Not fixed here — a real fix means either running
+migrations through exactly one deploy-time task (removing them from
+`entrypoint_worker.py`'s per-container startup path entirely) or wrapping
+`upgrade()` in a Postgres advisory lock. Recorded as a known, real gap
+rather than silently relying on an untrue safety claim: today's actual
+`worker_desired_count` is 1 everywhere, which keeps the likelihood low
+without making the underlying race not worth fixing before ever raising
+that count.
+
+**No baseline procedure exists for a database that already has tables from
+the old `db.create_all()` path but no `alembic_version` row.** `upgrade()`
+from a blank revision history would try to `CREATE TABLE` on tables that
+already exist and fail with a duplicate-table error — the standard fix is
+`flask db stamp <revision>` to tell Alembic "the schema is already at this
+revision, just record it," without touching the DB, before ever calling
+`upgrade()` for real. Not built here because it's currently moot for this
+project's actual state: staging is torn down and recreated on every
+provision cycle (never carries forward a legacy schema), and prod has
+never actually been deployed (dispatched once, cancelled at the manual
+approval gate — see `CLAUDE.md`) — there is no real database anywhere
+that was ever created via the old `db.create_all()` path. If that ever
+changes (a real deploy target that predates this migration setup), stamp
+it at `7f46ffc9b095` (this pass's initial-schema revision) before the first
+`upgrade()` run against it.
 
 ### Dev health gate covers all three services
 
@@ -786,18 +869,48 @@ carry the whole change. `config.py`'s `redact_url()` needed no change
 either — it masks whatever `urlparse` finds in `parsed.password`,
 generically, regardless of scheme.
 
-The auth token is generated the same way `SEED_ADMIN_PASSWORD` etc. already
-are (`random_password`, `override_special = "!#$%^&*()-_=+"`) — that
-character set was already chosen to avoid `/`, `"`, `@` and whitespace,
-which happens to be exactly AWS's ElastiCache AUTH token restriction too,
-so the existing pattern was reusable as-is.
+**Auth token character set — corrected after an initial wrong assumption.**
+`random_password.redis_auth` first reused `SEED_ADMIN_PASSWORD`'s
+`override_special = "!#$%^&*()-_=+"`, on the assumption that AWS's AUTH
+token restriction was the same "avoid `/`, `"`, `@`, whitespace" denylist
+Secrets Manager-style passwords typically avoid. It isn't — confirmed
+directly against AWS's own ElastiCache AUTH docs: token nonalphanumerics
+are restricted to an **allowlist** of exactly `!`, `&`, `#`, `$`, `^`, `<`,
+`>`, `-`. The original charset included `%`, `*`, `(`, `)`, `_`, `=`, `+`,
+none of which are on that list — a generated token containing any of them
+would have been rejected outright by the ElastiCache API at apply time,
+which only a real `terraform apply` (not `plan`) would have caught, since
+`plan` doesn't validate token contents against the service. Fixed to
+`override_special = "!&#$^<>-"`. Separately, `#` *is* allowed by AWS but is
+a URL-fragment delimiter — a raw, unencoded `#` in the token would silently
+truncate the parsed password at the wrong point. Both
+`REDIS_URL`/`CELERY_BROKER_URL`/`CELERY_RESULT_BACKEND` now wrap the token
+in Terraform's `urlencode()` before interpolating it.
 
 No at-rest encryption was added alongside this. This Redis instance holds a
 Celery broker/result backend, rate-limit counters, and short-TTL JWT
 blocklist entries — nothing long-lived or sensitive enough at rest to
 justify the (small) added complexity; transit encryption is the control
 that actually matches this data's risk (credentials/tokens crossing the
-network), not storage.
+network), not storage. `at_rest_encryption_enabled` cannot be changed after
+creation, so this was a deliberate one-time choice, not something deferred
+to "fix later" — revisiting it means recreating the replication group.
+
+**Migrating a live, populated Redis to this design is destructive, though
+moot for this project today.** `aws_elasticache_replication_group` is a
+different resource type from `aws_elasticache_cluster`; Terraform has no
+in-place adoption path between them, so an environment with a real,
+already-provisioned standalone cluster would see this as a destroy-and-
+recreate, not a conversion — losing whatever was queued in Celery, cached,
+rate-limited, or blocklisted at that moment. Not an issue for *this*
+project's actual current state: dev/staging/prod all have empty Terraform
+state under the budget freeze (confirmed via `terraform state list`
+returning nothing everywhere, and via the `terraform plan` below showing a
+fresh create, not a replace), so there is no live cluster this change could
+actually destroy. Would need a real migration procedure (AWS supports
+creating a replication group from an existing single-node cluster) before
+reusing this exact pattern against an environment that has real, populated
+data.
 
 Verified against real AWS (read-only `terraform plan`, all three
 environments currently have empty state under the budget freeze, so this
@@ -867,7 +980,11 @@ container, queried back via its API — `GET /health` → `connect` →
 `SELECT nexusdeploy` → `PING`, correctly nested.
 
 **Config is deliberately minimal** (`files/jaeger-config.yaml`): a single
-in-memory trace store (`max_traces: 10000`, bounding worst-case RAM), no
+in-memory trace store (`max_traces: 2000`, bounding worst-case RAM — kept
+in the low thousands rather than a 10k+ default, since large traces can
+reach several hundred MB at that count and risk the OOM killer taking out
+a sibling service, not just Jaeger itself; `jaeger.service`'s systemd unit
+also sets `MemoryMax=256M` as a second, harder backstop), no
 adaptive/remote sampling, no AI/MCP UI assistant, no pprof/zpages — every
 extension is memory this t3.micro doesn't have to spare, already sharing 1GiB
 with Prometheus, Grafana, node_exporter and YACE. Traces don't survive an
@@ -883,8 +1000,20 @@ Grafana/Prometheus — not open to the VPC.
 
 **Security groups**: `api`'s existing blanket VPC-internal egress rule
 already covers reaching the collector; `worker` needed a new, narrowly-scoped
-egress rule (`aws_security_group_rule.worker_to_monitoring_otlp`) since it
-has no such blanket rule. Both are one-directional — nothing needs to reach
+egress rule since it has no such blanket rule. Originally added as a
+standalone `aws_security_group_rule.worker_to_monitoring_otlp`, scoped to
+`source_security_group_id = aws_security_group.monitoring[0].id` — this was
+wrong: `aws_security_group.worker` already declares its egress rules
+inline, and the AWS provider treats a security group's inline rule blocks
+as the complete, authoritative set for that group. Mixing them with a
+separate `aws_security_group_rule` for the same group means each apply
+fights over which is correct, and the standalone rule can end up silently
+revoked. Fixed by moving the OTLP rule inline into `aws_security_group.worker`
+itself, scoped by `var.vpc_cidr` (matching this SG's other VPC-internal
+egress rules) rather than the monitoring SG specifically — which also
+removes the dependency on `var.monitoring_enabled` the standalone resource
+needed, since the monitoring instance is inside the VPC either way. Both
+directions of this traffic remain one-directional — nothing needs to reach
 *into* the app tasks for this.
 
 **A new real dependency**: each `module.ecs`/`ecs_slot1`/`ecs_slot2` call now
@@ -1216,16 +1345,46 @@ else will ever read that queue. `cleanup.yml`'s drain-reclaim job gained a
 `app/src/queue_depth_check.py` runs as a `run-task` override on the old
 slot's own worker task definition (its own `REDIS_URL` secret and
 `CELERY_TASK_QUEUE` env var are already exactly right, so the override
-needs no extra environment, only the command), and checks `LLEN
-<queue-name>` is zero — verified empirically against a real local Redis
-that Kombu's redis transport stores a queue as a plain Redis list keyed by
-the queue name, with no vhost/exchange prefixing to account for here. Polls
-every 20s for up to 300s (a worker can still be finishing an in-flight
-batch when the drain timer fires) before refusing to reclaim; a queue still
-non-empty after that leaves the old slot at capacity (billed, but nothing
+needs no extra environment, only the command). `LLEN <queue-name>` is
+checked first — verified empirically against a real local Redis that
+Kombu's redis transport stores a queue as a plain Redis list keyed by the
+queue name, with no vhost/exchange prefixing to account for here — but
+**LLEN alone is not sufficient**: this project's Celery config never sets
+`task_acks_late`, so the default (early ack) removes a message from Redis
+the moment a worker's prefetch buffer takes it, before the task body has
+actually finished running. A worker mid-execution, or holding a prefetched
+task, would read as "queue empty" on LLEN alone. The check also calls
+`celery.control.inspect().active()`/`.reserved()` and requires zero tasks
+whose `delivery_info.routing_key` matches the queue — verified against a
+real local Celery worker (prefork-equivalent; `--pool=solo` specifically
+does *not* work for this verification, since a solo worker blocked
+executing a task can't answer the control-plane inspect call either — this
+project's real workers use `--concurrency=2`, prefork, where the mother
+process stays responsive). If no worker replies to the inspect call at
+all — a real possibility if the old slot's worker has already died for
+some unrelated reason — that's treated as "cannot verify," not "nothing in
+flight," and blocks the reclaim rather than guessing. Polls every 20s for
+up to 300s before refusing to reclaim; a queue still non-empty (by either
+check) after that leaves the old slot at capacity (billed, but nothing
 orphaned) rather than silently losing tasks, and surfaces as `⏸️ Blue-Green
 Drain BLOCKED` in the job summary, distinct from a guard-abort or a failed
 apply.
+
+**A real bootstrapping gap, accepted rather than engineered around**: the
+very first blue-green rotation after this feature ships will have an old
+slot running an image from *before* `queue_depth_check.py` existed — the
+`run-task` override would fail outright (module not found), and the
+fail-closed design means that reads as "cannot confirm drained," blocking
+that one reclaim. This is a one-time transition cost, not a recurring
+bug — every rotation after the first has an old slot whose image already
+contains the module. Not engineered around (e.g. by special-casing a
+missing-module failure as "assume drained") because that would weaken the
+fail-closed guarantee for a saving of exactly one manual intervention,
+ever, in this project's history. If it happens: confirm manually that the
+old slot's queue is actually empty (`redis-cli LLEN <queue>` via ECS Exec
+or a one-off task on the *new* image), then re-run the drain dispatch —
+the guard step re-validates the generation before proceeding, so this is
+safe to retry.
 
 Not yet verified against real AWS — the elasticache TLS/AUTH change above
 already established that dev/staging/prod all currently have empty state

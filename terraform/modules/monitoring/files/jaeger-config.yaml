@@ -28,12 +28,15 @@ extensions:
 
   # In-memory only: traces don't survive a restart, and there's no EBS/DB
   # cost. max_traces bounds worst-case RAM on a 1GiB instance already
-  # shared with Prometheus/Grafana/node_exporter/YACE.
+  # shared with Prometheus/Grafana/node_exporter/YACE — kept in the low
+  # thousands (not the 10k+ default some examples use) since large traces
+  # can reach several hundred MB at that count and risk the OOM killer
+  # taking out a sibling service, not just Jaeger.
   jaeger_storage:
     backends:
       main_store:
         memory:
-          max_traces: 10000
+          max_traces: 2000
 
 receivers:
   otlp:
