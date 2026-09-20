@@ -100,9 +100,9 @@ resource "aws_secretsmanager_secret_version" "app" {
     # rediss:// (double-s) — transit encryption + AUTH, not the plain
     # redis:// this used before. See
     # docs/design-decisions.md#elasticache-in-transit-encryption-and-auth.
-    REDIS_URL             = "rediss://:${urlencode(random_password.redis_auth.result)}@${module.elasticache.redis_endpoint}:6379/0"
-    CELERY_BROKER_URL     = "rediss://:${urlencode(random_password.redis_auth.result)}@${module.elasticache.redis_endpoint}:6379/0"
-    CELERY_RESULT_BACKEND = "rediss://:${urlencode(random_password.redis_auth.result)}@${module.elasticache.redis_endpoint}:6379/0"
+    REDIS_URL             = "rediss://:${urlencode(random_password.redis_auth.result)}@${module.elasticache.redis_endpoint}:6379/0?ssl_cert_reqs=required"
+    CELERY_BROKER_URL     = "rediss://:${urlencode(random_password.redis_auth.result)}@${module.elasticache.redis_endpoint}:6379/0?ssl_cert_reqs=required"
+    CELERY_RESULT_BACKEND = "rediss://:${urlencode(random_password.redis_auth.result)}@${module.elasticache.redis_endpoint}:6379/0?ssl_cert_reqs=required"
     SECRET_KEY            = data.aws_ssm_parameter.app_secret_key.value
     JWT_SECRET_KEY        = data.aws_ssm_parameter.jwt_secret_key.value
     AWS_REGION            = var.aws_region

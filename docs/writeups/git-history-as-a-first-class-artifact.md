@@ -43,10 +43,13 @@ The actual fix was structural, in two parts.
 **First, the merge strategy changed.** `main`'s ruleset now requires real
 merge commits; squash is reserved for Dependabot PRs, where there's no
 development history worth preserving in the first place. A merge commit's
-body is the PR title only — nothing from the constituent commits leaks into
-it, so the `[skip ci]` failure mode is now structurally impossible, not
-just discouraged. Repo-level squash settings (`PR_TITLE`/`PR_BODY`) are a
-second, redundant layer of the same protection.
+body is set by the repo's separate `merge_commit_message` setting, which here
+is `PR_TITLE` (GitHub also offers `PR_BODY` and `BLANK`) — so nothing from the
+constituent commits leaks into it. That setting, not merely requiring merge
+commits, is what closes the `[skip ci]` failure mode; it holds only while it
+stays `PR_TITLE` and no PR title itself carries the tag. The squash settings
+(`PR_TITLE`/`PR_BODY`) only govern the Dependabot squashes and are not a
+second layer over real merge commits.
 
 **Second, the history that squashing had already destroyed got rebuilt.**
 This is the part worth walking through, because it's a neat piece of git
@@ -56,7 +59,7 @@ original PR branch refs) but are simply not part of any branch anyone looks
 at?
 
 ```bash
-git fetch origin '+refs/pull/*/head:refs/remotes/pr/*'
+git fetch origin   '+refs/heads/main:refs/remotes/origin/main'   '+refs/pull/*/head:refs/remotes/pr/*'
 TREE=$(git rev-parse origin/main^{tree})
 COMMIT=$(git commit-tree "$TREE" \
   -p origin/main \
@@ -74,8 +77,9 @@ That last line matters: `git branch -f` only moves a *local* ref. The
 branch isn't visible to anyone else, and none of what follows — GitHub
 showing it, `git log` working against it from a fresh clone — is true
 until it's actually pushed. (Rebuilding `archive` after a *later* incident
-pushes with `--force` instead, since at that point it already exists on
-the remote and needs to move.)
+pushes with `--force-with-lease=archive:<expected-sha>` instead, since at
+that point it already exists on the remote and needs to move — the lease makes
+the push fail if someone else updated `archive` in the meantime.)
 
 `git commit-tree` builds a commit object directly, without touching the
 working tree or performing an actual merge. Given `main`'s current tree and
@@ -173,6 +177,7 @@ The `archive` branch and the `design-decisions.md` file cost, together,
 about the time it takes to write a good commit message — and they've
 already paid for themselves several times over, in bugs caught during
 `design-decisions.md` cross-checks that would otherwise have been
-re-litigated from scratch, and in a `git blame` that still tells the truth
-about who changed what and why, five squash-incidents-worth of history
-later.
+re-litigated from scratch, and in the original PR commits staying reachable
+through `git log archive` and ancestry tooling five squash-incidents-worth of
+history later. (`git blame` is unchanged by `archive`: with an identical tree
+it still reports the last revision on `main` that touched each line.)

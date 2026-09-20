@@ -169,6 +169,15 @@ resource "aws_iam_role_policy" "monitoring_cloudwatch" {
         Effect   = "Allow"
         Action   = ["ssm:GetParameter"]
         Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project}/${var.environment}/monitoring/grafana_password"
+      },
+      {
+        # ecs-discovery.sh reads the active blue-green slot so nginx routes only
+        # to it, not to a previous slot still held at capacity during drain.
+        # Workflow-owned parameter (see CLAUDE.md, SSM namespaces) — read-only.
+        Sid      = "SSMActiveSlot"
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
+        Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.project}/${var.environment}/deployment/active_slot"
       }
     ]
   })

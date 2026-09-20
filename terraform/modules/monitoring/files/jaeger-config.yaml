@@ -24,7 +24,9 @@ extensions:
     storage:
       traces: main_store
     http:
-      endpoint: 0.0.0.0:16686
+      # Loopback only: the UI has no auth. Grafana (same host) and SSM
+      # port-forwarding reach it; there is deliberately no security-group rule.
+      endpoint: 127.0.0.1:16686
 
   # In-memory only: traces don't survive a restart, and there's no EBS/DB
   # cost. max_traces bounds worst-case RAM on a 1GiB instance already

@@ -23,7 +23,7 @@ output "monitoring_private_ip" {
   value       = aws_instance.monitoring.private_ip
 }
 
-output "jaeger_url" {
-  description = "Jaeger UI URL"
-  value       = "http://${aws_eip.monitoring.public_ip}:16686"
+output "jaeger_access_command" {
+  description = "Jaeger's UI is loopback-only (unauthenticated); run this, then open http://localhost:16686. Grafana's Jaeger datasource also works with no port-forward."
+  value       = "aws ssm start-session --target ${aws_instance.monitoring.id} --region ${var.aws_region} --document-name AWS-StartPortForwardingSession --parameters portNumber=16686,localPortNumber=16686"
 }

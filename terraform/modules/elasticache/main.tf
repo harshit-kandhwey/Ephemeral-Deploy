@@ -41,12 +41,13 @@ resource "aws_elasticache_replication_group" "redis" {
   security_group_ids = [var.redis_sg_id]
 
   transit_encryption_enabled = true
+  # Only settable at creation (changing it later means recreating the group),
+  # and free with the default AWS-managed key — so this migration is the one
+  # cheap moment to turn it on. Covers prod's retained snapshots, which can
+  # hold Celery payloads/results. See
+  # docs/design-decisions.md#elasticache-in-transit-encryption-and-auth.
+  at_rest_encryption_enabled = true
   auth_token                 = var.redis_auth_token
-  # No at-rest encryption knob here deliberately — this data is a Celery
-  # broker/result backend, a rate-limit counter store, and a short-TTL JWT
-  # blocklist, none of it long-lived sensitive data; transit encryption
-  # (protects credentials/tokens on the wire) is the meaningful control,
-  # matching the risk this cache actually carries.
 
   automatic_failover_enabled = false # single node — nothing to fail over to
 

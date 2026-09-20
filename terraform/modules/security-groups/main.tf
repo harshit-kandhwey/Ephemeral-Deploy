@@ -235,14 +235,10 @@ resource "aws_security_group" "monitoring" {
     cidr_blocks = [var.vpc_cidr]
   }
 
-  # Jaeger UI - same allowlist as Grafana/Prometheus, not open to the VPC.
-  ingress {
-    description = "Jaeger UI"
-    from_port   = 16686
-    to_port     = 16686
-    protocol    = "tcp"
-    cidr_blocks = var.monitoring_allowed_cidr
-  }
+  # No ingress for the Jaeger UI (16686): it is unauthenticated and dev's
+  # monitoring_allowed_cidr can be 0.0.0.0/0. It listens on loopback only and is
+  # reached through Grafana's Jaeger datasource or an SSM port-forward — see
+  # docs/design-decisions.md#self-hosted-tracing-otel-collector--jaeger-not-x-ray.
 
   # OTLP/HTTP traces from ECS tasks - see
   # docs/design-decisions.md#self-hosted-tracing-otel-collector--jaeger-not-x-ray.

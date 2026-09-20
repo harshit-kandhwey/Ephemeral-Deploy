@@ -880,14 +880,23 @@ truncate the parsed password at the wrong point. Both
 `REDIS_URL`/`CELERY_BROKER_URL`/`CELERY_RESULT_BACKEND` now wrap the token
 in Terraform's `urlencode()` before interpolating it.
 
-No at-rest encryption was added alongside this. This Redis instance holds a
-Celery broker/result backend, rate-limit counters, and short-TTL JWT
-blocklist entries — nothing long-lived or sensitive enough at rest to
-justify the (small) added complexity; transit encryption is the control
-that actually matches this data's risk (credentials/tokens crossing the
-network), not storage. `at_rest_encryption_enabled` cannot be changed after
-creation, so this was a deliberate one-time choice, not something deferred
-to "fix later" — revisiting it means recreating the replication group.
+**At-rest encryption is on too — reversed after review.** This was first
+left off on the argument that a Celery broker/result backend, rate-limit
+counters and short-TTL JWT blocklist entries aren't sensitive enough at rest.
+That undercounted two things: prod retains a day of snapshots that can hold
+task payloads and results, and `at_rest_encryption_enabled` is settable only
+at creation while costing nothing with the default AWS-managed key. This
+migration is the one cheap moment to enable it, so
+`at_rest_encryption_enabled = true`.
+
+**`?ssl_cert_reqs=required` on every `rediss://` URL.** Celery's Redis result
+backend raises `ValueError` ("A rediss:// URL must have parameter
+ssl_cert_reqs...") without it — reproduced with the pinned Celery, and it
+disappears once the parameter is present. Without it the worker would have
+failed at result-backend initialisation on the first real deploy. redis-py and
+Kombu accept the same parameter, so it is added to `REDIS_URL`,
+`CELERY_BROKER_URL` and `CELERY_RESULT_BACKEND` alike. Not yet exercised
+against real ElastiCache (no live deploy under the budget freeze).
 
 **Migrating a live, populated Redis to this design is destructive, though
 moot for this project today.** `aws_elasticache_replication_group` is a
@@ -988,8 +997,13 @@ whose job is live debugging, not an audit trail.
 `grpcio`'s native C-extension in the app image, one more thing that could hit
 the same builder/runtime version-skew class of bug documented in
 [Distroless runtime images](#distroless-runtime-images). The Jaeger UI
-(16686) is gated behind `monitoring_allowed_cidr`, the same allowlist as
-Grafana/Prometheus — not open to the VPC.
+(16686) has **no** security-group rule and binds to loopback only. It is
+unauthenticated, and dev's `monitoring_allowed_cidr` can be `0.0.0.0/0`, so
+gating it behind that allowlist (as first done, "the same as
+Grafana/Prometheus") exposed trace data to the internet — Grafana at least
+has a login. It is reached through Grafana's Jaeger datasource (same host,
+`localhost:16686`) or an SSM port-forward (`jaeger_access_command` output);
+the monitoring role already carries the `ssmmessages` permissions.
 
 **Security groups**: `api`'s existing blanket VPC-internal egress rule
 already covers reaching the collector; `worker` needed a new, narrowly-scoped
@@ -1451,3 +1465,4 @@ mechanically (e.g. a coverage-aware static analyzer wired into CI) isn't
 justified at this codebase's size. Revisit if the omit list ever grows
 past a handful of genuinely-trivial entry points, where "verifiable by
 reading them" stops being a credible substitute for real tooling.
+
