@@ -25,7 +25,11 @@ grants keep the blast radius to the job that needs the privilege.
 ### Non-blocking security scanners
 
 Grype, bandit, pip-audit, TFLint and Checkov all run with `continue-on-error`
-or an equivalent soft-fail flag. None can fail a build.
+or an equivalent soft-fail flag. None can fail a build. (Since the app moved to
+Nexusdeploy-App, the application-side scanners — Grype, bandit, pip-audit —
+belong to that repo's CI; TFLint and Checkov stay here. See
+[Repository boundaries](#repository-boundaries) and the Grype gap in
+[App repo split](#app-repo-split).)
 
 The intent is visibility, not gating. A CVE in a base image is usually not
 actionable in the moment, and a hard gate would block unrelated changes until
@@ -49,6 +53,8 @@ the build and gates `ci-summary` like `workflow-lint` does.
 
 ### Bandit scans `app/src/` only, deliberately, not `app/tests/`
 
+*This scan now runs in Nexusdeploy-App's CI, where the paths lose their `app/` prefix; the reasoning below still applies.*
+
 `ci.yml`'s bandit step was `bandit -r app/src/ -ll -x app/src/tests/` — a
 dead exclusion flag, since tests live at `app/tests/`, never
 `app/src/tests/`. Fixing the stale path could mean either removing the
@@ -64,6 +70,8 @@ the scan, expect to also add a project-specific `.bandit`/`# nosec`
 baseline for the intentional cases, not just append the path.
 
 ### Local coverage command must mirror CI's `--cov-fail-under`
+
+*The test suite and its gate now live in Nexusdeploy-App; the reasoning below still applies there.*
 
 `pytest-cov`'s CLI flag overrides any config-file value (see
 `.claude/rules/testing.md`), so the flag itself has to be copied wherever
@@ -268,6 +276,8 @@ not a decision; found during a live-deploy audit and fixed. If you're
 tempted to re-add it, this paragraph is why not to.)
 
 ### Grype SARIF categories
+
+*The image scan no longer runs from this repo's `ci.yml` (see [App repo split](#app-repo-split)); this records how it was set up.*
 
 Both images are built and scanned, each uploading under its own category
 (`grype-api`, `grype-worker`).
@@ -1467,6 +1477,59 @@ past a handful of genuinely-trivial entry points, where "verifiable by
 reading them" stops being a credible substitute for real tooling.
 
 
+### Repository boundaries
+<a id="repository-boundaries"></a>
+
+Three related repositories, one owner per kind of code:
+
+- **Nexusdeploy-App** owns all application code and the **workload contract**
+  (entrypoints, health endpoints, environment variables, one-shot tasks). It is
+  the source of truth for that contract.
+- **Ephemeral-Deploy** (this repo) owns the AWS ECS infrastructure code:
+  Terraform, blue-green deployment, CI/CD and monitoring. It contains no
+  application code.
+- **Kubeforge** (`github.com/harshit-kandhwey/Kubeforge`) owns the Kubernetes
+  infrastructure code.
+
+This repo consumes Nexusdeploy-App only as container images or a pinned ref,
+plus the documented contract, and never edits its code.
+
+**Why.** The application is meant to be reused in other projects, and an
+infrastructure showcase is stronger when the platform can host a workload it
+does not contain. One owner per kind of code also settles "which repo do I
+change?": a behaviour or contract change starts in Nexusdeploy-App, and this
+repo then adapts (Terraform, workflows, monitoring) to the published contract
+instead of patching application code in place.
+
+**How this repo consumes the app: a pinned ref (Option B).** `deploy.yml` checks
+out Nexusdeploy-App at the full commit SHA in `app-ref.txt` and builds the
+images from that checkout. That reads the app's source at a fixed revision and
+never edits it, so it conforms to the rule — it is the chosen approach, not an
+exception to it. The alternative, pulling a prebuilt image by digest (Option A),
+was not chosen: it would make the artifact Nexusdeploy-App's CI tested the one
+that ships, but needs a release pipeline in that repo, a registry-to-registry
+copy into ECR (the VPC has no NAT, so Fargate cannot pull from elsewhere) and a
+changed signing identity. Revisit it if "tested artifact equals shipped
+artifact" becomes a requirement. The trade-off accepted meanwhile: the image
+that ships is built here, not the one the app's CI built.
+
+**Where the current state does not yet match the rule** — recorded, not fixed
+here:
+
+- `app/` in this repo is a **stale duplicate** of Nexusdeploy-App: byte-identical
+  to it at the split, and behind it since. It is not the source of truth, must
+  not be edited, and is scheduled for removal once the pipeline is proven
+  without it.
+- `docker-compose.yml`, `.env.example` and the root `.dockerignore` are
+  app-support copies. Nexusdeploy-App holds the adapted, authoritative versions;
+  ours are to be discarded, together with `app/`, once a proof run passes — not
+  before.
+
+**Old paths in older entries.** Entries written before the split cite
+application files under `app/` (for example `app/src/init_db.py` or
+`app/migrations/`). Those files live in Nexusdeploy-App at the same path without
+the `app/` prefix. The decisions recorded still stand and were not rewritten.
+
 ### App repo split
 <a id="app-repo-split"></a><a id="app-infra-contract"></a>
 
@@ -1477,14 +1540,18 @@ on a scratch clone, plus a merge of `archive`, so the original pre-squash
 commits are reachable there too).
 
 **How the infra repo gets the images — "Option B".** `deploy.yml` resolves the
-revision pinned in `app-ref.txt` (a tag or 40-char SHA, never a branch, so a
-deploy is reproducible; the `app_ref` dispatch input overrides it for one run),
+revision pinned in `app-ref.txt` (pin a full 40-char commit SHA, never a
+branch and not a tag — a tag can be moved after the fact, so the human-readable
+tag is recorded only in a comment above the pin; the resolver still accepts a tag
+for a one-off `app_ref` override; that input overrides the file for one run),
 checks that revision out into `./app`, and runs the *same* build → ECR push →
 cosign sign → syft SBOM → digest steps as before. Chosen over having the app
 repo build and push because it changes the least: OIDC trust, the signing
 identity and the digest plumbing are untouched, so one budgeted staging deploy
 can verify it. The cleaner end state (the app repo builds/signs/pushes and this
-repo only consumes digests) needs a second OIDC role and is a later phase.
+repo only consumes digests) needs a second OIDC role and is a later phase. Option B conforms to the
+ownership rule in [Repository boundaries](#repository-boundaries), which allows
+a pinned ref.
 
 **"Did the app change?" is now a tag lookup, not a path diff.** There is no
 `app/` to diff any more. Images are tagged with the *app* commit SHA, so a
@@ -1501,8 +1568,10 @@ the blocking secret scan, and the `CI Summary` gate (job name unchanged — the
 `main` ruleset requires it). Lost here on purpose: Grype scanning of the images
 in CI; it should be re-added to the app repo's CI (or a pre-deploy scan step).
 
-**The contract between the two repos.** The infra repo depends on the app only
-through these — change them in both repos together:
+**The contract between the two repos.** Nexusdeploy-App owns this contract and
+is its source of truth; this table records what this repo relies on and can lag
+behind it. A change starts in Nexusdeploy-App, then this repo adapts. What this
+repo relies on:
 
 | Contract | Detail |
 |---|---|
@@ -1514,7 +1583,7 @@ through these — change them in both repos together:
 
 **Not done / not yet verified.** `app-ref.txt` is `UNSET` on purpose (the deploy
 fails closed with a clear error) until Nexusdeploy-App is pushed and a revision
-is pinned. `./app` still exists in this repo until that path is proven, because
+is pinned (as a full commit SHA). `./app` still exists in this repo until that path is proven, because
 deleting it first would break every deploy. The checkout-build-push path has
 not run against real AWS (no live deploy under the budget freeze); the
 ref-resolution step was exercised locally against a public repo's tags. A

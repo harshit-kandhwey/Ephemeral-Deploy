@@ -1,8 +1,22 @@
 # Ephemeral Deploy — Production AWS DevOps Pipeline
 
-> A containerised project management API deployed end-to-end on AWS, built to demonstrate a complete, production-grade DevOps pipeline. The application (REST API with teams, projects, tasks, users) exists as a realistic workload to operate — every engineering decision in this repository is an infrastructure or operational decision.
+> A containerised project management API deployed end-to-end on AWS, built to demonstrate a complete, production-grade DevOps pipeline. The application (REST API with teams, projects, tasks, users — maintained in its own repository, [Nexusdeploy-App](https://github.com/harshit-kandhwey/Nexusdeploy-App)) exists as a realistic workload to operate — every engineering decision in this repository is an infrastructure or operational decision.
 >
 > **Naming note:** AWS resources (ECS clusters, ECR repos, S3 state bucket, SSM paths, IAM roles) are prefixed with `nexusdeploy` for tagging and identification inside AWS. The repository and project itself is called **Ephemeral Deploy**.
+
+---
+
+## Repository boundaries
+
+Three related repositories, one owner per kind of code:
+
+| Repository | Owns |
+| --- | --- |
+| [**Nexusdeploy-App**](https://github.com/harshit-kandhwey/Nexusdeploy-App) | All application code and the **workload contract** — entrypoints, health endpoints, environment variables, one-shot tasks. The source of truth for that contract. |
+| **Ephemeral-Deploy** (this repo) | The AWS ECS infrastructure code: Terraform, blue-green deployment, CI/CD, monitoring. No application code. |
+| [**Kubeforge**](https://github.com/harshit-kandhwey/Kubeforge) | The Kubernetes infrastructure code. |
+
+This repo consumes Nexusdeploy-App only as container images or a pinned ref (a full commit SHA of its source, checked out and built by `deploy.yml`), plus the documented contract, and never edits its code. How the application itself behaves is described in Nexusdeploy-App; what is documented here is what the infrastructure relies on. Why, how the pinned ref works, and the one place the current state does not yet match (a stale `app/` copy pending removal): [`docs/design-decisions.md#repository-boundaries`](docs/design-decisions.md#repository-boundaries).
 
 ---
 
@@ -83,7 +97,7 @@ squashed before that policy changed.
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  GitHub Actions                                                             │
 │                                                                             │
-│  ci.yml      ▶  lint ▶ pytest ▶ Grype container scan ▶ terraform validate │
+│  ci.yml      ▶  terraform validate ▶ workflow lint ▶ secret scan          │
 │  deploy.yml  ▶  OIDC auth ▶ docker buildx ▶ ECR push ▶ terraform apply    │
 │  cleanup.yml ▶  terraform destroy ▶ tag-based fallback ▶ S3 state wipe    │
 └────────────────────────────────┬────────────────────────────────────────────┘
@@ -130,7 +144,7 @@ squashed before that policy changed.
 ```
 ephemeral-deploy/
 │
-├── app/                              The workload — gives the infra something real to operate
+├── app/                              STALE duplicate of Nexusdeploy-App (not the source of truth; pending removal)
 │   ├── src/
 │   │   ├── api/v1/                   REST endpoints: auth, users, teams, projects, tasks, comments
 │   │   ├── models/                   SQLAlchemy models (User, Team, Project, Task, AuditLog)
@@ -158,7 +172,7 @@ ephemeral-deploy/
 │       └── prod/                     Calls all modules with prod sizing; instantiates the slot1 + slot2 ECS sets
 │
 ├── .github/workflows/
-│   ├── ci.yml                        Lint · format · test · Grype scan · terraform validate
+│   ├── ci.yml                        terraform validate · workflow lint · secret scan · summary gate
 │   ├── deploy.yml                    OIDC · build · push · apply · blue-green orchestration
 │   └── cleanup.yml                   terraform destroy · tag-based fallback · S3 state wipe
 │
@@ -169,7 +183,9 @@ ephemeral-deploy/
 ├── docs/
 │   └── SETUP.md                      GitHub secrets guide · OIDC explanation · cost breakdown
 │
-└── docker-compose.yml                Local dev only: postgres + redis + api + worker + beat + redis-commander
+├── app-ref.txt                       Pinned Nexusdeploy-App commit SHA that deploy.yml builds
+│
+└── docker-compose.yml                App-support copy (Nexusdeploy-App's is authoritative): postgres + redis + api + worker + beat
 ```
 
 ---
@@ -177,6 +193,8 @@ ephemeral-deploy/
 ## 4. The Application Layer
 
 The application is a project management REST API. It is the **workload** — its purpose is to give the infrastructure something real to deploy, health-check, scale, and monitor. You wouldn't build this exact app for a portfolio; you run it to show what happens around it.
+
+> This section summarises the application; it is not its specification. The code and the workload contract are owned by [Nexusdeploy-App](https://github.com/harshit-kandhwey/Nexusdeploy-App) (see [Repository boundaries](#repository-boundaries)), which is the source of truth if the two ever disagree.
 
 ### API Surface
 
@@ -215,7 +233,7 @@ All three share the same Docker image base, same environment variables, and same
 `init_db.py` runs in three ordered steps:
 
 1. **App DB user** — creates a least-privilege `nexusapp` PostgreSQL user (not the RDS superuser) that the API connects as at runtime.
-2. **Schema** — Alembic migrations (`app/migrations/`) via `flask_migrate.upgrade()`, idempotent and able to apply real column/type changes to existing tables, unlike a bare `db.create_all()`.
+2. **Schema** — Alembic migrations (`migrations/` in Nexusdeploy-App) via `flask_migrate.upgrade()`, idempotent and able to apply real column/type changes to existing tables, unlike a bare `db.create_all()`.
 3. **Seed data** — demo users, teams, projects, tasks. Seed passwords are never printed; in deployed environments they are generated by Terraform (`random_password`) and injected from Secrets Manager (`init-secrets`). See [Try the API](#try-the-api) for how to retrieve them.
 
 ---
@@ -355,39 +373,26 @@ Three workflow files handle all pipeline logic.
 
 ```
 Job 0: detect-changes
-  └── Diffs HEAD~1 to decide which jobs actually need to run
-      (app changed? → run lint/test/docker. infra changed? → run terraform validate)
+  └── Diffs the push/PR range to decide whether infra changed
+      (infra changed? → run terraform-lint)
 
-Job 1: lint  (runs if app changed)
-  ├── black  ──write mode──▶  auto-formats code
-  ├── isort  ──write mode──▶  auto-sorts imports
-  ├── Commits formatting changes back with [skip ci] tag
-  └── flake8 + bandit  ──check mode──▶  fails on violations
+Job 1: workflow-lint  (always)
+  └── Fails on a GitHub expression interpolated straight into an echo string
 
-Job 2: test  (runs if app changed, after lint)
-  ├── PostgreSQL 15 + Redis 7 as GitHub Actions service containers
-  ├── pytest with --cov (fails if coverage < 60%)
-  └── Uploads coverage report to Codecov (non-blocking)
+Job 2: secrets-scan  (always, blocking)
+  └── gitleaks over full history — the one scanner that can fail the build
 
-Job 3: docker-build  (runs parallel to test, if app changed)
-  ├── docker buildx build  (linux/amd64, GitHub Actions layer cache)
-  ├── Grype container vulnerability scan
-  │   ├── exit-code: 0  ──▶  non-blocking (shows findings, never fails the build)
-  │   ├── severity: CRITICAL  ──▶  only critical findings reported
-  │   └── Results uploaded to GitHub Security tab as SARIF
-  └── Image not pushed (CI only — no AWS credentials in CI workflow)
-
-Job 4: terraform-lint  (runs if infra changed, parallel to all app jobs)
+Job 3: terraform-lint  (runs if infra changed)
   ├── terraform fmt -check -recursive
   ├── tflint  (non-blocking — shows awareness)
   └── terraform init -backend=false + terraform validate for each environment
 
-Job 5: ci-summary
-  ├── Gate job — fails if any upstream job failed. Blocks PR merge.
+Job 4: ci-summary
+  ├── Gate job — fails if any upstream job failed. Blocks PR merge (required check)
   └── Triggers the deploy pipeline
 ```
 
-**Auto-formatting:** black and isort run in write mode. If they change anything, the bot commits back with `[skip ci]` to avoid a loop. This means formatting is never a reason for a CI failure — it's just fixed automatically.
+**Application checks live in Nexusdeploy-App.** Lint and formatting (black/isort), the test suite with its coverage gate, and any image vulnerability scan belong to that repo's own CI. This repo's CI only covers what this repo owns: Terraform, workflows and secrets.
 
 ### `deploy.yml` — Triggered by CI Pipeline on `dev` or `main` branches
 
@@ -790,7 +795,7 @@ deployment_controller {
 
 ### ProxyFix / Real Client IP
 
-**File:** `app/src/api/v1/projects.py` — `_get_real_ip()` function
+**File:** `src/api/v1/projects.py` in Nexusdeploy-App — `_get_real_ip()` function
 
 When ALB is enabled, the `X-Forwarded-For` header carries the real client IP. The comment documents how to enable ProxyFix in `app.py` so `request.remote_addr` is set correctly without manual header parsing (which is an IP spoofing risk if done incorrectly).
 
@@ -913,14 +918,15 @@ SLOT=$(aws ssm get-parameter --name "/nexusdeploy/$ENV/deployment/active_slot" \
 
 ```bash
 # ── Local development ─────────────────────────────────
+# The application's own commands — run from a Nexusdeploy-App checkout, not this repo
 docker-compose up -d          # Start postgres + redis + api + worker + beat + redis-commander
 docker-compose down -v        # Stop and remove volumes
-(cd app && pytest tests/ -v --cov=src --cov-report=term-missing --cov-fail-under=85)     # Tests
-(cd app && flake8 src/ --max-line-length=120 && black --check src/ && bandit -r src/ -ll)   # Lint
+pytest tests/ -v --cov=src --cov-report=term-missing --cov-fail-under=85     # Tests
+flake8 src/ --max-line-length=120 && black --check src/ && bandit -r src/ -ll   # Lint
 
 # ── Docker (normally CI's job) ────────────────────────
-docker build -t nexusdeploy-api:local    -f app/Dockerfile app/
-docker build -t nexusdeploy-worker:local -f app/Dockerfile.worker app/
+docker build -t nexusdeploy-api:local    -f Dockerfile .
+docker build -t nexusdeploy-worker:local -f Dockerfile.worker .
 aws ecr get-login-password --region us-east-1 \
   | docker login --username AWS --password-stdin <account-id>.dkr.ecr.us-east-1.amazonaws.com
 
@@ -958,7 +964,7 @@ terraform -chdir=terraform/environments/dev output -raw grafana_url             
 
 ## 17. Local Development
 
-The Docker Compose stack runs the full application locally — no AWS account needed for development.
+The Docker Compose stack runs the full application locally — no AWS account needed for development. The compose file and the application source belong to [Nexusdeploy-App](https://github.com/harshit-kandhwey/Nexusdeploy-App); run these steps from a checkout of it.
 
 ```bash
 docker-compose up -d
@@ -975,7 +981,7 @@ This starts:
 | beat            | —    | Celery Beat scheduler                             |
 | redis-commander | 8081 | Redis UI for inspecting queues                    |
 
-The `app/` directory is volume-mounted into the API container. Code changes take effect after `docker compose restart api` — no rebuild needed.
+The application source directory is volume-mounted into the API container. Code changes take effect after `docker compose restart api` — no rebuild needed.
 
 ### Initialise the database
 
@@ -1024,10 +1030,10 @@ Or open `http://localhost:5000/apidocs` — Swagger UI with the Authorize button
 ### Running tests
 
 ```bash
-cd app && pytest tests/ -v --cov=src --cov-report=term-missing --cov-fail-under=85
+pytest tests/ -v --cov=src --cov-report=term-missing --cov-fail-under=85   # from a Nexusdeploy-App checkout
 ```
 
-Tests use an in-memory SQLite database and a mocked Redis client — no running services needed. Coverage report is generated at `app/htmlcov/index.html`. `--cov-fail-under=85` matches CI's gate — a local run without it can pass while CI fails on the same code.
+Tests use an in-memory SQLite database and a mocked Redis client — no running services needed. Coverage report is generated at `htmlcov/index.html`. `--cov-fail-under=85` matches that repo's CI gate — a local run without it can pass while CI fails on the same code.
 
 ---
 
