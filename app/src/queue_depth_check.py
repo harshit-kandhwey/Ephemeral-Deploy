@@ -18,14 +18,18 @@ import os
 import sys
 
 from celery import Celery
+from kombu.transport.redis import Channel
 from redis import Redis
 
 
 def _queue_depth(redis_url, queue_name):
     client = Redis.from_url(redis_url, decode_responses=True)
     # Kombu's redis transport stores a queue as a native Redis list keyed by
-    # the queue name (no vhost/exchange prefixing configured here).
-    return client.llen(queue_name)
+    # the queue name (no vhost/exchange prefixing configured here), but a
+    # task published with a priority lands on a separate list
+    # (name + sep + step). Sum every priority list, not just the base one.
+    keys = [queue_name] + [f"{queue_name}{Channel.sep}{step}" for step in Channel.priority_steps if step]
+    return sum(client.llen(key) for key in keys)
 
 
 def _in_flight_count(redis_url, queue_name):
@@ -76,11 +80,11 @@ def _in_flight_count(redis_url, queue_name):
 
 
 def main():
-    redis_url = os.environ.get("REDIS_URL")
+    redis_url = os.environ.get("CELERY_BROKER_URL")
     queue_name = os.environ.get("CELERY_TASK_QUEUE")
 
     if not redis_url or not queue_name:
-        print("REDIS_URL / CELERY_TASK_QUEUE not set — cannot check queue depth")
+        print("CELERY_BROKER_URL / CELERY_TASK_QUEUE not set — cannot check queue depth")
         return 1
 
     try:

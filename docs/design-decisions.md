@@ -688,10 +688,9 @@ database already at head is a no-op, same safety property `create_all()`
 had), and it reuses `db.engine` directly (`migrations/env.py`'s
 `get_engine()`) rather than opening a second connection — which is what
 makes it safe for the in-memory SQLite `TestingConfig` uses, since both
-migration and test queries share the same engine/connection. **Not safe
-against genuinely concurrent callers** — see the concurrency caveat below;
-an earlier version of this note claimed blue-green safety here that
-doesn't actually hold.
+migration and test queries share the same engine/connection. Serialized on
+PostgreSQL by an advisory lock — see the concurrency note below (an earlier
+version of this note claimed blue-green safety before any lock existed).
 
 Going forward, a model change needs `flask db migrate -m "..."` to generate
 the matching revision — a schema change with no corresponding file under
@@ -700,23 +699,17 @@ how correct the SQLAlchemy model looks locally (SQLite's local dev/test
 paths create tables from the model directly via this same `upgrade()`
 path, so the drift would only show up against real Postgres).
 
-**Concurrent `upgrade()` calls are not actually safe, and an earlier draft
-of this note wrongly claimed they were.** `entrypoint_worker.py` runs
-`create_schema()` on every worker container's own startup (not just the
-explicit `init_db` one-shot task) — so if `worker_desired_count` is ever
-raised above 1, or a deploy causes both blue-green slots' workers to
-restart around the same moment, two `upgrade()` calls can race against the
-same database. Alembic does not take an advisory lock around `upgrade()`
-by default; two concurrent callers can both read the same current revision
-and attempt the same `CREATE TABLE`/`ALTER TABLE`, and one loses with a
-duplicate-object error. Not fixed here — a real fix means either running
-migrations through exactly one deploy-time task (removing them from
-`entrypoint_worker.py`'s per-container startup path entirely) or wrapping
-`upgrade()` in a Postgres advisory lock. Recorded as a known, real gap
-rather than silently relying on an untrue safety claim: today's actual
-`worker_desired_count` is 1 everywhere, which keeps the likelihood low
-without making the underlying race not worth fixing before ever raising
-that count.
+**Concurrent `upgrade()` calls are serialized by a Postgres advisory
+lock.** `entrypoint_worker.py` runs `create_schema()` on every worker
+container's own startup (not just the explicit `init_db` one-shot task), and
+Alembic takes no lock of its own, so two blue-green slots (or a scaled-out
+worker) restarting together could race the same DDL. An earlier draft of this
+note wrongly claimed safety; a later one recorded it as an open gap.
+`create_schema()` now wraps `upgrade()` in `pg_advisory_lock` /
+`pg_advisory_unlock` on a dedicated connection (PostgreSQL only; SQLite has no
+concurrent writers). Verified against a live Postgres: 4 concurrent callers on
+an empty database all finish with no errors at head, while the same 4 with the
+lock removed deadlock on DDL.
 
 **No baseline procedure exists for a database that already has tables from
 the old `db.create_all()` path but no `alembic_version` row.** `upgrade()`

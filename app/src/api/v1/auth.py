@@ -63,6 +63,8 @@ def register():
         description: User created successfully
       400:
         description: Validation error
+      409:
+        description: Email or username already registered
     """
     try:
         data = get_json_body(request, required=True)
@@ -72,10 +74,10 @@ def register():
         return jsonify({"error": e.message}), 400
 
     if User.query.filter_by(email=data["email"]).first():
-        return jsonify({"error": "Email already registered"}), 400
+        return jsonify({"error": "Email already registered"}), 409
 
     if User.query.filter_by(username=data["username"]).first():
-        return jsonify({"error": "Username already taken"}), 400
+        return jsonify({"error": "Username already taken"}), 409
 
     user = User(
         email=data["email"],

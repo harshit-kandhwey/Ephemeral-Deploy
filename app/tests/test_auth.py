@@ -25,7 +25,7 @@ def test_register_duplicate_email(client, auth_headers):
             "password": "password123",
         },
     )
-    assert response.status_code == 400
+    assert response.status_code == 409
     assert "Email already registered" in response.json["error"]
 
 
@@ -38,7 +38,7 @@ def test_register_duplicate_username(client, auth_headers):
             "password": "password123",
         },
     )
-    assert response.status_code == 400
+    assert response.status_code == 409
     assert "Username already taken" in response.json["error"]
 
 

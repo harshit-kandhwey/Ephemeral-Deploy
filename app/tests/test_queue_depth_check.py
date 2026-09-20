@@ -19,19 +19,19 @@ def _mock_inspect(active=None, reserved=None, queues=_SLOT1_QUEUES):
 
 
 def test_main_fails_without_redis_url(monkeypatch):
-    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("CELERY_BROKER_URL", raising=False)
     monkeypatch.setenv("CELERY_TASK_QUEUE", "tasks-staging-slot1")
     assert queue_depth_check.main() == 1
 
 
 def test_main_fails_without_queue_name(monkeypatch):
-    monkeypatch.setenv("REDIS_URL", "redis://10.0.0.1:6379/0")
+    monkeypatch.setenv("CELERY_BROKER_URL", "redis://10.0.0.1:6379/0")
     monkeypatch.delenv("CELERY_TASK_QUEUE", raising=False)
     assert queue_depth_check.main() == 1
 
 
 def test_main_returns_zero_when_queue_empty_and_nothing_in_flight(monkeypatch):
-    monkeypatch.setenv("REDIS_URL", "redis://10.0.0.1:6379/0")
+    monkeypatch.setenv("CELERY_BROKER_URL", "redis://10.0.0.1:6379/0")
     monkeypatch.setenv("CELERY_TASK_QUEUE", "tasks-staging-slot1")
 
     mock_client = MagicMock()
@@ -45,11 +45,11 @@ def test_main_returns_zero_when_queue_empty_and_nothing_in_flight(monkeypatch):
         ),
     ):
         assert queue_depth_check.main() == 0
-    mock_client.llen.assert_called_once_with("tasks-staging-slot1")
+    mock_client.llen.assert_any_call("tasks-staging-slot1")
 
 
 def test_main_returns_nonzero_when_queue_has_pending_tasks(monkeypatch):
-    monkeypatch.setenv("REDIS_URL", "redis://10.0.0.1:6379/0")
+    monkeypatch.setenv("CELERY_BROKER_URL", "redis://10.0.0.1:6379/0")
     monkeypatch.setenv("CELERY_TASK_QUEUE", "tasks-staging-slot1")
 
     mock_client = MagicMock()
@@ -60,7 +60,7 @@ def test_main_returns_nonzero_when_queue_has_pending_tasks(monkeypatch):
 
 
 def test_main_fails_on_connection_error(monkeypatch):
-    monkeypatch.setenv("REDIS_URL", "redis://10.0.0.1:6379/0")
+    monkeypatch.setenv("CELERY_BROKER_URL", "redis://10.0.0.1:6379/0")
     monkeypatch.setenv("CELERY_TASK_QUEUE", "tasks-staging-slot1")
 
     with patch("src.queue_depth_check.Redis.from_url", side_effect=ConnectionError("refused")):
@@ -72,7 +72,7 @@ def test_main_fails_when_task_is_active_on_this_queue(monkeypatch):
     default (early ack) removes a message from Redis the instant a worker's
     prefetch buffer takes it — before the task body finishes. An empty
     queue with an active task on it must still block the reclaim."""
-    monkeypatch.setenv("REDIS_URL", "redis://10.0.0.1:6379/0")
+    monkeypatch.setenv("CELERY_BROKER_URL", "redis://10.0.0.1:6379/0")
     monkeypatch.setenv("CELERY_TASK_QUEUE", "tasks-staging-slot1")
 
     mock_client = MagicMock()
@@ -92,7 +92,7 @@ def test_main_fails_when_task_is_active_on_this_queue(monkeypatch):
 def test_main_ignores_active_tasks_on_a_different_queue(monkeypatch):
     """The broker is shared across slots, so inspect() sees every connected
     worker's active tasks — only tasks routed to THIS queue should count."""
-    monkeypatch.setenv("REDIS_URL", "redis://10.0.0.1:6379/0")
+    monkeypatch.setenv("CELERY_BROKER_URL", "redis://10.0.0.1:6379/0")
     monkeypatch.setenv("CELERY_TASK_QUEUE", "tasks-staging-slot1")
 
     mock_client = MagicMock()
@@ -113,7 +113,7 @@ def test_main_fails_closed_when_no_worker_replies(monkeypatch):
     """inspect() returns None (not {}) when no node responds within the
     timeout — that's a verification failure, not evidence the queue is
     drained, and must not be treated as "nothing in flight"."""
-    monkeypatch.setenv("REDIS_URL", "redis://10.0.0.1:6379/0")
+    monkeypatch.setenv("CELERY_BROKER_URL", "redis://10.0.0.1:6379/0")
     monkeypatch.setenv("CELERY_TASK_QUEUE", "tasks-staging-slot1")
 
     mock_client = MagicMock()
@@ -127,7 +127,7 @@ def test_main_fails_closed_when_no_worker_replies(monkeypatch):
 
 
 def test_main_fails_on_inspect_error(monkeypatch):
-    monkeypatch.setenv("REDIS_URL", "redis://10.0.0.1:6379/0")
+    monkeypatch.setenv("CELERY_BROKER_URL", "redis://10.0.0.1:6379/0")
     monkeypatch.setenv("CELERY_TASK_QUEUE", "tasks-staging-slot1")
 
     mock_client = MagicMock()
@@ -144,7 +144,7 @@ def test_main_fails_closed_when_only_another_slots_worker_replies(monkeypatch):
     """The broker is shared: slot2's worker answering says nothing about
     slot1's worker, which may be down with tasks still reserved. Must not
     read as "nothing in flight"."""
-    monkeypatch.setenv("REDIS_URL", "redis://10.0.0.1:6379/0")
+    monkeypatch.setenv("CELERY_BROKER_URL", "redis://10.0.0.1:6379/0")
     monkeypatch.setenv("CELERY_TASK_QUEUE", "tasks-staging-slot1")
 
     mock_client = MagicMock()
@@ -166,7 +166,7 @@ def test_main_fails_closed_when_only_another_slots_worker_replies(monkeypatch):
 def test_main_fails_closed_when_target_worker_misses_a_reply(monkeypatch):
     """Worker answered active_queues() but not reserved()/active() (e.g. timed
     out under load) while another slot's worker did — unverified, so block."""
-    monkeypatch.setenv("REDIS_URL", "redis://10.0.0.1:6379/0")
+    monkeypatch.setenv("CELERY_BROKER_URL", "redis://10.0.0.1:6379/0")
     monkeypatch.setenv("CELERY_TASK_QUEUE", "tasks-staging-slot1")
 
     mock_client = MagicMock()
@@ -195,3 +195,14 @@ def test_in_flight_count_queries_reserved_before_active():
     with patch("src.queue_depth_check.Celery", return_value=celery_app):
         assert queue_depth_check._in_flight_count("redis://x", "tasks-staging-slot1") == 0
     assert order == ["reserved", "active"]
+
+
+def test_queue_depth_counts_priority_lists():
+    """Kombu puts a prioritised task on name + sep + step, not the base key;
+    LLEN on the base key alone would read an occupied queue as empty."""
+    lists = {"tasks-staging-slot13": 2}
+    mock_client = MagicMock()
+    mock_client.llen.side_effect = lambda key: lists.get(key, 0)
+
+    with patch("src.queue_depth_check.Redis.from_url", return_value=mock_client):
+        assert queue_depth_check._queue_depth("redis://x", "tasks-staging-slot1") == 2

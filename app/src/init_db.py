@@ -45,6 +45,9 @@ import psycopg2
 from psycopg2 import sql
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
+# Arbitrary fixed bigint identifying "schema migration" to pg_advisory_lock.
+_MIGRATION_LOCK_KEY = 7263559001
+
 
 def _get_master_conn():
     """
@@ -164,14 +167,30 @@ def create_schema(app):
     Bring the schema to the latest Alembic revision (app/migrations/).
     flask_migrate.upgrade() is idempotent — a database already at head is a
     no-op — and, unlike db.create_all(), applies real schema changes
-    (new/altered columns) to existing tables, not just new tables. Safe for
-    blue-green deployments: two slots running upgrade() concurrently against
-    the same database both converge on the same head revision.
+    (new/altered columns) to existing tables, not just new tables.
+
+    Alembic takes no lock of its own, and every worker container calls this at
+    startup, so two blue-green slots (or a scaled-out worker) can race the same
+    DDL. On PostgreSQL the upgrade is serialized with a session-level advisory
+    lock: a second caller blocks until the first finishes, then finds the
+    database already at head and no-ops. SQLite (tests/local) has no concurrent
+    writers here, so it skips the lock.
     """
     from flask_migrate import upgrade
+    from sqlalchemy import text
+
+    from .extensions import db
 
     with app.app_context():
-        upgrade()
+        if db.engine.dialect.name != "postgresql":
+            upgrade()
+        else:
+            with db.engine.connect() as lock_conn:
+                lock_conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": _MIGRATION_LOCK_KEY})
+                try:
+                    upgrade()
+                finally:
+                    lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _MIGRATION_LOCK_KEY})
         print("✓ Database schema upgraded to latest revision (flask db upgrade)")
 
 

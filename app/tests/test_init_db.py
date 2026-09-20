@@ -218,3 +218,22 @@ def test_seed_happy_path_creates_expected_counts_and_relationships(app, monkeypa
         auth_task = Task.query.filter_by(title="Implement authentication system").first()
         assert auth_task is not None
         assert auth_task.assignee.username == "developer1"
+
+
+def test_create_schema_holds_advisory_lock_around_upgrade_on_postgres(app):
+    """Alembic takes no lock, so on PostgreSQL the upgrade must run between
+    pg_advisory_lock and pg_advisory_unlock (real 4-way race verified against
+    a live Postgres: unlocked callers deadlock on DDL)."""
+    calls = []
+    conn = MagicMock()
+    conn.execute.side_effect = lambda stmt, params=None: calls.append(str(stmt))
+
+    with (
+        patch("src.extensions.db") as fake_db,
+        patch("flask_migrate.upgrade", side_effect=lambda: calls.append("upgrade")),
+    ):
+        fake_db.engine.dialect.name = "postgresql"
+        fake_db.engine.connect.return_value.__enter__.return_value = conn
+        create_schema(app)
+
+    assert calls == ["SELECT pg_advisory_lock(:k)", "upgrade", "SELECT pg_advisory_unlock(:k)"]

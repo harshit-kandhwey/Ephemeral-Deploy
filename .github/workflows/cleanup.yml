@@ -611,7 +611,7 @@ jobs:
           fi
 
           # The old slot's OWN worker task definition already carries the
-          # right REDIS_URL secret and CELERY_TASK_QUEUE env var for its own
+          # right CELERY_BROKER_URL secret and CELERY_TASK_QUEUE env var for its own
           # queue — no override needed beyond the command itself.
           TASK_DEF=$(aws ecs describe-task-definition \
             --task-definition "nexusdeploy-${ENV}-$OLD_SLOT-worker" \
