@@ -19,22 +19,25 @@
 
 <!-- Closes #123 -->
 
-## Test Plan
+## Verification
 
-<!-- How did you verify this works? Check all that apply. -->
+<!-- This repo is the AWS ECS infrastructure only; application code lives in Nexusdeploy-App. Check all that apply. CI runs: workflow-lint and secrets-scan on every run, and terraform-lint when terraform/ or .github/ changed. -->
 
-- [ ] Unit / integration tests added or updated (`cd app && pytest tests/ -v --cov=src --cov-report=term-missing` passes)
-- [ ] Manually tested against local stack (`docker-compose up -d`)
-- [ ] Tested against dev environment (pushed to `dev` branch)
+- [ ] `terraform fmt -check -recursive terraform/` is clean (CI auto-formats and pushes a `[skip ci]` commit otherwise)
+- [ ] `terraform init -backend=false && terraform validate` passes for each environment touched (CI validates and plans offline for `dev`, `staging` and `prod`)
+- [ ] Terraform changes: a real `terraform plan` was reviewed (CI's plan is offline, `-refresh=false`, so it cannot show drift)
+- [ ] Workflow changes: no `${{ vars.* }}`, `${{ secrets.* }}` or `${{ needs.*.outputs.* }}` interpolated directly inside an `echo "..."` string (the Workflow Quoting Safety Check fails the run otherwise)
+- [ ] No secrets or credentials committed (the gitleaks scan blocks the build)
+- [ ] TFLint / Checkov findings reviewed (non-blocking — they warn, they do not fail the run)
+- [ ] Tested against the dev environment (pushed to `dev`; this spends real AWS money against the $1/month cap)
 - [ ] No test needed — reason: \_\_\_
 
 ## Checklist
 
-- [ ] Lint passes locally (`cd app && flake8 src/ --max-line-length=120 && black --check src/ && bandit -r src/ -ll`)
-- [ ] No hardcoded secrets, credentials, or environment-specific values in code
-- [ ] Terraform changes: `terraform fmt` applied, `terraform plan` reviewed
-- [ ] New API endpoints have Swagger docstrings
-- [ ] CLAUDE.md updated if architecture or commands changed
+- [ ] This PR contains no application code (that belongs in Nexusdeploy-App)
+- [ ] No environment-specific values hardcoded in code
+- [ ] `Readme.md` / `docs/design-decisions.md` updated if architecture, commands or a non-obvious decision changed
+- [ ] Repo convention (not a CI check): no `[skip ci]` on a commit that is, or will become, this PR's head — GitHub then never runs the required `CI Summary` check and the PR stays blocked; use `[skip deploy]` to suppress only the deploy
 
 ## Notes for Reviewer
 

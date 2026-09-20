@@ -4,18 +4,19 @@ Thank you for your interest in contributing. This document covers how to set up 
 
 ## Project Overview
 
-Ephemeral Deploy is a production-grade AWS DevOps pipeline built around a Flask project management REST API. The application in `app/` is the workload — the infrastructure and CI/CD pipeline around it is the primary subject. See [README.md](README.md) and [CLAUDE.md](CLAUDE.md) for full architecture details.
+Ephemeral Deploy is a production-grade AWS DevOps pipeline that deploys a Flask project management REST API. That application — the workload — lives in its own repository, [Nexusdeploy-App](https://github.com/harshit-kandhwey/Nexusdeploy-App), and owns all application code; this repo is the AWS ECS infrastructure (Terraform, blue-green deployment, CI/CD, monitoring) around it. Application changes go to Nexusdeploy-App, not here. See [README.md](README.md) and [CLAUDE.md](CLAUDE.md) for full architecture details.
 
 ## Getting Started
 
 ### Prerequisites
 
-- Docker and Docker Compose
-- Python 3.11+ (for local test runs without Docker)
 - Terraform 1.5+ (for infrastructure changes)
 - AWS CLI configured (for deploy/ops commands)
+- Docker and Python 3.11+ — only for application work, which happens in Nexusdeploy-App
 
-### Local Development
+### Running the application locally
+
+The application, its compose file and its tests belong to Nexusdeploy-App — run these from a checkout of that repo, not this one:
 
 ```bash
 # Start the full stack (postgres + redis + api + worker + beat + redis-commander)
@@ -26,35 +27,52 @@ docker-compose up -d
 # Redis Commander: http://localhost:8081
 ```
 
-### Running Tests
+### Running the application's tests
+
+From a Nexusdeploy-App checkout:
 
 ```bash
-cd app && pytest tests/ -v --cov=src --cov-report=term-missing --cov-fail-under=85
+pytest tests/ -v --cov=src --cov-report=term-missing --cov-fail-under=85
 ```
 
 Tests use in-memory SQLite and Redis DB 15 — no external services needed.
 
-### Linting
+### Linting the application
+
+From a Nexusdeploy-App checkout:
 
 ```bash
-(cd app && flake8 src/ --max-line-length=120 && black --check src/ && bandit -r src/ -ll)
-(cd app && black .)   # auto-format
-(cd app && isort .)   # sort imports
+flake8 src/ --max-line-length=120 && black --check src/ && bandit -r src/ -ll
+black .   # auto-format
+isort .   # sort imports
 ```
 
-Line length is 120 (set in `pyproject.toml`).
+Line length is 120 (set in that repo's `pyproject.toml`).
+
+### Checks for this repo
+
+`ci.yml` runs these on pushes to `main`/`dev`/`staging`/`feature/**` and on PRs to `main`/`dev`/`staging`. Run the local equivalents before pushing:
+
+| CI job | Runs | Local equivalent |
+| --- | --- | --- |
+| `workflow-lint` (always) | Fails if a `${{ vars.* / secrets.* / needs.*.outputs.* }}` expression is interpolated directly inside an `echo "..."` string | see the pattern in `ci.yml` |
+| `secrets-scan` (always, **blocking**) | gitleaks over the full history | `gitleaks detect --source . --redact --verbose` |
+| `terraform-lint` (only if `terraform/` or `.github/` changed) | `terraform fmt -recursive` (pushes a `[skip ci]` formatting commit if it changes anything), TFLint and Checkov (both non-blocking), then `terraform init -backend=false`, `terraform validate` and an offline `terraform plan -refresh=false` for each of `dev`, `staging`, `prod` | `terraform fmt -check -recursive terraform/`; then in each `terraform/environments/<env>`: `terraform init -backend=false && terraform validate` |
+| `ci-summary` | The required check: gates on the jobs above and, on success, dispatches `deploy.yml` | — |
+
+Because the CI plan is offline (`-refresh=false`), it does not show drift against real AWS — review a real `terraform plan` for infrastructure changes.
 
 ## Branch and PR Workflow
 
 | Branch       | Purpose                                                                                  |
 | ------------ | ---------------------------------------------------------------------------------------- |
-| `feature/**` | Your work. Opens a PR → CI runs lint, test, scan. No AWS touched.                        |
+| `feature/**` | Your work. Opens a PR → CI runs workflow-lint, secret scan and (if infra changed) terraform-lint. No AWS touched. |
 | `dev`        | Integration. Merging here auto-deploys to the dev environment (auto-destroys in 30 min). |
 | `main`       | Production. Merging here triggers a blue-green prod deploy.                              |
 
 1. Fork the repo and create a branch from `dev`: `git checkout -b feature/my-change`
-2. Make your changes with tests
-3. Run the lint and test commands above locally before pushing
+2. Make your changes (application changes belong in Nexusdeploy-App)
+3. Run the checks in [Checks for this repo](#checks-for-this-repo) locally before pushing
 4. Open a PR targeting `dev`
 5. All CI checks must pass before merging
 
@@ -64,14 +82,13 @@ Line length is 120 (set in `pyproject.toml`).
 
 - Follow existing patterns. Look at adjacent files before writing new code.
 - No commented-out code, no `TODO` left in production paths.
-- Every new API endpoint needs a corresponding test in `app/tests/`.
-- Line length 120. Black + isort formatting is enforced by CI (auto-commits on PRs).
+- Application code — endpoints, tests, dependencies, Python formatting — lives in Nexusdeploy-App; changes to it go there.
 
 ### Terraform
 
 - All new resources go in modules under `terraform/modules/`. Environments only instantiate modules.
-- Run `terraform fmt` before committing. CI enforces this.
-- State locking is disabled (single-developer workflow) — coordinate before running concurrent applies.
+- Run `terraform fmt -recursive terraform/` before committing. CI runs it too and pushes a `[skip ci]` formatting commit if anything changed.
+- State lives in S3 with DynamoDB locking (table `nexusdeploy-terraform-locks`, created by `scripts/bootstrap.sh`), so a concurrent `plan`/`apply` fails on the lock instead of corrupting state. When running Terraform locally, pass the same `-backend-config` values the workflows use (see `deploy.yml`).
 
 ### Commit Messages
 
@@ -95,11 +112,10 @@ If you discover a security vulnerability, **do not open a public issue**. See [S
 - Performance improvements (especially to database queries or CI pipeline steps)
 - Documentation improvements
 - Infrastructure hardening (IAM least-privilege, security group tightening, etc.)
-- New API endpoints with full test coverage
 
 ## What to Avoid
 
-- Changes that break the existing test suite without a clear reason
+- Changes that break CI (terraform validate, workflow lint, secret scan) without a clear reason
 - Adding new AWS resource types without updating `bootstrap.sh` and IAM permissions
-- Introducing new Python dependencies without justification (keep the image lean)
+- Adding application code or dependencies here — they belong in Nexusdeploy-App
 - Disabling or bypassing CI checks
