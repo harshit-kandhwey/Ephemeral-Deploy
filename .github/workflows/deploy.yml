@@ -616,7 +616,7 @@ jobs:
             --region ${{ env.AWS_REGION }} \
             --query 'taskDefinition.taskDefinitionArn' --output text)
 
-          OVERRIDES='{"containerOverrides":[{"name":"worker","command":["python","-m","src.init_db"],"environment":[{"name":"ENV","value":"development"},{"name":"SEED_DB","value":"true"}]}]}'
+          OVERRIDES='{"containerOverrides":[{"name":"worker","command":["-m","src.init_db"],"environment":[{"name":"ENV","value":"development"},{"name":"SEED_DB","value":"true"}]}]}'
 
           TASK_ARN=$(aws ecs run-task \
             --cluster "$CLUSTER" \
