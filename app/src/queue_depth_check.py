@@ -36,21 +36,39 @@ def _in_flight_count(redis_url, queue_name):
     body has actually run. A worker mid-task, or holding a prefetched task,
     would otherwise read as "queue empty" here.
 
-    Returns None (distinct from 0) when no worker replied at all — a
-    verification failure, not evidence of an empty queue — so the caller can
-    fail closed rather than default to "nothing in flight."
+    The broker is shared across slots, so inspect() sees every connected
+    worker. A reply from another slot's worker says nothing about this
+    queue's own worker, so the target workers are identified first via
+    active_queues() (those actually consuming queue_name) and must each answer
+    both inspections.
+
+    Returns None (distinct from 0) when no worker on this queue can be
+    confirmed — a verification failure, not evidence of an empty queue — so
+    the caller can fail closed rather than default to "nothing in flight."
     """
     inspect_app = Celery(broker=redis_url)
     insp = inspect_app.control.inspect(timeout=5)
-    active = insp.active()
-    reserved = insp.reserved()
 
-    if active is None or reserved is None:
+    queues = insp.active_queues()
+    targets = {
+        worker
+        for worker, worker_queues in (queues or {}).items()
+        if any(q.get("name") == queue_name for q in worker_queues)
+    }
+    if not targets:
+        return None
+
+    # reserved() before active(): a task only ever moves reserved -> active,
+    # so this order can double-count it but never miss it mid-transition.
+    reserved = insp.reserved()
+    active = insp.active()
+
+    if reserved is None or active is None or not all(w in reserved and w in active for w in targets):
         return None
 
     count = 0
-    for tasks in list(active.values()) + list(reserved.values()):
-        for task in tasks:
+    for worker in targets:
+        for task in reserved[worker] + active[worker]:
             routing_key = (task.get("delivery_info") or {}).get("routing_key")
             if routing_key == queue_name:
                 count += 1

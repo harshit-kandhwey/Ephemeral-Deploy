@@ -2,11 +2,15 @@ from unittest.mock import MagicMock, patch
 
 from src import queue_depth_check
 
+_SLOT1_QUEUES = {"worker@host": [{"name": "tasks-staging-slot1"}]}
 
-def _mock_inspect(active=None, reserved=None):
+
+def _mock_inspect(active=None, reserved=None, queues=_SLOT1_QUEUES):
     """Build a mock whose .control.inspect(...) returns an object with the
-    given .active()/.reserved() replies, matching Celery's real API shape."""
+    given .active_queues()/.active()/.reserved() replies, matching Celery's
+    real API shape. queues defaults to one worker consuming slot1's queue."""
     insp = MagicMock()
+    insp.active_queues.return_value = queues
     insp.active.return_value = active
     insp.reserved.return_value = reserved
     celery_app = MagicMock()
@@ -117,7 +121,7 @@ def test_main_fails_closed_when_no_worker_replies(monkeypatch):
 
     with (
         patch("src.queue_depth_check.Redis.from_url", return_value=mock_client),
-        patch("src.queue_depth_check.Celery", return_value=_mock_inspect(active=None, reserved=None)),
+        patch("src.queue_depth_check.Celery", return_value=_mock_inspect(active=None, reserved=None, queues=None)),
     ):
         assert queue_depth_check.main() == 1
 
@@ -134,3 +138,60 @@ def test_main_fails_on_inspect_error(monkeypatch):
         patch("src.queue_depth_check.Celery", side_effect=RuntimeError("broker unreachable")),
     ):
         assert queue_depth_check.main() == 1
+
+
+def test_main_fails_closed_when_only_another_slots_worker_replies(monkeypatch):
+    """The broker is shared: slot2's worker answering says nothing about
+    slot1's worker, which may be down with tasks still reserved. Must not
+    read as "nothing in flight"."""
+    monkeypatch.setenv("REDIS_URL", "redis://10.0.0.1:6379/0")
+    monkeypatch.setenv("CELERY_TASK_QUEUE", "tasks-staging-slot1")
+
+    mock_client = MagicMock()
+    mock_client.llen.return_value = 0
+    other = {"worker2@host": []}
+
+    with (
+        patch("src.queue_depth_check.Redis.from_url", return_value=mock_client),
+        patch(
+            "src.queue_depth_check.Celery",
+            return_value=_mock_inspect(
+                active=other, reserved=other, queues={"worker2@host": [{"name": "tasks-staging-slot2"}]}
+            ),
+        ),
+    ):
+        assert queue_depth_check.main() == 1
+
+
+def test_main_fails_closed_when_target_worker_misses_a_reply(monkeypatch):
+    """Worker answered active_queues() but not reserved()/active() (e.g. timed
+    out under load) while another slot's worker did — unverified, so block."""
+    monkeypatch.setenv("REDIS_URL", "redis://10.0.0.1:6379/0")
+    monkeypatch.setenv("CELERY_TASK_QUEUE", "tasks-staging-slot1")
+
+    mock_client = MagicMock()
+    mock_client.llen.return_value = 0
+
+    with (
+        patch("src.queue_depth_check.Redis.from_url", return_value=mock_client),
+        patch(
+            "src.queue_depth_check.Celery",
+            return_value=_mock_inspect(active={"worker2@host": []}, reserved={"worker2@host": []}),
+        ),
+    ):
+        assert queue_depth_check.main() == 1
+
+
+def test_in_flight_count_queries_reserved_before_active():
+    """reserved -> active is one-way, so reserved must be read first."""
+    order = []
+    insp = MagicMock()
+    insp.active_queues.return_value = _SLOT1_QUEUES
+    insp.reserved.side_effect = lambda: order.append("reserved") or {"worker@host": []}
+    insp.active.side_effect = lambda: order.append("active") or {"worker@host": []}
+    celery_app = MagicMock()
+    celery_app.control.inspect.return_value = insp
+
+    with patch("src.queue_depth_check.Celery", return_value=celery_app):
+        assert queue_depth_check._in_flight_count("redis://x", "tasks-staging-slot1") == 0
+    assert order == ["reserved", "active"]
