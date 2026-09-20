@@ -1,9 +1,2 @@
-# The Nexusdeploy-App revision this repo deploys. deploy.yml checks it out and
-# builds the api + worker images from it (docs/design-decisions.md#app-repo-split).
-# Pin a FULL 40-character commit SHA on the last line — not a branch, and not a
-# tag, because a tag can be moved after the fact. Record the human-readable tag
-# in a comment on the line above the SHA, for example:
-#     # tag: v0.1.0
-#     0123456789abcdef0123456789abcdef01234567
-# UNSET fails the deploy. Override for one run with deploy.yml's app_ref input.
-UNSET
+# tag: v0.1.0
+56a380c9d3c28d60e5572d801e3004fe2ae615b0
