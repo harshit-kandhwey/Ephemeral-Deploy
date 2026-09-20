@@ -1,0 +1,6 @@
+# The Nexusdeploy-App revision this repo deploys. deploy.yml checks it out and
+# builds the api + worker images from it (Option B — see
+# docs/design-decisions.md#app-repo-split). Pin a 40-char commit SHA or a tag
+# name, never a branch, so a deploy is reproducible. UNSET fails the deploy.
+# Override for one run with deploy.yml's app_ref input.
+UNSET

@@ -22,27 +22,25 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PYTHON_VERSION: "3.11"
   AWS_REGION: us-east-1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 # Read-only by default; jobs needing more declare it themselves:
-#   lint / terraform-lint : contents: write        (push auto-format commits)
-#   docker-build          : security-events: write (upload the Grype SARIF)
-#   ci-summary            : actions: write         (dispatch deploy.yml)
+#   terraform-lint : contents: write (push terraform fmt commits)
+#   ci-summary : actions: write (dispatch deploy.yml)
 # See docs/design-decisions.md#least-privilege-workflow-permissions
 permissions:
   contents: read
 
 jobs:
-  # Gates the other jobs: app changes drive lint/test/docker-build,
-  # infra changes drive terraform-lint.
+  # Gates terraform-lint on infra changes. The workload lives in
+  # Nexusdeploy-App, which runs its own lint/test/image-build CI; this repo
+  # only deploys it (see docs/design-decisions.md#app-repo-split).
   detect-changes:
     name: Detect Changed Files
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      app_changed: ${{ steps.filter.outputs.app }}
       infra_changed: ${{ steps.filter.outputs.infra }}
 
     steps:
@@ -57,7 +55,6 @@ jobs:
           # Manual dispatch runs every check; path filters apply to push and
           # pull_request only.
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "app=true"   >> $GITHUB_OUTPUT
             echo "infra=true" >> $GITHUB_OUTPUT
             echo "🖐️ Manual dispatch — running all checks regardless of changed paths"
             exit 0
@@ -73,15 +70,7 @@ jobs:
                 "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
             BASE="${{ github.event.before }}"
           fi
-          CHANGED=$(git diff --name-only "$BASE" HEAD 2>/dev/null || printf 'app/\nterraform/\n')
-
-          if echo "$CHANGED" | grep -q "^app/"; then
-            echo "app=true"  >> $GITHUB_OUTPUT
-            echo "📦 App code changed"
-          else
-            echo "app=false" >> $GITHUB_OUTPUT
-            echo "⏭️  No app changes"
-          fi
+          CHANGED=$(git diff --name-only "$BASE" HEAD 2>/dev/null || printf 'terraform/\n')
 
           if echo "$CHANGED" | grep -qE "^terraform/|^\.github/"; then
             echo "infra=true"  >> $GITHUB_OUTPUT
@@ -90,225 +79,6 @@ jobs:
             echo "infra=false" >> $GITHUB_OUTPUT
             echo "⏭️  No infra changes"
           fi
-
-  # Auto-formats with black/isort and commits the result, then runs flake8,
-  # bandit and pip-audit.
-  lint:
-    name: Lint & Static Analysis
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: detect-changes
-    if: needs.detect-changes.outputs.app_changed == 'true'
-
-    permissions:
-      contents: write # needed to push auto-format commits
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          ref: ${{ github.head_ref || github.ref_name }}
-          fetch-depth: 2
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: "pip"
-
-      - name: Install lint dependencies
-        run: pip install flake8 black isort bandit pip-audit
-
-      - name: Auto-format with black and isort
-        run: |
-          cd app
-          black .
-          isort .
-
-      - name: Commit formatting changes (if any)
-        run: |
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global user.name "github-actions[bot]"
-          if ! git diff --quiet; then
-            git add -A
-            git commit -m "style: apply black and isort formatting [skip ci]"
-            git push
-            echo "✅ Formatting fixes committed and pushed"
-          else
-            echo "✅ No formatting changes needed"
-          fi
-
-      - name: Run flake8
-        run: flake8 app/ --max-line-length=120 --exclude=migrations/
-
-      - name: Run bandit (security scan)
-        # No -x exclusion needed: tests live at app/tests/, outside the
-        # scanned app/src/ tree entirely — a stale app/src/tests/ exclusion
-        # excluded nothing and was silently dead.
-        run: bandit -r app/src/ -ll
-        continue-on-error: true
-
-      - name: Run pip-audit (dependency vulnerability scan)
-        # Reads requirements.txt directly. Non-blocking.
-        # See docs/design-decisions.md#non-blocking-security-scanners
-        run: pip-audit --requirement app/requirements.txt --desc
-        continue-on-error: true
-
-  # Runs against live postgres and redis service containers.
-  # Parallel with docker-build; both need lint to pass first.
-  test:
-    name: Run Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: [detect-changes, lint]
-    # Only run when app code changed AND lint passed
-    if: |
-      !cancelled() &&
-      needs.detect-changes.outputs.app_changed == 'true' &&
-      (needs.lint.result == 'success' || needs.lint.result == 'skipped')
-
-    services:
-      postgres:
-        image: postgres:15-alpine
-        env:
-          POSTGRES_DB: nexusdeploy_test
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 3s
-          --health-retries 5
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: "pip"
-
-      - name: Install dependencies
-        run: pip install -r app/requirements.txt
-
-      - name: Run tests with coverage
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/nexusdeploy_test
-          REDIS_URL: redis://localhost:6379/15
-          SECRET_KEY: test-secret-key
-          JWT_SECRET_KEY: test-jwt-secret-key-minimum-32-bytes!!
-          ENV: testing
-        run: |
-          cd app
-          pytest tests/ -v \
-            --cov=src \
-            --cov-report=xml \
-            --cov-report=term-missing \
-            --cov-fail-under=85
-
-      - name: Upload coverage report
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
-        # Requires the CODECOV_TOKEN repo secret; best-effort so a missing
-        # token never fails the run.
-        continue-on-error: true
-        with:
-          files: app/coverage.xml
-          flags: unittests
-          fail_ci_if_error: false
-          token: ${{ secrets.CODECOV_TOKEN }}
-
-  # Builds and scans both images. Parallel with test.
-  docker-build:
-    name: Docker Build & Security Scan (${{ matrix.image }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    needs: [detect-changes, lint]
-    # Parallel with test — only needs lint to pass, not test
-    if: |
-      !cancelled() &&
-      needs.detect-changes.outputs.app_changed == 'true' &&
-      (needs.lint.result == 'success' || needs.lint.result == 'skipped')
-
-    # api and worker have separate Dockerfiles and package sets, so each needs
-    # its own scan. fail-fast: false lets one image still report when the
-    # other's build fails.
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - image: api
-            dockerfile: ./app/Dockerfile
-          - image: worker
-            dockerfile: ./app/Dockerfile.worker
-
-    permissions:
-      security-events: write
-      contents: read
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
-
-      - name: Build ${{ matrix.image }} image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
-        with:
-          context: ./app
-          file: ${{ matrix.dockerfile }}
-          push: false
-          load: true
-          tags: nexusdeploy-${{ matrix.image }}:${{ github.sha }}
-          # Per-image cache scope; a shared key lets the two builds overwrite
-          # each other's layers.
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
-
-      - name: Scan image with Grype
-        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
-        id: grype
-        with:
-          image: nexusdeploy-${{ matrix.image }}:${{ github.sha }}
-          fail-build: false
-          severity-cutoff: critical
-          output-format: sarif
-
-      - name: Display Grype scan summary
-        if: ${{ !cancelled() }}
-        run: |
-          echo "::group::Grype Scan Results (${{ matrix.image }})"
-          cat ${{ steps.grype.outputs.sarif }} \
-            | jq '.runs[].results[] | {ruleId, message: .message.text}' \
-            2>/dev/null || echo "No vulnerabilities found or sarif parse error"
-          echo "::endgroup::"
-        continue-on-error: true
-
-      - name: Upload Grype results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
-        # Skip when the scan produced no SARIF (e.g. the build failed).
-        # !cancelled() rather than always() so a superseded run stops here.
-        if: ${{ !cancelled() && steps.grype.outputs.sarif != '' }}
-        with:
-          sarif_file: ${{ steps.grype.outputs.sarif }}
-          # Code scanning keys results on (category, ref), so each image needs
-          # its own category or the second upload replaces the first.
-          # Changing these strings resets the alert history:
-          # see docs/design-decisions.md#grype-sarif-categories
-          category: grype-${{ matrix.image }}
-        continue-on-error: true
 
   # Always runs, no path gating — a single workflow-file edit is exactly what
   # this needs to catch, independent of what else changed.
@@ -472,7 +242,7 @@ jobs:
     name: CI Summary
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [detect-changes, lint, test, docker-build, terraform-lint, workflow-lint, secrets-scan]
+    needs: [detect-changes, terraform-lint, workflow-lint, secrets-scan]
     # !cancelled() rather than always(): a run cancelled by cancel-in-progress
     # must not count its cancelled jobs as passed and deploy a stale commit.
     if: ${{ !cancelled() }}
@@ -484,20 +254,9 @@ jobs:
       - name: Check all jobs passed
         run: |
           # A job result of 'skipped' means it wasn't needed — treat as pass
-          APP_CHANGED="${{ needs.detect-changes.outputs.app_changed }}"
           INFRA_CHANGED="${{ needs.detect-changes.outputs.infra_changed }}"
 
           FAILED=false
-
-          # Check app jobs only if app changed
-          if [[ "$APP_CHANGED" == "true" ]]; then
-            if [[ "${{ needs.lint.result }}"         == "failure" ]] || \
-               [[ "${{ needs.test.result }}"         == "failure" ]] || \
-               [[ "${{ needs.docker-build.result }}" == "failure" ]]; then
-              echo "❌ App CI failed — deploy will not run"
-              FAILED=true
-            fi
-          fi
 
           # Check infra jobs only if infra changed
           if [[ "$INFRA_CHANGED" == "true" ]]; then
@@ -523,7 +282,6 @@ jobs:
           fi
 
           echo "✅ All required CI checks passed"
-          echo "   App jobs:   ${{ needs.lint.result }} / ${{ needs.test.result }} / ${{ needs.docker-build.result }}"
           echo "   Infra jobs: ${{ needs.terraform-lint.result }}"
           echo "   Workflow quoting check: ${{ needs.workflow-lint.result }}"
           echo "   Secret scan: ${{ needs.secrets-scan.result }}"
@@ -560,7 +318,6 @@ jobs:
               inputs: {
                 environment,
                 action: 'apply',
-                app_changed: '${{ needs.detect-changes.outputs.app_changed }}',
                 // Empty on a plain push (github.event.inputs doesn't exist for
                 // that event) — deploy.yml's own default then applies.
                 drain_minutes: '${{ github.event.inputs.drain_minutes }}'

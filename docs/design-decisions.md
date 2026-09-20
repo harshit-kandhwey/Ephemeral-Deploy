@@ -1466,3 +1466,57 @@ justified at this codebase's size. Revisit if the omit list ever grows
 past a handful of genuinely-trivial entry points, where "verifiable by
 reading them" stops being a credible substitute for real tooling.
 
+
+### App repo split
+<a id="app-repo-split"></a><a id="app-infra-contract"></a>
+
+The Flask workload moved to its own repository, **Nexusdeploy-App**, so it can
+be reused in other projects while this repo stays the infrastructure and
+pipeline. History came with it (`git filter-repo --subdirectory-filter app`
+on a scratch clone, plus a merge of `archive`, so the original pre-squash
+commits are reachable there too).
+
+**How the infra repo gets the images — "Option B".** `deploy.yml` resolves the
+revision pinned in `app-ref.txt` (a tag or 40-char SHA, never a branch, so a
+deploy is reproducible; the `app_ref` dispatch input overrides it for one run),
+checks that revision out into `./app`, and runs the *same* build → ECR push →
+cosign sign → syft SBOM → digest steps as before. Chosen over having the app
+repo build and push because it changes the least: OIDC trust, the signing
+identity and the digest plumbing are untouched, so one budgeted staging deploy
+can verify it. The cleaner end state (the app repo builds/signs/pushes and this
+repo only consumes digests) needs a second OIDC role and is a later phase.
+
+**"Did the app change?" is now a tag lookup, not a path diff.** There is no
+`app/` to diff any more. Images are tagged with the *app* commit SHA, so a
+deploy builds only when ECR lacks an image for that exact revision in both
+repositories (covering a first deploy and a torn-down environment); otherwise it
+reuses that revision's digests. `app_changed=true` remains a manual "force
+rebuild". A side effect worth knowing: an image tag now names what is *inside*
+the image (the app commit), while the run summary and `git_commit` Terraform
+variable still record the infra commit.
+
+**CI moved with the code.** `ci.yml` no longer lints, tests, or builds the app;
+Nexusdeploy-App's own CI does. This repo keeps terraform-lint, workflow-lint,
+the blocking secret scan, and the `CI Summary` gate (job name unchanged — the
+`main` ruleset requires it). Lost here on purpose: Grype scanning of the images
+in CI; it should be re-added to the app repo's CI (or a pre-deploy scan step).
+
+**The contract between the two repos.** The infra repo depends on the app only
+through these — change them in both repos together:
+
+| Contract | Detail |
+|---|---|
+| Images | `Dockerfile` (API, gunicorn) and `Dockerfile.worker` (Celery); distroless base, so `ENTRYPOINT` is the interpreter and ECS command overrides start with `-m` or a script path, never `python` |
+| Health | `GET /health` (DB + Redis, used for task health and blue-green polling), `/ready`, `/metrics` |
+| One-shot ECS tasks | `-m src.init_db`, `-m src.smoke_test`, `-m src.queue_depth_check` |
+| Worker start | `/entrypoint_worker.py celery -A src.celery_worker:celery worker ...`; runs `create_schema()` (advisory-locked Alembic upgrade) on start |
+| Env vars | `DATABASE_URL`, `REDIS_URL`, `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `SECRET_KEY`, `JWT_SECRET_KEY`, `ENV`, `CELERY_TASK_QUEUE`, `SEED_*_PASSWORD`, optional `OTEL_EXPORTER_OTLP_ENDPOINT` |
+
+**Not done / not yet verified.** `app-ref.txt` is `UNSET` on purpose (the deploy
+fails closed with a clear error) until Nexusdeploy-App is pushed and a revision
+is pinned. `./app` still exists in this repo until that path is proven, because
+deleting it first would break every deploy. The checkout-build-push path has
+not run against real AWS (no live deploy under the budget freeze); the
+ref-resolution step was exercised locally against a public repo's tags. A
+private app repo needs an `APP_REPO_TOKEN` secret; a public one works with the
+default token.

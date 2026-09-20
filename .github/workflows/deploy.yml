@@ -16,10 +16,14 @@ on:
         type: choice
         options: [plan, apply]
         default: apply
-      app_changed:
-        description: "Whether app code changed (passed from CI)"
+      app_ref:
+        description: "Nexusdeploy-App tag or 40-char commit SHA to deploy (blank = the revision pinned in app-ref.txt). An image already in ECR for that revision is reused, not rebuilt."
         required: false
-        default: "false" # CI always passes the real value; manual runs skip the build when ECR already has images
+        default: ""
+      app_changed:
+        description: "Force an image rebuild even if ECR already has this app revision (blank/false = reuse it)"
+        required: false
+        default: "false"
       drain_minutes:
         description: "Override the old-slot drain wait, in minutes (blank = environment default: staging 60, prod 1440). Only affects staging/prod — dev has no blue-green drain."
         required: false
@@ -54,7 +58,8 @@ jobs:
     outputs:
       environment: ${{ steps.ctx.outputs.environment }}
       tf_action: ${{ steps.ctx.outputs.tf_action }}
-      image_tag: ${{ github.sha }}
+      image_tag: ${{ steps.appref.outputs.app_sha }}
+      app_sha: ${{ steps.appref.outputs.app_sha }}
       app_changed: ${{ steps.changed.outputs.app_changed }}
       current_api: ${{ steps.current_images.outputs.api_image }}
       current_worker: ${{ steps.current_images.outputs.worker_image }}
@@ -79,56 +84,86 @@ jobs:
           echo "📦 Environment: ${{ github.event.inputs.environment }}"
           echo "⚙️  Action:      ${{ github.event.inputs.action }}"
 
+      # The app lives in its own repo (Nexusdeploy-App). Images are tagged with
+      # the app commit SHA, so "did the app change?" is simply "does ECR already
+      # hold an image for this exact revision?" — no path diff, and it also
+      # covers a first deploy (empty ECR) and a torn-down environment.
+      - name: Resolve app revision
+        id: appref
+        env:
+          INPUT_REF: ${{ github.event.inputs.app_ref }}
+          APP_REPO: harshit-kandhwey/Nexusdeploy-App
+        run: |
+          REF="$INPUT_REF"
+          if [[ -z "$REF" ]]; then
+            REF=$(grep -v '^[[:space:]]*#' app-ref.txt | grep -v '^[[:space:]]*$' | head -1 | tr -d '[:space:]')
+          fi
+          if [[ -z "$REF" || "$REF" == "UNSET" ]]; then
+            echo "::error::No app revision pinned. Set app-ref.txt to a Nexusdeploy-App tag or commit SHA, or pass the app_ref input."
+            exit 1
+          fi
+          if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+            SHA="$REF"
+          else
+            # Tags only (annotated tags resolve via the peeled ^{} line); a
+            # branch name would make the deploy non-reproducible.
+            SHA=$(git ls-remote "https://github.com/$APP_REPO.git" "refs/tags/$REF^{}" "refs/tags/$REF" | head -1 | cut -f1)
+          fi
+          if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Could not resolve app ref '$REF' to a commit SHA in $APP_REPO (must be a tag or a 40-char SHA)."
+            exit 1
+          fi
+          echo "app_sha=$SHA" >> $GITHUB_OUTPUT
+          echo "📦 App revision: $REF → $SHA"
+
       - name: Detect changed files
         id: changed
+        env:
+          ENV: ${{ github.event.inputs.environment }}
+          APP_SHA: ${{ steps.appref.outputs.app_sha }}
+          FORCE_BUILD: ${{ github.event.inputs.app_changed }}
         run: |
-          # An empty ECR forces a build even when app_changed is false — there
-          # is no existing image to fall back to.
-          APP_CHANGED="${{ github.event.inputs.app_changed }}"
-          ENV="${{ github.event.inputs.environment }}"
+          has_image() {
+            aws ecr describe-images --repository-name "$1" --image-ids imageTag="$APP_SHA" \
+              --region ${{ env.AWS_REGION }} --query 'length(imageDetails)' --output text 2>/dev/null || echo "0"
+          }
 
-          if [[ -z "$APP_CHANGED" || "$APP_CHANGED" == "true" ]]; then
-            # App code changed or manual trigger — always build
+          if [[ "$FORCE_BUILD" == "true" ]]; then
             echo "app_changed=true" >> $GITHUB_OUTPUT
-            echo "🔨 App changed — image build required"
+            echo "🔨 Rebuild forced"
+          elif [[ "$(has_image "nexusdeploy-api-$ENV")" == "1" && "$(has_image "nexusdeploy-worker-$ENV")" == "1" ]]; then
+            echo "app_changed=false" >> $GITHUB_OUTPUT
+            echo "⏭️  ECR already holds $APP_SHA for both images — skipping build"
           else
-            # No app change — check if ECR has any images
-            IMAGE_COUNT=$(aws ecr describe-images \
-              --repository-name "nexusdeploy-api-$ENV" \
-              --region ${{ env.AWS_REGION }} \
-              --query 'length(imageDetails)' \
-              --output text 2>/dev/null || echo "0")
-
-            if [[ "$IMAGE_COUNT" == "0" || -z "$IMAGE_COUNT" ]]; then
-              echo "app_changed=true" >> $GITHUB_OUTPUT
-              echo "⚠️  ECR empty — forcing build despite no app code change"
-            else
-              echo "app_changed=false" >> $GITHUB_OUTPUT
-              echo "⏭️  No app changes + images exist in ECR — skipping build"
-            fi
+            echo "app_changed=true" >> $GITHUB_OUTPUT
+            echo "🔨 No image for $APP_SHA in ECR — build required"
           fi
 
       - name: Get current image URIs (infra-only deploy)
         id: current_images
-        # Runs only when unchanged with images already in ECR (guaranteed by the
-        # detect step); resolves the most recently pushed image's DIGEST, not
-        # its tag — see docs/design-decisions.md#deploy-by-digest-not-by-tag.
+        # Runs only when ECR already holds this app revision (guaranteed by the
+        # detect step); resolves that revision's image DIGEST, not the tag —
+        # see docs/design-decisions.md#deploy-by-digest-not-by-tag.
         if: steps.changed.outputs.app_changed == 'false'
+        env:
+          ENV: ${{ github.event.inputs.environment }}
+          APP_SHA: ${{ steps.appref.outputs.app_sha }}
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           REGISTRY="$ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
-          ENV="${{ github.event.inputs.environment }}"
 
           API_DIGEST=$(aws ecr describe-images \
             --repository-name "nexusdeploy-api-$ENV" \
+            --image-ids imageTag="$APP_SHA" \
             --region ${{ env.AWS_REGION }} \
-            --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageDigest' \
+            --query 'imageDetails[0].imageDigest' \
             --output text 2>/dev/null || echo "")
 
           WORKER_DIGEST=$(aws ecr describe-images \
             --repository-name "nexusdeploy-worker-$ENV" \
+            --image-ids imageTag="$APP_SHA" \
             --region ${{ env.AWS_REGION }} \
-            --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageDigest' \
+            --query 'imageDetails[0].imageDigest' \
             --output text 2>/dev/null || echo "")
 
           if [[ -z "$API_DIGEST" || "$API_DIGEST" == "None" || -z "$WORKER_DIGEST" || "$WORKER_DIGEST" == "None" ]]; then
@@ -284,7 +319,16 @@ jobs:
       worker_image: ${{ steps.push.outputs.worker_image }}
 
     steps:
+      # The workload lives in Nexusdeploy-App. Checked out into ./app so the
+      # build commands below are unchanged. This job needs nothing else from
+      # this repo. A private app repo needs an APP_REPO_TOKEN secret.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: harshit-kandhwey/Nexusdeploy-App
+          ref: ${{ needs.setup.outputs.app_sha }}
+          path: app
+          token: ${{ secrets.APP_REPO_TOKEN || github.token }}
+          persist-credentials: false
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
@@ -305,7 +349,9 @@ jobs:
         env:
           REGISTRY: ${{ steps.ecr-login.outputs.registry }}
           ENV: ${{ needs.setup.outputs.environment }}
-          TAG: ${{ github.sha }}
+          # Tagged with the APP commit (not this repo's), so a tag names exactly
+          # what is inside the image and "already built?" is a tag lookup.
+          TAG: ${{ needs.setup.outputs.app_sha }}
         run: |
           # scope= is load-bearing: both builds default to the same gha cache
           # key, and with mode=max the second export overwrites the first, so
