@@ -611,13 +611,16 @@ DEPLOY_POLICY2=$(cat <<ENDPOLICY2
         "elasticache:CreateCacheCluster",
         "elasticache:CreateCacheParameterGroup",
         "elasticache:CreateCacheSubnetGroup",
+        "elasticache:CreateReplicationGroup",
         "elasticache:DeleteCacheCluster",
         "elasticache:DeleteCacheParameterGroup",
         "elasticache:DeleteCacheSubnetGroup",
+        "elasticache:DeleteReplicationGroup",
         "elasticache:Describe*",
         "elasticache:ListTagsForResource",
         "elasticache:ModifyCacheCluster",
         "elasticache:ModifyCacheSubnetGroup",
+        "elasticache:ModifyReplicationGroup",
         "elasticache:RemoveTagsFromResource"
       ],
       "Resource": "*"
