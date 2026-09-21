@@ -14,7 +14,7 @@ A clear and concise description of what the bug is.
 
 Which part of the system is affected?
 
-- [ ] Flask API (`app/`)
+- [ ] Flask API (report in Nexusdeploy-App)
 - [ ] Celery Worker / Beat
 - [ ] Terraform / AWS Infrastructure
 - [ ] CI/CD Pipeline (GitHub Actions)

@@ -1,3 +1,0 @@
-"""
-NexusDeploy project root package
-"""
