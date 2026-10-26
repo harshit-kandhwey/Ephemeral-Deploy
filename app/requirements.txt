@@ -35,7 +35,7 @@ gunicorn==26.2.0
 
 # Utilities
 marshmallow==4.3.0
-python-dateutil==2.9.0.post0
+python-dateutil==3.0.0
 
 # Testing
 pytest==9.1.1
