@@ -2,7 +2,7 @@
 # Compilers live here and nowhere else. Dependencies are installed into a venv
 # that the runtime stage copies wholesale, so gcc and the build headers never
 # reach the shipped image.
-FROM python:3.11-slim AS builder
+FROM python:3.12-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 
 # ── Stage 2: runtime ─────────────────────────────────────────────────────────
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # curl is required: the HEALTHCHECK below and the ECS container health check
 # both shell out to it. gcc, libpq-dev and postgresql-client are deliberately
