@@ -12,7 +12,7 @@ alembic==1.19.1
 
 # Redis & Celery
 redis==8.1.0
-celery==5.6.3
+celery==5.7.0
 
 # AWS — keep boto3 and botocore on the same version: boto3 X.Y.Z requires
 # botocore >=X.Y.Z,<X.(Y+1).0, so bumping one without the other is
