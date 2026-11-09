@@ -34,7 +34,7 @@ prometheus-client==0.26.0
 gunicorn==26.2.0
 
 # Utilities
-marshmallow==4.3.0
+marshmallow==4.4.0
 python-dateutil==2.9.0.post0
 
 # Testing
